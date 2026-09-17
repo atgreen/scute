@@ -1,11 +1,28 @@
 Source: scute
-Section: devel
+Section: admin
 Priority: optional
-Maintainer: Your Name <your@email.com>
-Build-Depends: debhelper (>= 13), sbcl, gcc, make
+Maintainer: Anthony Green <green@moxielogic.com>
+Build-Depends: debhelper-compat (= 13),
+               sbcl,
+               ocicl,
+               gcc,
+               make
+Standards-Version: 4.6.2
+Homepage: https://github.com/atgreen/scute
+Vcs-Browser: https://github.com/atgreen/scute
+Vcs-Git: https://github.com/atgreen/scute.git
+Rules-Requires-Root: no
 
 Package: scute
 Architecture: amd64
-Description: Scute
- A Common Lisp application.
-isp application.
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: run one command inside a deny-by-default Linux sandbox
+ Scute runs one local command inside a deny-by-default Linux sandbox built
+ from Landlock, namespaces, seccomp, and cgroup v2. It is a native sandbox
+ rather than a container or a virtual machine: one executable, no privileged
+ daemon, and a parent that establishes every requested control before it
+ releases the child that becomes the command.
+ .
+ A host that cannot provide a control the policy asks for gets an error
+ instead of a weaker sandbox. Scute shares the host kernel and does not claim
+ to contain kernel exploits.

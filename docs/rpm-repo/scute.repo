@@ -1,7 +1,7 @@
 [scute]
-name=Scute
-baseurl=https://OWNER.github.io/scute/rpm-repo
+name=Scute - deny-by-default Linux sandbox
+baseurl=https://atgreen.github.io/scute/rpm-repo
 enabled=1
 gpgcheck=1
 repo_gpgcheck=1
-gpgkey=https://OWNER.github.io/scute/rpm-repo/RPM-GPG-KEY-scute
+gpgkey=https://atgreen.github.io/scute/rpm-repo/RPM-GPG-KEY-scute

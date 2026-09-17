@@ -8,8 +8,9 @@
 ocicl/
 systems/
 
-# Build artifact
+# Build artifacts
 /scute
+/scute-sbom.spdx.json
 
 # Beads / Dolt files (added by bd init)
 .dolt/

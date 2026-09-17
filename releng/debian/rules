@@ -5,6 +5,7 @@
 
 override_dh_auto_build:
 	make
+	make sbom
 
 override_dh_auto_install:
 	mkdir -p debian/scute/usr/bin
@@ -16,5 +17,5 @@ override_dh_strip:
 	# Do not strip SBCL-based binaries as it corrupts the embedded core
 
 override_dh_auto_clean:
-	rm -f scute
+	rm -f scute scute-sbom.spdx.json
 	dh_auto_clean

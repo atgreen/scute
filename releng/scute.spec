@@ -1,12 +1,13 @@
 Name:           scute
 Version:        0.1.0
 Release:        1%{?dist}
-Summary:        Scute
+Summary:        Run one command inside a deny-by-default Linux sandbox
 
 License:        MIT
-URL:            https://github.com/OWNER/scute
+URL:            https://github.com/atgreen/scute
 Source0:        scute-%{version}.tar.gz
 
+# Disable debug packages and stripping since this is a Lisp binary with dumped image
 %global debug_package %{nil}
 %global _build_id_links none
 %global __strip /bin/true
@@ -15,17 +16,30 @@ Source0:        scute-%{version}.tar.gz
 %global __brp_strip_static_archive %{nil}
 
 BuildRequires:  sbcl
+BuildRequires:  ocicl
 BuildRequires:  gcc
 BuildRequires:  make
 
+# landrun becomes a hard requirement once the Landlock exec stage lands; scute
+# does not invoke it yet.
+
 %description
-Scute - a Common Lisp application.
+Scute runs one local command inside a deny-by-default Linux sandbox built from
+Landlock, namespaces, seccomp, and cgroup v2. It is a native sandbox rather
+than a container or a virtual machine: one executable, no privileged daemon,
+and a parent that establishes every requested control before it releases the
+child that becomes the command. A host that cannot provide a control the
+policy asks for gets an error instead of a weaker sandbox.
+
+Scute shares the host kernel and does not claim to contain kernel exploits.
 
 %prep
 %autosetup
 
 %build
+# Dependencies are vendored in the source tarball
 make
+make sbom
 
 %install
 install -D -m 0755 scute %{buildroot}%{_bindir}/scute
@@ -38,6 +52,5 @@ install -D -m 0644 scute-sbom.spdx.json %{buildroot}%{_datadir}/sbom/scute-%{ver
 %{_datadir}/sbom/scute-%{version}.spdx.json
 
 %changelog
--%{version}.spdx.json
-
-%changelog
+* Thu Sep 17 2026 Anthony Green <green@moxielogic.com> - 0.1.0-1
+- Initial RPM package for scute
