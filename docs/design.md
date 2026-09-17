@@ -35,7 +35,7 @@ made effective. Scute never applies file capabilities to sandbox children.
 
 ## Startup sequence
 
-1. Read the policy with `*read-eval*` bound to `nil` and validate its schema.
+1. Parse the policy as TOML and validate it against a closed schema.
 2. Resolve paths and the command into an immutable launch plan.
 3. Probe every requested kernel and runtime feature; any missing mandatory
    control aborts the launch.
@@ -62,57 +62,66 @@ No agent instruction executes until all requested controls report success.
 
 ## Policy
 
-Policies are data-only Common Lisp forms. Unknown forms, duplicate fields,
-read-time evaluation, invalid limits, empty commands, and paths escaping their
-declared base are errors.
+Policies are TOML documents. Unknown tables and keys, duplicate keys, values of
+the wrong type, invalid limits, empty commands, and relative paths climbing out
+of the directory Scute was invoked from are errors.
 
-```lisp
-(sandbox
-  (filesystem
-    (read "/usr" "/bin" "/lib" "/lib64" "/etc")
-    (read-write "."))
-  (network none)
-  (limits
-    (memory "2G")
-    (processes 256)
-    (cpu-percent 200))
-  (audit exec connect))
+```toml
+[filesystem]
+read = ["/usr", "/bin", "/lib", "/lib64", "/etc"]
+read-write = ["."]
+
+[network]
+mode = "none"
+
+[limits]
+memory = "2G"
+processes = 256
+cpu-percent = 200
+
+[audit]
+events = ["exec", "connect"]
 ```
 
-### Why s-expressions, and what the reader owes
+Every section lives in a table, including the one-key ones. TOML requires bare
+top-level keys to precede the first table header, and a policy whose meaning
+depends on the order its lines happen to be in is a policy waiting to be
+misread.
 
-TOML was considered and rejected on trust surface, not taste. A policy usually
-travels with the code being sandboxed: cloning a repository and running
-`scute run --policy ./scute.policy` means the file defining the boundary
-arrives from the same place as the thing being confined. The policy reader is
-therefore part of the boundary, and every Common Lisp TOML library available
-brings a parser generator and a date-time library with it, four to six systems
-of third-party parsing code to read a file that contains no dates. Scute's
-dependency set is deliberately small enough to audit, and the reader it already
-has can be made inert in a few dozen readable lines.
+### Why TOML, and what the reader owes
 
-That inertness is a requirement, not an aspiration. `*read-eval*` bound to
-`nil` is not sufficient on its own. The policy reader must:
+A policy usually travels with the code being sandboxed: cloning a repository and
+running `scute run --policy ./scute.policy` means the file defining the boundary
+arrives from the same place as the thing being confined. TOML cannot express
+evaluation at all, so a whole class of question -- what could this file persuade
+Scute to do? -- does not arise. It is also legible to reviewers who do not read
+Lisp, and writable by tools that do not run it. The cost is real and accepted
+deliberately: parsing TOML brings esrap, local-time, cl-unicode and their
+dependencies, and about two megabytes of binary.
 
-- read from a size-capped string rather than streaming an unbounded file;
-- use a locked custom readtable with `#` dispatch removed entirely, which
-  disposes of `#.` evaluation, the `#n(...)` length-prefixed vector allocation
-  bomb, `#*` and `#x` memory growth, and `#1=` circular structure that would
-  otherwise make validation walk forever;
-- bind `*read-eval*` to `nil`, `*read-base*` to 10 so that `256` cannot mean
-  something else, `*read-suppress*` to `nil`, and `*package*` to a throwaway
-  package so interning cannot touch Scute's own;
-- reject package-qualified symbols; and
-- validate the result against a closed schema, where anything unrecognized is
-  an error rather than an ignored form.
+Because the parser is part of the boundary, which parser matters. TOML 1.0
+forbids a duplicate key, and a parser that accepts one keeps whichever value it
+saw last: a policy saying `processes = 1` on one line and `processes = 99999` on
+another would then enforce something no reviewer agreed to. Scute parses with
+clop, which refuses duplicate keys and duplicate table headers. cl-toml accepts
+both silently, which is precisely why it is not used. A policy's meaning must
+not depend on which parser read it.
 
-A reader that does less than this is the wrong choice, and TOML's fixed grammar
-would be the better one.
+Beyond the parser, the reader must:
 
-The format stays a thin front end. Reading a policy produces the same internal
-declarations the launch plan already compiles, so a second front end -- TOML for
-pipelines that generate policies, should that day come -- is another reader over
-the same structures, not a change to enforcement.
+- read no more than a capped number of characters, which also bounds the
+  parser's own recursion on pathological nesting;
+- refuse any table or key the schema does not name, rather than ignoring it;
+- check the type of every value, so that `read = 7` is turned away rather than
+  half understood; and
+- refuse a policy whole when any part of it is wrong, never enforcing the part
+  it understood.
+
+Validation is where a policy acquires meaning, and a launch plan is where that
+meaning becomes fixed: paths canonical, command resolved, nothing yet created.
+A plan holds no kernel resources, so it can be printed for review -- `scute run
+--policy FILE --dry-run` does exactly that -- and compared for equality, which
+is how the tests pin down what a policy means.
 
 Filesystem permissions distinguish read, read-and-execute, read-write, and
 read-write-execute access. Network access is disabled in v0. Landlock setup is
@@ -160,8 +169,8 @@ therefore out of v0's scope, stated here rather than discovered later.
 
 - `src/conditions.lisp` defines stable setup, policy, enforcement, and child
   failure conditions.
-- `src/policy.lisp` owns policy structures, safe reading, validation, and
-  immutable launch-plan compilation.
+- `src/policy.lisp` owns policy structures, TOML reading, schema validation,
+  and immutable launch-plan compilation.
 - `src/linux.lisp` contains the small CFFI surface for `clone3`, namespace and
   process synchronization, capabilities, `prctl`, and wait-status handling.
 - `src/landlock.lisp` reports the kernel's Landlock ABI, compiles declared

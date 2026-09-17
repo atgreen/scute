@@ -29,6 +29,8 @@ the exit status can say what kind of failure it was."
   (handler-case (funcall thunk)
     (usage-error (condition)
       (die 64 "~A" condition))                    ; EX_USAGE, as clingon uses
+    (policy-error (condition)
+      (die 65 "~A" condition))                    ; EX_DATAERR: the policy is bad
     (child-failure (condition)
       (die (if (eq :child-execve (child-failure-operation condition)) 127 1)
            "~A" condition))
@@ -40,21 +42,23 @@ the exit status can say what kind of failure it was."
 
 ;;── run ────────────────────────────────────────────────────────────────────────
 
-(defparameter +policy-pending-message+
-  "Policy files are not implemented yet.  Describe the filesystem on the
-command line instead:
+(defparameter +nothing-declared-message+
+  "Say what the sandbox allows.  Either name a policy file:
+
+  --policy FILE
+
+or describe the filesystem on the command line:
 
   --read PATH                 read files and list directories beneath PATH
   --read-execute PATH         the same, plus execute
   --read-write PATH           read, write, create, delete, and rename beneath PATH
   --read-write-execute PATH   the same, plus execute
 
-Nothing outside those paths can be opened.  Resource limits and seccomp are
-not installed by this build.  To run with no filesystem restriction at all,
-say so with --namespaces-only."
-  "Said whenever someone asks for enforcement this build cannot provide.  A
-sandbox that quietly does less than it was asked for is worse than no sandbox,
-because it is believed.")
+Nothing outside those paths can be opened.  To run with no filesystem
+restriction at all, say so with --namespaces-only."
+  "Said when a caller asks for a sandbox without saying what it permits.  An
+unrestricted sandbox has to be asked for by name; it is not what forgetting an
+argument gets you.")
 
 (defparameter +filesystem-options+
   '((:read . "read") (:read-execute . "read-execute")
@@ -71,30 +75,43 @@ because it is believed.")
   (reporting-failures
    (run-command cmd)))
 
-(defun run-command (cmd)
+(defun launch-plan-for (cmd command)
+  "The plan CMD's options describe, however the caller chose to describe it."
   (let ((policy (clingon:getopt cmd :policy))
         (namespaces-only (clingon:getopt cmd :namespaces-only))
-        (rules (filesystem-rules cmd))
-        (command (clingon:command-arguments cmd)))
-    (cond ((null command)
-           (usage-error "no command given; see scute run --help"))
-          (policy
-           (usage-error +policy-pending-message+))
+        (rules (filesystem-rules cmd)))
+    (cond ((and policy rules)
+           (usage-error "--policy already says what the filesystem allows; drop the --read options or the policy"))
+          ((and policy namespaces-only)
+           (usage-error "--policy and --namespaces-only ask for different things"))
           ((and rules namespaces-only)
-           (usage-error "--namespaces-only asks for no filesystem restriction, ~
-                         but filesystem rules were given too"))
-          ((and (null rules) (not namespaces-only))
-           (usage-error +policy-pending-message+))
+           (usage-error "--namespaces-only asks for no filesystem restriction, but filesystem rules were given too"))
+          (policy
+           (compile-launch-plan (read-sandbox-policy policy) command))
+          ((or rules namespaces-only)
+           (compile-command-launch-plan command rules))
           (t
-           (uiop:quit (command-exit-status
-                       (run-namespaced-command command :filesystem rules))
-                      t)))))
+           (usage-error +nothing-declared-message+)))))
+
+(defun run-command (cmd)
+  (let ((command (clingon:command-arguments cmd)))
+    (when (null command)
+      (usage-error "no command given; see scute run --help"))
+    (let ((plan (launch-plan-for cmd command)))
+      (cond ((clingon:getopt cmd :dry-run)
+             ;; Print first, then refuse: the plan is what the caller asked to
+             ;; see, and a refusal explains itself better beside it.
+             (print-launch-plan plan)
+             (refuse-unimplemented-controls plan)
+             (uiop:quit 0 t))
+            (t
+             (uiop:quit (command-exit-status (run-launch-plan plan)) t))))))
 
 (defun make-run-command ()
   (clingon:make-command
    :name "run"
    :description "Run a command inside the sandbox"
-   :usage "[--read PATH ...] -- COMMAND [ARGUMENT ...]"
+   :usage "[--policy FILE | --read PATH ...] -- COMMAND [ARGUMENT ...]"
    :options (append
              (list (clingon:make-option
                     :string :long-name "policy" :key :policy
@@ -108,9 +125,16 @@ because it is believed.")
                      +filesystem-options+)
              (list (clingon:make-option
                     :flag :long-name "namespaces-only" :key :namespaces-only
-                    :description "Run with no filesystem restriction at all")))
+                    :description "Run with no filesystem restriction at all")
+                   (clingon:make-option
+                    :flag :short-name #\n :long-name "dry-run" :key :dry-run
+                    :description "Print the compiled plan and run nothing")))
    :handler #'run-handler
-   :examples '(("Run a shell that can read the system and write only here:"
+   :examples '(("Run a shell under a policy file:"
+                . "scute run --policy scute.policy -- /bin/sh -i")
+               ("Show what a policy would do, without running it:"
+                . "scute run --policy scute.policy --dry-run -- /bin/sh -i")
+               ("Run a shell that can read the system and write only here:"
                 . "scute run --read-execute /usr --read /etc --read-write . -- /bin/sh -i")
                ("Run with the process layer alone, filesystem unrestricted:"
                 . "scute run --namespaces-only -- /bin/sh -i"))))

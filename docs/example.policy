@@ -1,0 +1,26 @@
+# An example Scute policy: a command that may read the system, write only in
+# the directory Scute was invoked from, and reach no network.
+#
+#   scute run --policy example.policy -- /bin/sh -i
+#
+# Nothing outside these paths can be opened.  Most programs also want /proc,
+# and anything redirecting to /dev/null needs it named here.
+
+[filesystem]
+read-execute = ["/usr"]
+read = ["/etc", "/proc"]
+read-write = [".", "/dev/null"]
+
+[network]
+mode = "none"
+
+# Designed, but not installed by this build: asking for either of these makes
+# scute refuse to launch rather than enforce less than you asked for.
+#
+# [limits]
+# memory = "2G"
+# processes = 256
+# cpu-percent = 200
+#
+# [audit]
+# events = ["exec", "connect"]

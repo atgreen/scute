@@ -21,14 +21,14 @@ non-NIL."
   (exit-code   nil :read-only t)
   (term-signal nil :read-only t))
 
-;;── The launch plan ────────────────────────────────────────────────────────────
+;;── The child's resources ──────────────────────────────────────────────────────
 ;;
 ;;; Everything the child touches is allocated here, in the parent, before
 ;;; clone3.  Slots are untyped on purpose: SBCL stores a foreign pointer in a
 ;;; typed slot unboxed and would allocate a fresh box on every read, which the
 ;;; child cannot afford.
 
-(defstruct (launch-plan (:constructor %make-launch-plan))
+(defstruct (launch-resources (:constructor %make-launch-resources))
   command path argv envp envp-count landlock-ruleset
   sync-read sync-write status-read status-write
   sync-buffer status-buffer
@@ -71,35 +71,19 @@ non-NIL."
     (cffi:foreign-free (cffi:mem-aref vector :pointer index)))
   (cffi:foreign-free vector))
 
-(defun resolve-executable (name)
-  "Validate NAME as the program to execute.
-v0 requires an absolute path: a sandbox whose command is chosen by searching
-PATH is a sandbox whose command depends on the environment it inherited."
-  (unless (and (plusp (length name)) (char= #\/ (char name 0)))
-    (setup-error :resolve-executable
-                 :detail (format nil "~S is not an absolute path" name)))
-  name)
-
-(defun compile-launch-plan (command &key filesystem)
-  "Compile COMMAND into an immutable plan with every child resource preallocated.
-FILESYSTEM is a list of (KIND PATH) forms naming what the command may reach;
-with none, no Landlock ruleset is built and the filesystem is not restricted."
-  (unless (and (listp command) command (every #'stringp command))
-    (setup-error :compile-launch-plan
-                 :detail "command must be a non-empty list of strings"))
-  (let* ((path (resolve-executable (first command)))
-         (environment (sb-ext:posix-environ))
+(defun acquire-launch-resources (plan)
+  "Preallocate everything the child will need to enact PLAN.
+The Landlock ruleset is built here too: the parent owns every resource, and
+the child only uses what is already in its hands."
+  (let* ((command (launch-plan-command plan))
+         (path (first command))
+         (environment (launch-plan-environment plan))
          (last-capability (cap-last-cap))
-         (ruleset (compile-filesystem-ruleset
-                   (mapcar (lambda (form)
-                             (destructuring-bind (kind rule-path) form
-                               (normalize-rule kind rule-path)))
-                           filesystem)
-                   path)))
+         (ruleset (compile-filesystem-ruleset (launch-plan-filesystem plan) path)))
     (multiple-value-bind (sync-read sync-write) (make-sync-pipe)
       (multiple-value-bind (status-read status-write) (make-sync-pipe)
         (multiple-value-bind (cap-header cap-data) (make-empty-capability-request)
-          (%make-launch-plan
+          (%make-launch-resources
            :command command
            :path (cffi:foreign-string-alloc path)
            :argv (foreign-string-vector command)
@@ -113,26 +97,28 @@ with none, no Landlock ruleset is built and the filesystem is not restricted."
            :cap-last last-capability
            :landlock-ruleset ruleset))))))
 
-(defun release-launch-plan (plan)
-  "Release every parent-side resource held by PLAN."
-  (dolist (fd (list (launch-plan-sync-read plan) (launch-plan-sync-write plan)
-                    (launch-plan-status-read plan) (launch-plan-status-write plan)
-                    (launch-plan-landlock-ruleset plan)))
+(defun release-launch-resources (resources)
+  "Release every parent-side resource RESOURCES holds."
+  (dolist (fd (list (launch-resources-sync-read resources)
+                    (launch-resources-sync-write resources)
+                    (launch-resources-status-read resources)
+                    (launch-resources-status-write resources)
+                    (launch-resources-landlock-ruleset resources)))
     (when (and fd (<= 0 fd)) (%close fd)))
-  (cffi:foreign-string-free (launch-plan-path plan))
-  (free-foreign-string-vector (launch-plan-argv plan)
-                              (length (launch-plan-command plan)))
-  (free-foreign-string-vector (launch-plan-envp plan)
-                              (launch-plan-envp-count plan))
-  (dolist (pointer (list (launch-plan-sync-buffer plan)
-                         (launch-plan-status-buffer plan)
-                         (launch-plan-cap-header plan)
-                         (launch-plan-cap-data plan)))
+  (cffi:foreign-string-free (launch-resources-path resources))
+  (free-foreign-string-vector (launch-resources-argv resources)
+                              (length (launch-resources-command resources)))
+  (free-foreign-string-vector (launch-resources-envp resources)
+                              (launch-resources-envp-count resources))
+  (dolist (pointer (list (launch-resources-sync-buffer resources)
+                         (launch-resources-status-buffer resources)
+                         (launch-resources-cap-header resources)
+                         (launch-resources-cap-data resources)))
     (cffi:foreign-free pointer)))
 
 ;;── The child ──────────────────────────────────────────────────────────────────
 
-(defun run-child (plan)
+(defun run-child (resources)
   "Become the sandboxed command.  Never returns.
 
 This runs in the process clone3 created, which holds a copy of a Lisp heap no
@@ -140,43 +126,43 @@ other thread is maintaining.  It therefore makes foreign calls only: no
 allocation, no streams, no conditions, and nothing that could wake the garbage
 collector."
   (declare (optimize (speed 3) (safety 0) (debug 0)))
-  (let ((status-fd (launch-plan-status-write plan))
-        (status-buffer (launch-plan-status-buffer plan)))
+  (let ((status-fd (launch-resources-status-write resources))
+        (status-buffer (launch-resources-status-buffer resources)))
     (macrolet ((die (stage exit-code)
                  `(progn
                     (setf (cffi:mem-ref status-buffer :uint8 0) ,stage)
                     (%write status-fd status-buffer 1)
                     (%exit ,exit-code))))
-      (%close (launch-plan-sync-write plan))
+      (%close (launch-resources-sync-write resources))
       ;; Ask the kernel to kill this process if the supervisor dies.  Set
       ;; before the synchronization read, so a supervisor that dies at any
       ;; point either never releases the child or has already armed this.
       (when (minusp (%prctl +pr-set-pdeathsig+ +sigkill+ 0 0 0))
         (die +stage-pdeathsig+ +child-exit-setup-failed+))
-      (unless (= 1 (%read (launch-plan-sync-read plan)
-                          (launch-plan-sync-buffer plan) 1))
+      (unless (= 1 (%read (launch-resources-sync-read resources)
+                          (launch-resources-sync-buffer resources) 1))
         (die +stage-sync+ +child-exit-sync-failed+))
-      (%close (launch-plan-sync-read plan))
+      (%close (launch-resources-sync-read resources))
       (when (minusp (%prctl +pr-cap-ambient+ +pr-cap-ambient-clear-all+ 0 0 0))
         (die +stage-clear-ambient+ +child-exit-setup-failed+))
-      (let ((last-capability (launch-plan-cap-last plan)))
+      (let ((last-capability (launch-resources-cap-last resources)))
         (declare (type fixnum last-capability))
         (loop for capability of-type fixnum from 0 to last-capability
               do (when (minusp (%prctl +pr-capbset-drop+ capability 0 0 0))
                    (die +stage-drop-bounding+ +child-exit-setup-failed+))))
-      (when (minusp (%capset (launch-plan-cap-header plan)
-                             (launch-plan-cap-data plan)))
+      (when (minusp (%capset (launch-resources-cap-header resources)
+                             (launch-resources-cap-data resources)))
         (die +stage-capset+ +child-exit-setup-failed+))
       (when (minusp (%prctl +pr-set-no-new-privs+ 1 0 0 0))
         (die +stage-no-new-privs+ +child-exit-setup-failed+))
       ;; Landlock last, and only after no_new_privs: restrict_self requires it.
-      (let ((ruleset (launch-plan-landlock-ruleset plan)))
+      (let ((ruleset (launch-resources-landlock-ruleset resources)))
         (when ruleset
           (when (minusp (%landlock-restrict-self ruleset))
             (die +stage-landlock+ +child-exit-setup-failed+))
           (%close ruleset)))
-      (%execve (launch-plan-path plan) (launch-plan-argv plan)
-               (launch-plan-envp plan))
+      (%execve (launch-resources-path resources) (launch-resources-argv resources)
+               (launch-resources-envp resources))
       (die +stage-execve+ +child-exit-exec-failed+))))
 
 ;;── The parent ─────────────────────────────────────────────────────────────────
@@ -202,12 +188,12 @@ embedding Scute in a larger image must reinstate its own handlers."
 (defmacro with-forwarded-signals ((pid) &body body)
   `(call-with-forwarded-signals ,pid (lambda () ,@body)))
 
-(defun read-child-stage (plan)
+(defun read-child-stage (resources)
   "Wait for the child to reach execve.
 Returns NIL once the close-on-exec status pipe reports the exec, or the stage
 byte the child wrote just before giving up."
-  (let ((fd (launch-plan-status-read plan))
-        (buffer (launch-plan-status-buffer plan)))
+  (let ((fd (launch-resources-status-read resources))
+        (buffer (launch-resources-status-buffer resources)))
     (loop for count = (%read fd buffer 1)
           do (cond ((zerop count) (return nil))
                    ((= count 1) (return (cffi:mem-ref buffer :uint8 0)))
@@ -227,37 +213,31 @@ byte the child wrote just before giving up."
       (make-sandbox-result pid (exit-status status) nil)
       (make-sandbox-result pid nil (termination-signal status))))
 
-(defun supervise-child (plan pid)
+(defun supervise-child (resources pid)
   "Release PID into the sandbox and supervise it until it ends.
 Returns its raw wait status, and the stage it failed at if it never reached
 the command.  Reaping PID is this function's job alone: nothing above it may
 signal a pid that has already been collected."
   (with-forwarded-signals (pid)
-    (%close (launch-plan-sync-read plan))
-    (setf (launch-plan-sync-read plan) nil)
-    (unless (= 1 (%write (launch-plan-sync-write plan)
-                         (launch-plan-sync-buffer plan) 1))
+    (%close (launch-resources-sync-read resources))
+    (setf (launch-resources-sync-read resources) nil)
+    (unless (= 1 (%write (launch-resources-sync-write resources)
+                         (launch-resources-sync-buffer resources) 1))
       (setup-error :release-child :errno (errno)))
-    (%close (launch-plan-sync-write plan))
-    (setf (launch-plan-sync-write plan) nil)
-    (%close (launch-plan-status-write plan))
-    (setf (launch-plan-status-write plan) nil)
-    (let ((stage (read-child-stage plan)))
+    (%close (launch-resources-sync-write resources))
+    (setf (launch-resources-sync-write resources) nil)
+    (%close (launch-resources-status-write resources))
+    (setf (launch-resources-status-write resources) nil)
+    (let ((stage (read-child-stage resources)))
       (values (wait-for-child pid) stage))))
 
-(defun run-namespaced-command (command &key filesystem)
-  "Run COMMAND inside fresh user, mount, PID, UTS, and network namespaces.
+(defun run-launch-plan (plan)
+  "Enact PLAN: launch its command in the sandbox it describes and supervise it.
 
-COMMAND is a list whose first element is an absolute executable path.  The
-child becomes PID 1 of its namespace with no capabilities in any set and
-no_new_privs set; the parent forwards terminating signals to it and returns a
-SANDBOX-RESULT describing how it ended.
-
-FILESYSTEM is a list of (KIND PATH) forms -- :READ, :READ-EXECUTE,
-:READ-WRITE, or :READ-WRITE-EXECUTE beneath PATH -- installed as one Landlock
-ruleset the child enforces on itself just before it execs.  With no rules the
-filesystem is not restricted."
-  (let ((plan (compile-launch-plan command :filesystem filesystem)))
+Everything PLAN asks for is established before the command exists.  A control
+PLAN requests that this build cannot install is an error, not an omission."
+  (refuse-unimplemented-controls plan)
+  (let ((resources (acquire-launch-resources plan)))
     (unwind-protect
          (progn
            (finish-output *standard-output*)
@@ -265,12 +245,12 @@ filesystem is not restricted."
            (let ((pid (clone3 +sandbox-clone-flags+))
                  (reaped nil))
              (when (zerop pid)
-               (run-child plan))            ; never returns
+               (run-child resources))       ; never returns
              (unwind-protect
                   (progn
                     (write-identity-maps pid)
                     (drop-all-capabilities)
-                    (multiple-value-bind (status stage) (supervise-child plan pid)
+                    (multiple-value-bind (status stage) (supervise-child resources pid)
                       (setf reaped t)
                       (when stage
                         (error 'child-failure :operation (child-stage-name stage)
@@ -282,4 +262,18 @@ filesystem is not restricted."
                (unless reaped
                  (%kill pid +sigkill+)
                  (%waitpid pid (cffi:null-pointer) 0)))))
-      (release-launch-plan plan))))
+      (release-launch-resources resources))))
+
+(defun run-namespaced-command (command &key filesystem directory)
+  "Run COMMAND in the sandbox that FILESYSTEM describes.
+
+COMMAND is a list whose first element is an absolute executable path.  The
+child becomes PID 1 of fresh user, mount, pid, uts, and network namespaces
+with no capabilities in any set and no_new_privs set; the parent forwards
+terminating signals to it and returns a SANDBOX-RESULT describing how it
+ended.  FILESYSTEM is a list of (KIND PATH) forms compiled into one Landlock
+ruleset; with none, the filesystem is not restricted.
+
+This is the path a caller with no policy file takes.  It builds the same
+launch plan a policy would and enacts it."
+  (run-launch-plan (compile-command-launch-plan command filesystem directory)))

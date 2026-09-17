@@ -24,7 +24,7 @@ Scute is v0 and unfinished, but it runs. Two layers are in place — the process
 layer (fresh user, mount, PID, UTS, and network namespaces; every capability
 set emptied; `no_new_privs`; the sandbox dies with its supervisor) and the
 filesystem layer, one Landlock ruleset the child enforces on itself just before
-it execs. Policy files are not implemented yet, so describe the filesystem on
+it execs. Policy files work, and so does describing the filesystem directly on
 the command line:
 
 ```sh
@@ -42,28 +42,40 @@ scute run --namespaces-only -- COMMAND
 `scute doctor` reports what the host can enforce and exits non-zero if
 something mandatory is absent.
 
-Still to come: policy files, cgroup-v2 resource limits, the seccomp filter, and
-optional eBPF auditing. `docs/design.md` is the architecture. The task graph
+A policy may already ask for resource limits or auditing, and Scute will refuse
+to launch rather than pretend: those controls are designed but not built, and
+silently skipping one would hand back a weaker sandbox than the policy asked
+for.
+
+Still to come: cgroup-v2 resource limits, the seccomp filter, and optional eBPF
+auditing. `docs/design.md` is the architecture. The task graph
 lives in [beads](https://github.com/steveyegge/beads); `bd ready` shows what is
 claimable.
 
 ## Policy
 
-Policies are data-only Common Lisp forms, read with `*read-eval*` bound to
-`nil` and validated before anything privileged happens.
+A policy is a TOML document, validated whole before anything privileged
+happens. Anything the schema does not name -- an unknown table, an unknown key,
+a value of the wrong shape -- is an error rather than a line quietly ignored.
 
-```lisp
-(sandbox
-  (filesystem
-    (read "/usr" "/bin" "/lib" "/lib64" "/etc")
-    (read-write "."))
-  (network none)
-  (limits
-    (memory "2G")
-    (processes 256)
-    (cpu-percent 200))
-  (audit exec connect))
+```toml
+[filesystem]
+read-execute = ["/usr"]
+read = ["/etc"]
+read-write = ["."]
+
+[network]
+mode = "none"
 ```
+
+```sh
+scute run --policy scute.policy -- /bin/sh -i
+scute run --policy scute.policy --dry-run -- /bin/sh -i   # show, run nothing
+```
+
+`--dry-run` prints the compiled plan: canonical paths, the command that will
+actually run, and the directory it runs in. Reviewing that is cheaper than
+reasoning about what a policy implies.
 
 ## Building
 

@@ -45,6 +45,31 @@ its only caller."
              (write-string (usage-error-detail condition) stream)))
   (:documentation "The command line asked for something Scute cannot do."))
 
+(define-condition policy-error (scute-error)
+  ((pathname :initarg :pathname :reader policy-error-pathname :initform nil)
+   (detail   :initarg :detail   :reader policy-error-detail))
+  (:report
+   (lambda (condition stream)
+     (format stream "~@[~A: ~]~A"
+             (policy-error-pathname condition)
+             (policy-error-detail condition))))
+  (:documentation "A policy could not be read, or did not say something Scute
+recognizes.  Policies are refused whole: Scute does not enforce the half of a
+policy it understood."))
+
+(define-condition control-not-implemented (scute-error)
+  ((control :initarg :control :reader control-not-implemented-control)
+   (detail  :initarg :detail  :reader control-not-implemented-detail
+            :initform nil))
+  (:report
+   (lambda (condition stream)
+     (format stream "This build cannot enforce ~A~@[: ~A~]"
+             (control-not-implemented-control condition)
+             (control-not-implemented-detail condition))))
+  (:documentation "The policy asked for a control that exists in the design but
+not yet in this build.  Silently skipping it would hand back a sandbox weaker
+than the one asked for."))
+
 (define-condition child-failure (scute-error)
   ((operation :initarg :operation :reader child-failure-operation)
    (status    :initarg :status    :reader child-failure-status :initform nil))
@@ -58,6 +83,10 @@ its only caller."
 (defun usage-error (detail)
   "Signal a USAGE-ERROR carrying DETAIL."
   (error 'usage-error :detail detail))
+
+(defun policy-error (detail &optional pathname)
+  "Signal a POLICY-ERROR carrying DETAIL."
+  (error 'policy-error :detail detail :pathname pathname))
 
 (defun setup-error (operation &key errno detail)
   "Signal a SANDBOX-SETUP-ERROR for OPERATION."

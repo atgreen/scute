@@ -186,8 +186,9 @@ a process that is PID 1 of its own."
              "expected exit ~D, got ~S" code result))))
 
 (deftest test-fail-closed-launch
-  "A command Scute cannot resolve is refused before any namespace is created."
+  "A command Scute cannot resolve is refused before any namespace is created.
+It is the caller's mistake rather than the host's, so it reads as one."
   (let ((condition (nth-value 1 (ignore-errors
                                  (call-scute 'run-namespaced-command '("sh"))))))
-    (check (typep condition 'scute:sandbox-setup-error)
+    (check (typep condition 'scute:usage-error)
            "a relative command was not refused, got ~S" condition)))

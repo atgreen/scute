@@ -16,8 +16,42 @@
            #:sandbox-setup-error-detail
            #:usage-error
            #:usage-error-detail
+           #:policy-error
+           #:policy-error-detail
+           #:policy-error-pathname
+           #:control-not-implemented
+           #:control-not-implemented-control
            #:child-failure
            #:child-failure-operation
+           ;; Policies and plans
+           #:read-sandbox-policy
+           #:validate-sandbox-policy
+           #:sandbox-policy
+           #:sandbox-policy-filesystem
+           #:sandbox-policy-network
+           #:sandbox-policy-limits
+           #:sandbox-policy-audit
+           #:filesystem-rule
+           #:filesystem-rule-kind
+           #:filesystem-rule-path
+           #:resource-limits
+           #:resource-limits-memory
+           #:resource-limits-processes
+           #:resource-limits-cpu-percent
+           #:audit-policy
+           #:audit-policy-events
+           #:compile-launch-plan
+           #:print-launch-plan
+           #:launch-plan
+           #:launch-plan-command
+           #:launch-plan-directory
+           #:launch-plan-filesystem
+           #:launch-plan-limits
+           #:launch-plan-audit
+           #:path-rule
+           #:path-rule-kind
+           #:path-rule-path
+           #:run-launch-plan
            ;; The kernel boundary
            #:run-namespaced-command
            #:sandbox-result

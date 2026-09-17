@@ -118,36 +118,22 @@ file; asking for the rest is an error, not a stronger sandbox."
 
 ;;── Rules ──────────────────────────────────────────────────────────────────────
 
-(defstruct (filesystem-rule
-            (:constructor make-filesystem-rule (kind path directoryp)))
-  "One path and the access granted beneath it."
+(defstruct (path-rule (:constructor make-path-rule (kind path directoryp)))
+  "A resolved rule: one canonical path, and the access granted beneath it.
+Policies declare FILESYSTEM-RULEs; compiling a launch plan resolves each into
+one of these, which is what the kernel is eventually told about."
   (kind nil :read-only t)
   (path nil :read-only t)
   (directoryp nil :read-only t))
 
 (defun rule-rights (rule abi)
   "The rights RULE grants, as the kernel will accept them for its path."
-  (kind-rights (filesystem-rule-kind rule) abi
-               :directoryp (filesystem-rule-directoryp rule)))
-
-(defun normalize-rule (kind path)
-  "Check KIND and PATH and resolve PATH to what the kernel will see.
-A relative path is resolved against the caller's directory, so a policy can
-say \".\" and mean here."
-  (unless (member kind +access-kinds+)
-    (usage-error (format nil "~S is not one of ~{~(~A~)~^, ~}" kind +access-kinds+)))
-  (unless (and (stringp path) (plusp (length path)))
-    (usage-error (format nil "~S is not a path" path)))
-  (let ((truename (probe-file path)))
-    (unless truename
-      (setup-error :resolve-rule-path
-                   :detail (format nil "~A does not exist" path)))
-    (make-filesystem-rule kind (namestring truename)
-                          (and (uiop:directory-exists-p truename) t))))
+  (kind-rights (path-rule-kind rule) abi
+               :directoryp (path-rule-directoryp rule)))
 
 (defun rule-covers-p (rule path)
   "Whether PATH lies at or beneath RULE's path."
-  (let ((base (string-right-trim "/" (filesystem-rule-path rule))))
+  (let ((base (string-right-trim "/" (path-rule-path rule))))
     (or (string= base path)
         (and (<= (length base) (length path))
              (string= base path :end2 (length base))
@@ -218,7 +204,7 @@ Returns the ruleset descriptor and the ABI version it was built for."
                                 (declare (ignore condition))
                                 (%close ruleset))))
           (dolist (rule rules)
-            (add-path-rule ruleset (filesystem-rule-path rule)
+            (add-path-rule ruleset (path-rule-path rule)
                            (rule-rights rule abi))))
         (values ruleset abi)))))
 

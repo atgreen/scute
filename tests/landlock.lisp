@@ -91,10 +91,11 @@ than surfacing as EACCES from execve and reading like a broken command."
            "the refusal did not name the missing execute access: ~S" condition)))
 
 (deftest test-rule-path-must-exist
-  "A rule naming a path that is not there is an error, not a rule to skip."
+  "A rule naming a path that is not there is an error, not a rule to skip.
+The fault is in the declaration, so it is reported as one."
   (let ((condition (nth-value 1 (ignore-errors
                                  (run-with-rules "true" '((:read "/no/such/path")))))))
-    (check (typep condition 'scute:sandbox-setup-error)
+    (check (typep condition 'scute:policy-error)
            "a nonexistent rule path was accepted, got ~S" condition)))
 
 (deftest test-unknown-access-kind-is-refused

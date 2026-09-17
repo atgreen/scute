@@ -9,12 +9,13 @@
   :author      "Anthony Green <anthony@atgreen.org>"
   :license     "MIT"
   :version     "0.1.0"
-  :depends-on (:cffi :clingon :version-string :whistler)
+  :depends-on (:cffi :clingon :clop :version-string :whistler)
   :serial t
   :components ((:file "src/package")
                (:file "src/conditions")
                (:file "src/linux")
                (:file "src/landlock")
+               (:file "src/policy")
                (:file "src/sandbox")
                (:file "src/doctor")
                (:file "src/main"))
@@ -35,6 +36,7 @@
                (:file "tests/harness")
                (:file "tests/namespace")
                (:file "tests/landlock")
+               (:file "tests/policy")
                (:file "tests/doctor"))
   :perform (test-op (o c)
              (declare (ignore o c))
