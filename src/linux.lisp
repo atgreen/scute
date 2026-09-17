@@ -41,6 +41,14 @@
 
 (defconstant +o-cloexec+ #o2000000)
 
+(defconstant +x-ok+ 1)
+(defconstant +w-ok+ 2)
+
+;;; landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION) answers
+;;; the ABI version the running kernel supports.
+(defconstant +sys-landlock-create-ruleset+ 444)
+(defconstant +landlock-create-ruleset-version+ 1)
+
 (defconstant +pr-set-pdeathsig+           1)
 (defconstant +pr-capbset-drop+           24)
 (defconstant +pr-set-no-new-privs+       38)
@@ -72,7 +80,7 @@
 ;;; inline so that the child path makes foreign calls and nothing else: no
 ;;; allocation, no streams, no condition system, no GC.
 
-(declaim (inline %close %read %write %prctl %capset %execve %exit %kill))
+(declaim (inline %close %read %write %prctl %capset %execve %exit %kill %access))
 
 (defun %close (fd)
   (cffi:foreign-funcall "close" :int fd :int))
@@ -98,6 +106,9 @@
 
 (defun %kill (pid signal)
   (cffi:foreign-funcall "kill" :int pid :int signal :int))
+
+(defun %access (path mode)
+  (cffi:foreign-funcall "access" :string path :int mode :int))
 
 (defun %waitpid (pid status-pointer options)
   (cffi:foreign-funcall "waitpid" :int pid :pointer status-pointer :int options :int))
@@ -218,3 +229,18 @@ Returns the read and write descriptors."
     (when (minusp (cffi:foreign-funcall "pipe2" :pointer fds :int +o-cloexec+ :int))
       (setup-error :pipe2 :errno (errno)))
     (values (cffi:mem-aref fds :int 0) (cffi:mem-aref fds :int 1))))
+
+(defun landlock-abi-version ()
+  "The Landlock ABI version this kernel supports, or NIL if it has none."
+  (let ((version (cffi:foreign-funcall "syscall"
+                                       :long +sys-landlock-create-ruleset+
+                                       :pointer (cffi:null-pointer)
+                                       :unsigned-long 0
+                                       :unsigned-long +landlock-create-ruleset-version+
+                                       :long)))
+    (when (plusp version) version)))
+
+(defun library-loadable-p (soname)
+  "Whether SONAME can be resolved and loaded right now."
+  (not (cffi:null-pointer-p
+        (cffi:foreign-funcall "dlopen" :string soname :int 2 :pointer))))

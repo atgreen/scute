@@ -39,6 +39,12 @@ its only caller."
                (and errno (strerror errno))))))
   (:documentation "A mandatory sandbox control could not be established."))
 
+(define-condition usage-error (scute-error)
+  ((detail :initarg :detail :reader usage-error-detail))
+  (:report (lambda (condition stream)
+             (write-string (usage-error-detail condition) stream)))
+  (:documentation "The command line asked for something Scute cannot do."))
+
 (define-condition child-failure (scute-error)
   ((operation :initarg :operation :reader child-failure-operation)
    (status    :initarg :status    :reader child-failure-status :initform nil))
@@ -48,6 +54,10 @@ its only caller."
              (child-failure-operation condition)
              (child-failure-status condition))))
   (:documentation "The child died before it could become the requested command."))
+
+(defun usage-error (detail)
+  "Signal a USAGE-ERROR carrying DETAIL."
+  (error 'usage-error :detail detail))
 
 (defun setup-error (operation &key errno detail)
   "Signal a SANDBOX-SETUP-ERROR for OPERATION."

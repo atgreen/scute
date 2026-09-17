@@ -14,6 +14,8 @@
            #:sandbox-setup-error-operation
            #:sandbox-setup-error-errno
            #:sandbox-setup-error-detail
+           #:usage-error
+           #:usage-error-detail
            #:child-failure
            #:child-failure-operation
            ;; The kernel boundary
@@ -24,6 +26,14 @@
            #:sandbox-result-exit-code
            #:sandbox-result-term-signal
            #:capability-sets
-           #:namespace-id))
+           #:namespace-id
+           ;; Host diagnostics
+           #:doctor-report
+           #:print-doctor-report
+           #:probe
+           #:probe-name
+           #:probe-status
+           #:probe-detail
+           #:command-exit-status))
 
 (in-package #:scute)

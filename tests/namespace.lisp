@@ -192,7 +192,10 @@ a process that is PID 1 of its own."
       (check (eql 9 (call-scute 'sandbox-result-term-signal result))
              "expected death by SIGKILL, got ~S" result)
       (check (null (call-scute 'sandbox-result-exit-code result))
-             "a signal death reported an exit code, got ~S" result))))
+             "a signal death reported an exit code, got ~S" result)
+      (check (eql 137 (call-scute 'command-exit-status result))
+             "a SIGKILL death should exit 128+9, got ~S"
+             (call-scute 'command-exit-status result)))))
 
 (defun test-orphan-is-killed ()
   "The sandbox dies with its supervisor: no orphan survives a killed parent."
@@ -220,6 +223,51 @@ a process that is PID 1 of its own."
              (spawn-shell (format nil "pkill -KILL -x -f '~A'" command))))
       (delete-scratch pidfile))))
 
+(defun test-exit-status-mapping ()
+  "A command's own exit status is what Scute exits with."
+  (dolist (code '(0 1 7 42))
+    (let ((result (call-scute 'run-namespaced-command
+                              (list "/bin/sh" "-c" (format nil "exit ~D" code)))))
+      (check (eql code (call-scute 'command-exit-status result))
+             "expected exit ~D, got ~S" code result))))
+
+(defun probe-named (report name)
+  (find name report :key (lambda (probe) (call-scute 'probe-name probe))
+                    :test #'string=))
+
+(defun test-doctor-report ()
+  "Doctor answers every question it asks, and reports this host as able to
+launch a sandbox -- it just did, to find out."
+  (let ((report (call-scute 'doctor-report)))
+    (check (every (lambda (probe)
+                    (and (call-scute 'probe-name probe)
+                         (call-scute 'probe-detail probe)
+                         (member (call-scute 'probe-status probe) '(:ok :missing :info))))
+                  report)
+           "a probe answered nothing: ~S" report)
+    (let ((namespaces (probe-named report "user namespaces")))
+      (check namespaces "no user namespace probe in the report")
+      (check (eq :ok (and namespaces (call-scute 'probe-status namespaces)))
+             "this host cannot launch a sandbox: ~S" namespaces))
+    (dolist (name '("landlock" "landrun" "cgroup v2" "libseccomp"))
+      (check (probe-named report name) "no ~A probe in the report" name))))
+
+(defun test-doctor-fails-closed ()
+  "A missing mandatory control makes the report say no."
+  (let* ((missing (scute::make-probe "landlock" :missing "pretend this kernel has none"))
+         (present (scute::make-probe "kernel" :info "pretend"))
+         (verdict nil)
+         (output (with-output-to-string (stream)
+                   (setf verdict (call-scute 'print-doctor-report
+                                             (list present missing) stream)))))
+    (check (null verdict) "a missing mandatory control was reported as fine")
+    (check (search "landlock" output) "the report did not name the missing control")
+    (setf verdict (with-output-to-string (stream)
+                    (call-scute 'print-doctor-report (list present) stream)))
+    (check (call-scute 'print-doctor-report (list present)
+                       (make-broadcast-stream))
+           "a report with nothing missing was reported as failing")))
+
 (defun test-fail-closed-launch ()
   "A command Scute cannot resolve is refused before any namespace is created."
   (let ((condition (nth-value 1 (ignore-errors
@@ -243,6 +291,9 @@ a process that is PID 1 of its own."
                      test-signal-forwarding
                      test-signal-death
                      test-orphan-is-killed
+                     test-exit-status-mapping
+                     test-doctor-report
+                     test-doctor-fails-closed
                      test-fail-closed-launch))
   (when (plusp *failures*)
     (error "~D Scute test~:P failed" *failures*))

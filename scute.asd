@@ -15,6 +15,7 @@
                (:file "src/conditions")
                (:file "src/linux")
                (:file "src/sandbox")
+               (:file "src/doctor")
                (:file "src/main"))
   :in-order-to ((test-op (test-op "scute/test")))
   :build-operation "program-op"
