@@ -79,6 +79,41 @@ declared base are errors.
   (audit exec connect))
 ```
 
+### Why s-expressions, and what the reader owes
+
+TOML was considered and rejected on trust surface, not taste. A policy usually
+travels with the code being sandboxed: cloning a repository and running
+`scute run --policy ./scute.policy` means the file defining the boundary
+arrives from the same place as the thing being confined. The policy reader is
+therefore part of the boundary, and every Common Lisp TOML library available
+brings a parser generator and a date-time library with it, four to six systems
+of third-party parsing code to read a file that contains no dates. Scute's
+dependency set is deliberately small enough to audit, and the reader it already
+has can be made inert in a few dozen readable lines.
+
+That inertness is a requirement, not an aspiration. `*read-eval*` bound to
+`nil` is not sufficient on its own. The policy reader must:
+
+- read from a size-capped string rather than streaming an unbounded file;
+- use a locked custom readtable with `#` dispatch removed entirely, which
+  disposes of `#.` evaluation, the `#n(...)` length-prefixed vector allocation
+  bomb, `#*` and `#x` memory growth, and `#1=` circular structure that would
+  otherwise make validation walk forever;
+- bind `*read-eval*` to `nil`, `*read-base*` to 10 so that `256` cannot mean
+  something else, `*read-suppress*` to `nil`, and `*package*` to a throwaway
+  package so interning cannot touch Scute's own;
+- reject package-qualified symbols; and
+- validate the result against a closed schema, where anything unrecognized is
+  an error rather than an ignored form.
+
+A reader that does less than this is the wrong choice, and TOML's fixed grammar
+would be the better one.
+
+The format stays a thin front end. Reading a policy produces the same internal
+declarations the launch plan already compiles, so a second front end -- TOML for
+pipelines that generate policies, should that day come -- is another reader over
+the same structures, not a change to enforcement.
+
 Filesystem permissions distinguish read, read-and-execute, read-write, and
 read-write-execute access. Network access is disabled in v0. Landlock setup is
 fail-closed: rights are masked to the ABI the kernel reports, and a policy
