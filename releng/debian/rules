@@ -1,0 +1,20 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	make
+
+override_dh_auto_install:
+	mkdir -p debian/scute/usr/bin
+	mkdir -p debian/scute/usr/share/sbom
+	install -m 0755 scute debian/scute/usr/bin/
+	install -m 0644 scute-sbom.spdx.json debian/scute/usr/share/sbom/scute-$(shell dpkg-parsechangelog -S Version | sed 's/-.*//' ).spdx.json
+
+override_dh_strip:
+	# Do not strip SBCL-based binaries as it corrupts the embedded core
+
+override_dh_auto_clean:
+	rm -f scute
+	dh_auto_clean

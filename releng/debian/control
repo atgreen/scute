@@ -1,0 +1,11 @@
+Source: scute
+Section: devel
+Priority: optional
+Maintainer: Your Name <your@email.com>
+Build-Depends: debhelper (>= 13), sbcl, gcc, make
+
+Package: scute
+Architecture: amd64
+Description: Scute
+ A Common Lisp application.
+isp application.

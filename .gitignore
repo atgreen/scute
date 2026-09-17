@@ -1,0 +1,18 @@
+# Emacs and Lisp build droppings
+*~
+.#*
+\#*\#
+*.fasl
+
+# ocicl's local dependency tree; ocicl.csv pins it and is tracked
+ocicl/
+systems/
+
+# Build artifact
+/scute
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
