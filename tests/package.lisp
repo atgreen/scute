@@ -2,6 +2,6 @@
 
 (defpackage #:scute/tests
   (:use #:cl)
-  (:export #:run-tests))
+  (:export #:run-tests #:deftest))
 
 (in-package #:scute/tests)

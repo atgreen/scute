@@ -1,46 +1,8 @@
 ;;; SPDX-License-Identifier: MIT
+;;;
+;;; The kernel boundary: namespaces, capabilities, supervision, exit status.
 
 (in-package #:scute/tests)
-
-(defvar *failures* 0)
-(defvar *tests* 0)
-
-(defun check (truth format-control &rest format-arguments)
-  (unless truth
-    (incf *failures*)
-    (format *error-output* "FAIL: ~?~%" format-control format-arguments)))
-
-(defun scute-function (name)
-  (let ((symbol (find-symbol (string name) '#:scute)))
-    (unless (and symbol (fboundp symbol))
-      (error "Scute function ~A is not implemented" name))
-    (symbol-function symbol)))
-
-(defun call-scute (name &rest arguments)
-  (apply (scute-function name) arguments))
-
-(defun read-file-string (pathname)
-  (with-open-file (stream pathname :direction :input)
-    (let ((contents (make-string (file-length stream))))
-      (subseq contents 0 (read-sequence contents stream)))))
-
-(defun scratch-pathname (purpose)
-  (format nil "/tmp/scute-test-~A-~D" purpose (sb-posix:getpid)))
-
-(defun delete-scratch (&rest pathnames)
-  (dolist (pathname pathnames)
-    (ignore-errors (delete-file pathname))))
-
-(defun wait-until (predicate deciseconds)
-  "Poll PREDICATE every tenth of a second until it holds or the budget runs out."
-  (loop repeat deciseconds
-        thereis (funcall predicate)
-        do (sleep 1/10)))
-
-(defun process-matching-p (command)
-  "Whether any process on the host is running exactly COMMAND."
-  (zerop (cffi:foreign-funcall
-          "system" :string (format nil "pgrep -x -f '~A' >/dev/null 2>&1" command) :int)))
 
 (defparameter +namespaces+ '("user" "net" "pid" "mnt" "uts"))
 
@@ -57,7 +19,7 @@
            exit 37~%"
           report +namespaces+))
 
-(defun test-namespace-boundary ()
+(deftest test-namespace-boundary
   "The child is PID 1 of fresh namespaces, single-tasked, unrouted, and
 stripped of every capability, and its exit status arrives intact."
   (let ((report (scratch-pathname "namespace")))
@@ -87,7 +49,7 @@ stripped of every capability, and its exit status arrives intact."
                       "~A was not zero:~%~A" name contents))))
       (delete-scratch report))))
 
-(defun test-standard-streams ()
+(deftest test-standard-streams
   "The command inherits the supervisor's own stdout and stderr."
   (let ((out (scratch-pathname "out"))
         (err (scratch-pathname "err"))
@@ -125,21 +87,13 @@ stripped of every capability, and its exit status arrives intact."
                   "stderr was not preserved"))
       (delete-scratch out err))))
 
-(defun spawn-shell (command)
-  "Run COMMAND in a detached /bin/sh.
-system(3) keeps helper processes out of SBCL's own process machinery, which
-must stay clear of the supervisor's own wait and signal handling."
-  (cffi:foreign-funcall "system" :string
-                        (format nil "( ~A ) >/dev/null 2>&1 &" command)
-                        :int))
-
 (defun spawn-signaller (ready pid)
   "Send PID SIGTERM once the sandboxed command creates READY.
 Waiting on READY removes any race with the supervisor's signal handlers."
   (spawn-shell (format nil "while [ ! -e ~A ]; do sleep 0.05; done; kill -TERM ~D"
                        ready pid)))
 
-(defun test-signal-forwarding ()
+(deftest test-signal-forwarding
   "SIGTERM sent to the supervisor reaches the sandboxed command, which is free
 to trap it and choose its own exit status.
 
@@ -179,7 +133,7 @@ suite would go green having run no checks at all."
 (defparameter +signal-death-marker+ "99999.5"
   "An argument no other process on the host is plausibly running.")
 
-(defun test-signal-death ()
+(deftest test-signal-death
   "A command killed by a signal is reported as a signal death, not an exit.
 SIGKILL is the signal to use: it is the one an ancestor namespace can force on
 a process that is PID 1 of its own."
@@ -197,7 +151,7 @@ a process that is PID 1 of its own."
              "a SIGKILL death should exit 128+9, got ~S"
              (call-scute 'command-exit-status result)))))
 
-(defun test-orphan-is-killed ()
+(deftest test-orphan-is-killed
   "The sandbox dies with its supervisor: no orphan survives a killed parent."
   (let* ((marker "88888.5")
          (command (format nil "sleep ~A" marker))
@@ -223,7 +177,7 @@ a process that is PID 1 of its own."
              (spawn-shell (format nil "pkill -KILL -x -f '~A'" command))))
       (delete-scratch pidfile))))
 
-(defun test-exit-status-mapping ()
+(deftest test-exit-status-mapping
   "A command's own exit status is what Scute exits with."
   (dolist (code '(0 1 7 42))
     (let ((result (call-scute 'run-namespaced-command
@@ -231,71 +185,9 @@ a process that is PID 1 of its own."
       (check (eql code (call-scute 'command-exit-status result))
              "expected exit ~D, got ~S" code result))))
 
-(defun probe-named (report name)
-  (find name report :key (lambda (probe) (call-scute 'probe-name probe))
-                    :test #'string=))
-
-(defun test-doctor-report ()
-  "Doctor answers every question it asks, and reports this host as able to
-launch a sandbox -- it just did, to find out."
-  (let ((report (call-scute 'doctor-report)))
-    (check (every (lambda (probe)
-                    (and (call-scute 'probe-name probe)
-                         (call-scute 'probe-detail probe)
-                         (member (call-scute 'probe-status probe) '(:ok :missing :info))))
-                  report)
-           "a probe answered nothing: ~S" report)
-    (let ((namespaces (probe-named report "user namespaces")))
-      (check namespaces "no user namespace probe in the report")
-      (check (eq :ok (and namespaces (call-scute 'probe-status namespaces)))
-             "this host cannot launch a sandbox: ~S" namespaces))
-    (dolist (name '("landlock" "landrun" "cgroup v2" "libseccomp"))
-      (check (probe-named report name) "no ~A probe in the report" name))))
-
-(defun test-doctor-fails-closed ()
-  "A missing mandatory control makes the report say no."
-  (let* ((missing (scute::make-probe "landlock" :missing "pretend this kernel has none"))
-         (present (scute::make-probe "kernel" :info "pretend"))
-         (verdict nil)
-         (output (with-output-to-string (stream)
-                   (setf verdict (call-scute 'print-doctor-report
-                                             (list present missing) stream)))))
-    (check (null verdict) "a missing mandatory control was reported as fine")
-    (check (search "landlock" output) "the report did not name the missing control")
-    (setf verdict (with-output-to-string (stream)
-                    (call-scute 'print-doctor-report (list present) stream)))
-    (check (call-scute 'print-doctor-report (list present)
-                       (make-broadcast-stream))
-           "a report with nothing missing was reported as failing")))
-
-(defun test-fail-closed-launch ()
+(deftest test-fail-closed-launch
   "A command Scute cannot resolve is refused before any namespace is created."
   (let ((condition (nth-value 1 (ignore-errors
                                  (call-scute 'run-namespaced-command '("sh"))))))
-    (check (typep condition (or (find-symbol "SANDBOX-SETUP-ERROR" '#:scute) 'nil))
+    (check (typep condition 'scute:sandbox-setup-error)
            "a relative command was not refused, got ~S" condition)))
-
-;;── Harness ────────────────────────────────────────────────────────────────────
-
-(defun run-test (name)
-  (incf *tests*)
-  (handler-case (funcall name)
-    (error (condition)
-      (incf *failures*)
-      (format *error-output* "FAIL: ~A signalled ~A~%" name condition))))
-
-(defun run-tests ()
-  (setf *failures* 0 *tests* 0)
-  (mapc #'run-test '(test-namespace-boundary
-                     test-standard-streams
-                     test-signal-forwarding
-                     test-signal-death
-                     test-orphan-is-killed
-                     test-exit-status-mapping
-                     test-doctor-report
-                     test-doctor-fails-closed
-                     test-fail-closed-launch))
-  (when (plusp *failures*)
-    (error "~D Scute test~:P failed" *failures*))
-  (format t "~D Scute test~:P passed.~%" *tests*)
-  t)

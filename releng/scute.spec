@@ -20,8 +20,6 @@ BuildRequires:  ocicl
 BuildRequires:  gcc
 BuildRequires:  make
 
-# landrun becomes a hard requirement once the Landlock exec stage lands; scute
-# does not invoke it yet.
 
 %description
 Scute runs one local command inside a deny-by-default Linux sandbox built from

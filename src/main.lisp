@@ -41,15 +41,31 @@ the exit status can say what kind of failure it was."
 ;;── run ────────────────────────────────────────────────────────────────────────
 
 (defparameter +policy-pending-message+
-  "Policy enforcement is not implemented yet.  This build installs the process
-layer only: fresh user, mount, pid, uts, and network namespaces, every
-capability set emptied, and no_new_privs.  The filesystem is NOT restricted,
-no resource limits are applied, and no seccomp filter is installed.
+  "Policy files are not implemented yet.  Describe the filesystem on the
+command line instead:
 
-Pass --namespaces-only to accept exactly that and run anyway."
+  --read PATH                 read files and list directories beneath PATH
+  --read-execute PATH         the same, plus execute
+  --read-write PATH           read, write, create, delete, and rename beneath PATH
+  --read-write-execute PATH   the same, plus execute
+
+Nothing outside those paths can be opened.  Resource limits and seccomp are
+not installed by this build.  To run with no filesystem restriction at all,
+say so with --namespaces-only."
   "Said whenever someone asks for enforcement this build cannot provide.  A
 sandbox that quietly does less than it was asked for is worse than no sandbox,
 because it is believed.")
+
+(defparameter +filesystem-options+
+  '((:read . "read") (:read-execute . "read-execute")
+    (:read-write . "read-write") (:read-write-execute . "read-write-execute"))
+  "The access kinds a caller may name, and the option that names each.")
+
+(defun filesystem-rules (cmd)
+  "The (KIND PATH) forms CMD's filesystem options ask for."
+  (loop for (kind . nil) in +filesystem-options+
+        append (mapcar (lambda (path) (list kind path))
+                       (clingon:getopt cmd kind))))
 
 (defun run-handler (cmd)
   (reporting-failures
@@ -58,29 +74,45 @@ because it is believed.")
 (defun run-command (cmd)
   (let ((policy (clingon:getopt cmd :policy))
         (namespaces-only (clingon:getopt cmd :namespaces-only))
+        (rules (filesystem-rules cmd))
         (command (clingon:command-arguments cmd)))
-    (cond ((and policy namespaces-only)
-           (usage-error "--policy and --namespaces-only are exclusive"))
-          ((null command)
+    (cond ((null command)
            (usage-error "no command given; see scute run --help"))
-          ((not namespaces-only)
+          (policy
+           (usage-error +policy-pending-message+))
+          ((and rules namespaces-only)
+           (usage-error "--namespaces-only asks for no filesystem restriction, ~
+                         but filesystem rules were given too"))
+          ((and (null rules) (not namespaces-only))
            (usage-error +policy-pending-message+))
           (t
-           (uiop:quit (command-exit-status (run-namespaced-command command)) t)))))
+           (uiop:quit (command-exit-status
+                       (run-namespaced-command command :filesystem rules))
+                      t)))))
 
 (defun make-run-command ()
   (clingon:make-command
    :name "run"
    :description "Run a command inside the sandbox"
-   :usage "--namespaces-only -- COMMAND [ARGUMENT ...]"
-   :options (list (clingon:make-option
-                   :string :long-name "policy" :key :policy
-                   :description "Policy file describing the sandbox (not yet implemented)")
-                  (clingon:make-option
-                   :flag :long-name "namespaces-only" :key :namespaces-only
-                   :description "Accept the process layer alone, with no policy enforcement"))
+   :usage "[--read PATH ...] -- COMMAND [ARGUMENT ...]"
+   :options (append
+             (list (clingon:make-option
+                    :string :long-name "policy" :key :policy
+                    :description "Policy file describing the sandbox (not yet implemented)"))
+             (mapcar (lambda (entry)
+                       (destructuring-bind (kind . name) entry
+                         (clingon:make-option
+                          :list :long-name name :key kind :parameter "PATH"
+                          :description (format nil "Grant ~(~A~) access beneath PATH"
+                                               (substitute #\Space #\- name)))))
+                     +filesystem-options+)
+             (list (clingon:make-option
+                    :flag :long-name "namespaces-only" :key :namespaces-only
+                    :description "Run with no filesystem restriction at all")))
    :handler #'run-handler
-   :examples '(("Run a shell with the process layer alone:"
+   :examples '(("Run a shell that can read the system and write only here:"
+                . "scute run --read-execute /usr --read /etc --read-write . -- /bin/sh -i")
+               ("Run with the process layer alone, filesystem unrestricted:"
                 . "scute run --namespaces-only -- /bin/sh -i"))))
 
 ;;── doctor ─────────────────────────────────────────────────────────────────────

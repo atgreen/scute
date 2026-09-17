@@ -14,20 +14,37 @@ claim to contain kernel exploits.
 
 Nothing degrades quietly. A host missing Landlock, user namespaces, cgroup
 delegation, libseccomp, or any other control the policy asks for gets an error
-before the command runs, never a weaker sandbox than the one it asked for.
+before the command runs, never a weaker sandbox than the one it asked for. The
+kernel is addressed directly — `clone3`, `landlock_create_ruleset`, `capset`,
+`prctl` — with no helper binary to install, trust, or keep in step.
 
 ## Status
 
-Scute is v0 and unfinished. The kernel boundary works: `run-namespaced-command`
-launches a command as PID 1 of fresh user, mount, PID, UTS, and network
-namespaces, with every capability set empty and `no_new_privs` set, and
-supervises it to completion. The command line above is the destination, not
-today's behaviour — policy reading, the Landlock exec stage, cgroup limits,
-seccomp, auditing, and the `run` command itself are still to come, so the
-`scute` binary does nothing useful yet.
+Scute is v0 and unfinished, but it runs. Two layers are in place — the process
+layer (fresh user, mount, PID, UTS, and network namespaces; every capability
+set emptied; `no_new_privs`; the sandbox dies with its supervisor) and the
+filesystem layer, one Landlock ruleset the child enforces on itself just before
+it execs. Policy files are not implemented yet, so describe the filesystem on
+the command line:
 
-`docs/design.md` is the architecture. The task graph lives in
-[beads](https://github.com/steveyegge/beads); `bd ready` shows what is
+```sh
+scute run --read-execute /usr --read /etc --read-write . -- /bin/sh -c 'ls; echo hi > note'
+```
+
+Nothing outside those paths can be opened — including, note, `/proc` and
+`/dev/null`, which most programs expect; grant them explicitly when a command
+needs them. To run with no filesystem restriction at all, say so:
+
+```sh
+scute run --namespaces-only -- COMMAND
+```
+
+`scute doctor` reports what the host can enforce and exits non-zero if
+something mandatory is absent.
+
+Still to come: policy files, cgroup-v2 resource limits, the seccomp filter, and
+optional eBPF auditing. `docs/design.md` is the architecture. The task graph
+lives in [beads](https://github.com/steveyegge/beads); `bd ready` shows what is
 claimable.
 
 ## Policy
@@ -60,7 +77,7 @@ make test     # runs the test suite
 ```
 
 Some tests exercise the kernel directly, so they need a Linux host with
-unprivileged user namespaces enabled.
+unprivileged user namespaces and Landlock enabled.
 
 ## Author and License
 

@@ -29,7 +29,7 @@ non-NIL."
 ;;; child cannot afford.
 
 (defstruct (launch-plan (:constructor %make-launch-plan))
-  command path argv envp envp-count
+  command path argv envp envp-count landlock-ruleset
   sync-read sync-write status-read status-write
   sync-buffer status-buffer
   cap-header cap-data cap-last)
@@ -41,6 +41,7 @@ non-NIL."
 (defconstant +stage-drop-bounding+ 3)
 (defconstant +stage-capset+        4)
 (defconstant +stage-no-new-privs+  5)
+(defconstant +stage-landlock+      7)
 (defconstant +stage-execve+        6)
 
 (defun child-stage-name (stage)
@@ -51,6 +52,7 @@ non-NIL."
     (#.+stage-drop-bounding+ :child-drop-bounding-capabilities)
     (#.+stage-capset+        :child-clear-capabilities)
     (#.+stage-no-new-privs+  :child-set-no-new-privs)
+    (#.+stage-landlock+      :child-restrict-self)
     (#.+stage-execve+        :child-execve)
     (t                       :child-unknown)))
 
@@ -71,21 +73,29 @@ non-NIL."
 
 (defun resolve-executable (name)
   "Validate NAME as the program to execute.
-v0 requires an absolute path; PATH resolution arrives with the landrun exec
-stage, which must hand landrun an absolute executable anyway."
+v0 requires an absolute path: a sandbox whose command is chosen by searching
+PATH is a sandbox whose command depends on the environment it inherited."
   (unless (and (plusp (length name)) (char= #\/ (char name 0)))
     (setup-error :resolve-executable
                  :detail (format nil "~S is not an absolute path" name)))
   name)
 
-(defun compile-launch-plan (command)
-  "Compile COMMAND into an immutable plan with every child resource preallocated."
+(defun compile-launch-plan (command &key filesystem)
+  "Compile COMMAND into an immutable plan with every child resource preallocated.
+FILESYSTEM is a list of (KIND PATH) forms naming what the command may reach;
+with none, no Landlock ruleset is built and the filesystem is not restricted."
   (unless (and (listp command) command (every #'stringp command))
     (setup-error :compile-launch-plan
                  :detail "command must be a non-empty list of strings"))
-  (let ((path (resolve-executable (first command)))
-        (environment (sb-ext:posix-environ))
-        (last-capability (cap-last-cap)))
+  (let* ((path (resolve-executable (first command)))
+         (environment (sb-ext:posix-environ))
+         (last-capability (cap-last-cap))
+         (ruleset (compile-filesystem-ruleset
+                   (mapcar (lambda (form)
+                             (destructuring-bind (kind rule-path) form
+                               (normalize-rule kind rule-path)))
+                           filesystem)
+                   path)))
     (multiple-value-bind (sync-read sync-write) (make-sync-pipe)
       (multiple-value-bind (status-read status-write) (make-sync-pipe)
         (multiple-value-bind (cap-header cap-data) (make-empty-capability-request)
@@ -100,12 +110,14 @@ stage, which must hand landrun an absolute executable anyway."
            :sync-buffer (cffi:foreign-alloc :uint8 :count 1 :initial-element 0)
            :status-buffer (cffi:foreign-alloc :uint8 :count 1 :initial-element 0)
            :cap-header cap-header :cap-data cap-data
-           :cap-last last-capability))))))
+           :cap-last last-capability
+           :landlock-ruleset ruleset))))))
 
 (defun release-launch-plan (plan)
   "Release every parent-side resource held by PLAN."
   (dolist (fd (list (launch-plan-sync-read plan) (launch-plan-sync-write plan)
-                    (launch-plan-status-read plan) (launch-plan-status-write plan)))
+                    (launch-plan-status-read plan) (launch-plan-status-write plan)
+                    (launch-plan-landlock-ruleset plan)))
     (when (and fd (<= 0 fd)) (%close fd)))
   (cffi:foreign-string-free (launch-plan-path plan))
   (free-foreign-string-vector (launch-plan-argv plan)
@@ -157,6 +169,12 @@ collector."
         (die +stage-capset+ +child-exit-setup-failed+))
       (when (minusp (%prctl +pr-set-no-new-privs+ 1 0 0 0))
         (die +stage-no-new-privs+ +child-exit-setup-failed+))
+      ;; Landlock last, and only after no_new_privs: restrict_self requires it.
+      (let ((ruleset (launch-plan-landlock-ruleset plan)))
+        (when ruleset
+          (when (minusp (%landlock-restrict-self ruleset))
+            (die +stage-landlock+ +child-exit-setup-failed+))
+          (%close ruleset)))
       (%execve (launch-plan-path plan) (launch-plan-argv plan)
                (launch-plan-envp plan))
       (die +stage-execve+ +child-exit-exec-failed+))))
@@ -227,14 +245,19 @@ signal a pid that has already been collected."
     (let ((stage (read-child-stage plan)))
       (values (wait-for-child pid) stage))))
 
-(defun run-namespaced-command (command)
+(defun run-namespaced-command (command &key filesystem)
   "Run COMMAND inside fresh user, mount, PID, UTS, and network namespaces.
 
 COMMAND is a list whose first element is an absolute executable path.  The
 child becomes PID 1 of its namespace with no capabilities in any set and
 no_new_privs set; the parent forwards terminating signals to it and returns a
-SANDBOX-RESULT describing how it ended."
-  (let ((plan (compile-launch-plan command)))
+SANDBOX-RESULT describing how it ended.
+
+FILESYSTEM is a list of (KIND PATH) forms -- :READ, :READ-EXECUTE,
+:READ-WRITE, or :READ-WRITE-EXECUTE beneath PATH -- installed as one Landlock
+ruleset the child enforces on itself just before it execs.  With no rules the
+filesystem is not restricted."
+  (let ((plan (compile-launch-plan command :filesystem filesystem)))
     (unwind-protect
          (progn
            (finish-output *standard-output*)

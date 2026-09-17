@@ -21,7 +21,7 @@
 (defun probe-mandatory-p (probe)
   "Whether a missing PROBE stops Scute from running anything at all."
   (member (probe-name probe)
-          '("user namespaces" "landlock" "landrun" "cgroup v2" "libseccomp")
+          '("user namespaces" "landlock" "cgroup v2" "libseccomp")
           :test #'string=))
 
 (defun read-first-line (pathname)
@@ -62,26 +62,17 @@
 
 (defun probe-landlock ()
   (let ((version (landlock-abi-version)))
-    (if version
-        (make-probe "landlock" :ok (format nil "ABI version ~D" version))
-        (make-probe "landlock" :missing
-                    "this kernel does not implement landlock_create_ruleset"))))
-
-(defun split-path (path)
-  (when path
-    (loop with start = 0
-          for colon = (position #\: path :start start)
-          collect (subseq path start colon)
-          while colon
-          do (setf start (1+ colon)))))
-
-(defun probe-landrun ()
-  (let ((path (find-if (lambda (directory)
-                         (zerop (%access (format nil "~A/landrun" directory) +x-ok+)))
-                       (split-path (sb-posix:getenv "PATH")))))
-    (if path
-        (make-probe "landrun" :ok (format nil "~A/landrun" path))
-        (make-probe "landrun" :missing "not found on PATH"))))
+    (cond ((null version)
+           (make-probe "landlock" :missing
+                       "this kernel does not implement landlock_create_ruleset"))
+          (t
+           (make-probe "landlock" :ok
+                       (format nil "ABI version ~D, ~D filesystem access rights handled~@[ (~A)~]"
+                               version (logcount (supported-rights version))
+                               (cond ((< version 2)
+                                      "no REFER: cross-directory rename will fail")
+                                     ((< version 3)
+                                      "no TRUNCATE: truncation is not governed"))))))))
 
 (defun own-cgroup ()
   "The caller's cgroup-v2 path, as /proc reports it."
@@ -122,7 +113,6 @@
   (list (probe-kernel)
         (probe-user-namespaces)
         (probe-landlock)
-        (probe-landrun)
         (probe-cgroup-v2)
         (probe-seccomp)
         (probe-capabilities)))
