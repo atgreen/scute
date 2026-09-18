@@ -184,7 +184,7 @@ without the privilege is refused rather than quietly downgraded to port-level.
 To grant it:
 
 ```sh
-releng/grant-capabilities.sh ./scute      # one sudo setcap
+make egress        # builds, then grants -- one sudo setcap
 ```
 
 Capabilities live on the inode, so **every rebuild loses them** — re-run that

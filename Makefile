@@ -31,6 +31,12 @@ demo: scute
 		{ echo "vhs is not installed: https://github.com/charmbracelet/vhs"; exit 1; }
 	cd docs && vhs demo.tape
 
+# Rebuilding replaces the binary and loses its file capabilities, so granting
+# them belongs with building rather than after it.  This is the thing to put in
+# a build process that uses an address allowlist.
+egress: scute
+	releng/grant-capabilities.sh ./scute
+
 sbom: scute-sbom.spdx.json
 
 scute-sbom.spdx.json: ocicl.csv
@@ -57,4 +63,4 @@ clean-cache:
 clean: clean-cache
 	rm -rf *~ scute scute-sbom.spdx.json completions man .system-stamp .test-passed
 
-.PHONY: sbom completions man demo test smoke check clean clean-cache
+.PHONY: sbom completions man demo egress test smoke check clean clean-cache

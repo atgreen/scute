@@ -130,9 +130,24 @@ Answers the attachment, which the supervisor detaches when the sandbox ends."
     (unless available
       (setup-error :egress-guard :detail (format nil "~A" reason))))
   (multiple-value-bind (map-specs prog-specs) (compile-egress-guard)
-    (let* ((maps (uiop:symbol-call '#:whistler/loader '#:session-create-maps map-specs))
-           (progs (uiop:symbol-call '#:whistler/loader '#:session-load-progs
-                                    prog-specs maps))
+    ;; The loader narrates what it is doing, which belongs in a debugging
+    ;; session and not in the middle of a sandboxed command's output.  Kept,
+    ;; though: if the load fails, what it said is the best evidence there is.
+    (let* ((narration (make-string-output-stream))
+           (maps (let ((*standard-output* narration) (*error-output* narration))
+                   (uiop:symbol-call '#:whistler/loader '#:session-create-maps
+                                     map-specs)))
+           (progs (handler-case
+                      (let ((*standard-output* narration) (*error-output* narration))
+                        (uiop:symbol-call '#:whistler/loader '#:session-load-progs
+                                          prog-specs maps))
+                    (error (condition)
+                      (setup-error :load-egress-guard
+                                   :detail (format nil "~A~@[; the loader said: ~A~]"
+                                                   condition
+                                                   (let ((said (get-output-stream-string
+                                                                narration)))
+                                                     (and (plusp (length said)) said)))))))
            (guard (cdr (first progs)))
            (table (cdr (first maps))))
       (dolist (endpoint endpoints)
