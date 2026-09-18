@@ -100,6 +100,7 @@
            ;; Shell completions
            #:write-completions
            #:command-tree
+           #:write-manual-page
            ;; Host diagnostics
            #:doctor-report
            #:print-doctor-report

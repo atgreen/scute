@@ -276,3 +276,28 @@ is completable the moment it exists.  This test is what keeps that true."
   (multiple-value-bind (status said) (scute-run "completions tcsh")
     (check (= 64 status) "an unknown shell exited ~D" status)
     (check (search "bash" said) "the refusal does not say which shells are known")))
+
+(deftest test-the-manual-page-is-a-manual-page
+  "The manual page is generated from the command tree too, and groff is the
+judge of whether it is roff."
+  (multiple-value-bind (status said) (scute-run "man")
+    (check (zerop status) "scute man exited ~D" status)
+    (dolist (expected '(".TH SCUTE 1" "NAME" "DESCRIPTION" "EXIT STATUS"
+                        "run" "learn" "check" "doctor"))
+      (check (search expected said) "the manual page omits ~S" expected))
+    (let ((page (scratch-pathname "manual")))
+      (unwind-protect
+           (progn
+             (with-open-file (stream page :direction :output :if-exists :supersede)
+               (write-string said stream))
+             (if (plusp (cffi:foreign-funcall
+                         "system" :string "command -v groff >/dev/null 2>&1" :int))
+                 (format *error-output* "~&SKIP: no groff, so the roff is unchecked~%")
+                 (check (zerop (cffi:foreign-funcall
+                                "system" :string
+                                (format nil "groff -man -Tutf8 -ww ~A >/dev/null 2>~A.err ~
+                                             && test ! -s ~A.err"
+                                        page page page)
+                                :int))
+                        "groff complained about the manual page")))
+        (delete-scratch page (format nil "~A.err" page))))))

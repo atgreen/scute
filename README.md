@@ -332,15 +332,17 @@ which is why a policy has to ask.
 `"connect"` is in the design and refused here: v0 gives a sandbox no network, so
 there would be nothing to record.
 
-## Completions
+## Completions and the manual
 
 ```sh
 source <(scute completions bash)     # or zsh, or fish
+scute man | man -l -
 ```
 
-They are generated from scute's own command tree rather than maintained beside
-it, so an option is completable the moment it exists. `make completions` writes
-all three into `completions/`, and the packages install them.
+Both are generated from scute's own command tree rather than maintained beside
+it, so a new option is completable and documented the moment it exists.
+`make completions` and `make man` write them out, and the packages install
+them.
 
 ## Author and License
 

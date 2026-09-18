@@ -44,6 +44,7 @@ Scute shares the host kernel and does not claim to contain kernel exploits.
 make
 make sbom
 make completions
+make man
 
 %install
 install -D -m 0755 scute %{buildroot}%{_bindir}/scute
@@ -51,9 +52,12 @@ install -D -m 0644 scute-sbom.spdx.json %{buildroot}%{_datadir}/sbom/scute-%{ver
 %{_datadir}/bash-completion/completions/scute
 %{_datadir}/zsh/site-functions/_scute
 %{_datadir}/fish/vendor_completions.d/scute.fish
+%{_mandir}/man1/scute.1*
 install -D -m 0644 completions/scute.bash %{buildroot}%{_datadir}/bash-completion/completions/scute
 install -D -m 0644 completions/_scute %{buildroot}%{_datadir}/zsh/site-functions/_scute
 install -D -m 0644 completions/scute.fish %{buildroot}%{_datadir}/fish/vendor_completions.d/scute.fish
+%{_mandir}/man1/scute.1*
+install -D -m 0644 man/scute.1 %{buildroot}%{_mandir}/man1/scute.1
 
 %files
 %license LICENSE
@@ -63,6 +67,7 @@ install -D -m 0644 completions/scute.fish %{buildroot}%{_datadir}/fish/vendor_co
 %{_datadir}/bash-completion/completions/scute
 %{_datadir}/zsh/site-functions/_scute
 %{_datadir}/fish/vendor_completions.d/scute.fish
+%{_mandir}/man1/scute.1*
 
 %changelog
 * Thu Sep 17 2026 Anthony Green <green@moxielogic.com> - 0.1.0-1

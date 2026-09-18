@@ -297,6 +297,21 @@ argument gets you.")
      (write-completions shell)
      (uiop:quit 0 t))))
 
+(defun man-handler (cmd)
+  (declare (ignore cmd))
+  (reporting-failures
+   (write-manual-page *standard-output* :version +version+)
+   (uiop:quit 0 t)))
+
+(defun make-man-command ()
+  (clingon:make-command
+   :name "man"
+   :description "Write scute's manual page, generated from its own commands"
+   :usage ""
+   :handler #'man-handler
+   :examples '(("Read it now:" . "scute man | man -l -")
+               ("Install it:" . "scute man > /usr/share/man/man1/scute.1"))))
+
 (defun make-completions-command ()
   (clingon:make-command
    :name "completions"
@@ -321,7 +336,7 @@ argument gets you.")
    :usage "[GLOBAL-OPTIONS] COMMAND [OPTIONS] [ARGUMENTS ...]"
    :sub-commands (list (make-run-command) (make-learn-command)
                        (make-check-command) (make-doctor-command)
-                       (make-completions-command))
+                       (make-completions-command) (make-man-command))
    :handler (lambda (cmd)
               (clingon:print-usage-and-exit cmd *standard-output*))))
 

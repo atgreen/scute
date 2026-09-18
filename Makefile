@@ -12,6 +12,10 @@ completions: scute
 	./scute completions zsh  > completions/_scute
 	./scute completions fish > completions/scute.fish
 
+man: scute
+	mkdir -p man
+	./scute man > man/scute.1
+
 demo: scute
 	@command -v vhs >/dev/null || \
 		{ echo "vhs is not installed: https://github.com/charmbracelet/vhs"; exit 1; }
@@ -37,6 +41,6 @@ smoke: scute
 check: test smoke
 
 clean:
-	rm -rf *~ scute scute-sbom.spdx.json completions
+	rm -rf *~ scute scute-sbom.spdx.json completions man
 
-.PHONY: sbom completions demo test smoke check clean
+.PHONY: sbom completions man demo test smoke check clean
