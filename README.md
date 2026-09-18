@@ -199,7 +199,7 @@ table, an unknown key, a value of the wrong shape or a duplicate key is an error
 | | `processes` | integer | `pids.max` |
 | | `cpu-percent` | integer | 100 is one processor |
 | | `wall-clock` | duration, e.g. `"30s"` | stop the command if it runs longer |
-| `[audit]` | `events` | `["exec", "open"]` | what to record |
+| `[audit]` | `events` | `["exec", "open", "connect"]` | what to record |
 | `[environment]` | `keep` | array of names | variables to pass, beyond the default list |
 
 A relative path means what it says from where scute was invoked, and may not
@@ -484,6 +484,7 @@ $ head -3 trail.jsonl
 {"event": "start", "command": ["/usr/bin/bash", "-c", "./build.sh"]}
 {"event": "exec", "access": "execute", "path": "/usr/bin/bash"}
 {"event": "open", "access": "read", "path": "/etc/ld.so.cache"}
+{"event": "connect", "address": "1.1.1.1", "port": 53}
 ```
 
 One JSON object per line. Without `--audit` it goes to stderr. It costs a round
@@ -607,10 +608,9 @@ make completions man                 # write them out; the packages install them
 
 ## Status
 
-Scute is v0 and runs. The process, filesystem, seccomp, limit, network,
-credential and audit-trail machinery described above all work. One piece of the
-design is not built: `[audit]` cannot yet record `"connect"` events, and a policy
-asking for one is refused rather than handed a weaker sandbox than it asked for.
+Scute is v0 and runs. Everything described above works, and nothing a policy can
+ask for is refused as unbuilt — `[audit]` records `"connect"` events as of this
+version, which was the last piece outstanding.
 
 `docs/design.md` is the architecture and the reasoning behind it. The task graph
 lives in [beads](https://github.com/steveyegge/beads); `bd ready` shows what is

@@ -297,17 +297,17 @@ line, so that reading it needs nothing but the usual tools."
                     trail)))
       (ignore-errors (sb-posix:rmdir workspace)))))
 
-(deftest test-auditing-connections-is-refused
-  "v0 gives a sandbox no network, so a policy asking for connections to be
-recorded is refused rather than quietly given a trail with nothing in it."
+(deftest test-a-policy-asking-for-connect-events-now-runs
+  "Asking for connect events used to refuse the launch, because the trail
+recorded paths and a connection is not one.  It records them now, so a policy
+naming every event runs."
   (let* ((policy (policy-from-string "[filesystem]
 read-execute = [\"/usr\"]
 [audit]
 events = [\"connect\"]"))
-         (plan (call-scute 'compile-launch-plan policy '("/bin/true")))
-         (condition (nth-value 1 (ignore-errors (call-scute 'run-launch-plan plan)))))
-    (check (typep condition 'scute:control-not-implemented)
-           "auditing connections was accepted, got ~S" condition)))
+         (plan (call-scute 'compile-launch-plan policy '("/bin/true"))))
+    (check (null (call-scute 'refuse-unimplemented-controls plan))
+           "a policy asking for connect events was still refused")))
 
 (deftest test-a-learned-policy-always-loads
   "A learned policy must be one scute will accept.  A loader probes for library
@@ -343,3 +343,24 @@ so those observations are left out however they arrived."
                                   :directory workspace)
                       "the learned policy would not compile"))))
       (ignore-errors (sb-posix:rmdir workspace)))))
+
+(deftest test-the-audit-trail-records-connections-when-asked
+  "A policy asking for connect events gets the addresses the command reached for,
+one JSON object per line like everything else in the trail."
+  (let ((observations (call-scute 'make-observations (make-hash-table :test #'eql))))
+    (call-scute 'record-connection observations (cons #(93 184 216 34) 443))
+    (call-scute 'record-connection observations (cons #(127 0 0 1) 10210))
+    (let ((trail (with-output-to-string (stream)
+                   (call-scute 'write-audit-trail observations '(:connect) stream
+                               :command '("/bin/true")))))
+      (check (search "\"event\": \"connect\"" trail)
+             "no connect event in the trail: ~S" trail)
+      (check (search "\"address\": \"93.184.216.34\"" trail)
+             "the address was not written as dotted quad: ~S" trail)
+      (check (search "\"port\": 443" trail) "the port was not written: ~S" trail)
+      (check (search "\"port\": 10210" trail) "the second connection is missing"))
+    ;; And a policy that did not ask for them does not get them.
+    (let ((trail (with-output-to-string (stream)
+                   (call-scute 'write-audit-trail observations '(:exec) stream))))
+      (check (not (search "connect" trail))
+             "connect events appeared in a trail that asked for exec: ~S" trail))))

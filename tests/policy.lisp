@@ -213,19 +213,21 @@ read-write = [\"../..\"]")
                 'scute:policy-error)
          "a relative path escaping the directory was accepted"))
 
-(deftest test-unimplemented-controls-refuse-to-run
-  "A plan asking for a control this build lacks is refused before it launches.
-Enacting it quietly would hand back a weaker sandbox than the one asked for.
-Recording connections is the one left: limits arrived with the cgroup layer and
-recording exec and open arrived with the watcher."
+(deftest test-every-control-a-policy-can-ask-for-is-installed
+  "Nothing a policy can say is refused as unbuilt any more.
+
+Recording connections was the last of them, and asking for it used to refuse the
+launch -- rightly, because enacting a plan quietly without a control it asked for
+hands back a weaker sandbox than the one requested.  Now it records connections,
+so the refusal has nothing left to refuse, and this test says so rather than
+leaving the old assertion to rot."
   (let* ((policy (policy-from-string "[filesystem]
 read-execute = [\"/usr\"]
 [audit]
-events = [\"connect\"]"))
-         (plan (call-scute 'compile-launch-plan policy '("/bin/true")))
-         (condition (nth-value 1 (ignore-errors (call-scute 'run-launch-plan plan)))))
-    (check (typep condition 'scute:control-not-implemented)
-           "a plan asking for what this build lacks ran anyway, got ~S" condition)))
+events = [\"connect\", \"exec\", \"open\"]"))
+         (plan (call-scute 'compile-launch-plan policy '("/bin/true"))))
+    (check (null (call-scute 'refuse-unimplemented-controls plan))
+           "a policy naming every audit event was refused")))
 
 (deftest test-policy-file-drives-the-sandbox
   "The whole path, from a file on disk to a kernel that refuses: this is what

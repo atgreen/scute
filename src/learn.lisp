@@ -604,11 +604,29 @@ Answers an alist of path to the accesses that were not permitted."
   (loop for (event . accesses) in +audit-event-syscalls+
         thereis (and (member event events) (member access accesses))))
 
+(defun write-audit-connections (observations stream)
+  "Write every address the command connected to, and answer how many.
+
+A connection is not a path, which is why this is a second pass rather than
+another access kind: what a policy asks about an address is where it went, not
+what it did there."
+  (let ((written 0))
+    (maphash (lambda (endpoint present)
+               (declare (ignore present))
+               (incf written)
+               (format stream "{\"event\": \"connect\", \"address\": \"~{~D~^.~}\", ~
+                               \"port\": ~D}~%"
+                       (car endpoint) (cdr endpoint)))
+             (observations-connections observations))
+    written))
+
 (defun write-audit-trail (observations events stream &key command)
   "Write what OBSERVATIONS saw, keeping the EVENTS a policy asked for."
   (let ((written 0))
     (format stream "{\"event\": \"start\", \"command\": [~{~S~^, ~}]}~%"
             (or command '()))
+    (when (member :connect events)
+      (incf written (write-audit-connections observations stream)))
     (maphash (lambda (path accesses)
                (dolist (access accesses)
                  (when (audited-access-p events access)

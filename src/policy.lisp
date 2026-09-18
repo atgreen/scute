@@ -768,15 +768,14 @@ an ordinary host."
 
 (defun refuse-unimplemented-controls (plan)
   "Refuse a plan asking for a control this build cannot install.
+
 Enacting such a plan quietly would hand back a weaker sandbox than the one that
-was asked for."
-  (let ((audit (launch-plan-audit plan)))
-    (when (and audit (member :connect (audit-policy-events audit)))
-      (error 'control-not-implemented
-             :control "auditing connections"
-             :detail "the audit trail records paths, and a connection is not ~
-                      one; the rest of [audit] works.  Meanwhile `scute learn ~
-                      --network` reports what a command connects to"))))
+was asked for, so this is where that refusal belongs.  There is nothing to refuse
+at present: every control a policy can ask for is installed.  It is kept as the
+one place to put the next one, and as the reason a caller can rely on a plan that
+compiles being a plan that runs."
+  (declare (ignore plan))
+  nil)
 
 (defun print-launch-plan (plan &optional (stream *standard-output*))
   "Print PLAN as the decision it is, for review before anything runs."
