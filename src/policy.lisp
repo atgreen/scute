@@ -734,7 +734,14 @@ nothing here touches the kernel."
                     ;; A proxy the command cannot be told about is a proxy it
                     ;; will not use, so naming one sets the variables every
                     ;; ordinary client reads.
-                    (if proxy
+                    ;;
+                    ;; Except in proxied mode, where the kernel sends the traffic
+                    ;; to the proxy whatever the command believes.  Setting them
+                    ;; there would be harmless and dishonest: the redirect is the
+                    ;; mechanism, and a mode whose variables do the work in
+                    ;; practice is a mode whose mechanism is never exercised until
+                    ;; it matters.  A policy that wants them can set them itself.
+                    (if (and proxy (not (eq :proxied (sandbox-policy-network policy))))
                         (append kept
                                 (list (format nil "HTTPS_PROXY=~A" proxy)
                                       (format nil "HTTP_PROXY=~A" proxy)

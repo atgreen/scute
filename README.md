@@ -303,7 +303,10 @@ to that port alone, so a command that ignores the variables still cannot reach
 anything else. It is a proxy rather than a suggestion.
 
 `mode = "proxied"` is the strongest of the four, and the only one that does not
-depend on the command cooperating. The others let a command reach the proxy;
+depend on the command cooperating. It deliberately does **not** set `HTTPS_PROXY`
+either: the kernel sends the traffic to the proxy whatever the command believes,
+and setting the variables as well would mean the redirect was never the thing
+being exercised. A policy that wants them can add them with `[environment.set]`. The others let a command reach the proxy;
 this one *sends* it there — a BPF program on the sandbox's cgroup rewrites the
 destination of every connection to port 80 or 443, and refuses anything else. A
 tool that ignores `HTTPS_PROXY` gets proxied anyway instead of failing, so a
