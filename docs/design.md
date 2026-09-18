@@ -37,8 +37,9 @@ made effective. Scute never applies file capabilities to sandbox children.
 
 1. Parse the policy as TOML and validate it against a closed schema.
 2. Resolve paths and the command into an immutable launch plan.
-3. Probe every requested kernel and runtime feature; any missing mandatory
-   control aborts the launch.
+3. Probe every requested kernel and runtime feature, reporting all that are
+   missing rather than the first: any missing mandatory control aborts the
+   launch before anything has been created.
 4. Create a cgroup below the caller's delegated cgroup-v2 subtree.
 5. Load and attach requested fixed Whistler audit programs.
 6. Build the enforcement programs: one Landlock ruleset, handling every
@@ -245,8 +246,9 @@ therefore out of v0's scope, stated here rather than discovered later.
 - `src/seccomp.lisp` binds the minimal libseccomp API, builds the v0 filter in
   the parent, and exports it as the BPF program the child installs.
 - `src/audit.lisp` defines fixed Whistler programs and decodes their events.
-- `src/sandbox.lisp` orders acquisition, fork synchronization, supervision,
-  signal forwarding, result classification, and cleanup.
+- `src/sandbox.lisp` holds the preflight check and then orders acquisition, fork
+  synchronization, supervision, signal forwarding and enforcement, result
+  classification, and cleanup.
 - `src/main.lisp` exposes only the `run` and read-only `doctor` CLI commands.
 - `tests/` contains unit fixtures plus opt-in kernel and capability integration
   tests; `make check` runs the applicable matrix and reports explicit skips for

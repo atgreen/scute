@@ -27,6 +27,11 @@ lands beside the first rather than one level deeper.")
   '((:memory . "memory") (:processes . "pids") (:cpu-percent . "cpu"))
   "The controller each kind of limit needs enabled.")
 
+(defparameter +delegation-remedy+
+  "Run scute under a cgroup of its own, for example: systemd-run --user --scope -p Delegate=yes scute run ..."
+  "What to do about a cgroup that cannot hand controllers to its children.  Said
+in one place, so that every refusal carries it.")
+
 (defvar *sandbox-cgroup-counter* 0)
 
 (defun read-first-line (pathname)
@@ -122,12 +127,10 @@ children controllers.  Only ever moves Scute itself."
            :delegate-cgroup
            :detail (format nil
                            "~A holds ~D other ~A, so cgroup v2 will not let it ~
-                            give controllers (~{~A~^, ~}) to children. Run scute ~
-                            under a cgroup of its own, for example: ~
-                            systemd-run --user --scope -p Delegate=yes scute run ..."
+                            give controllers (~{~A~^, ~}) to children. ~A"
                            root (length others)
                            (if (= 1 (length others)) "process" "processes")
-                           missing)))
+                           missing +delegation-remedy+)))
         (step-aside root))
       (write-proc-file (cgroup-file root "cgroup.subtree_control")
                        (format nil "~{+~A~^ ~}" missing)

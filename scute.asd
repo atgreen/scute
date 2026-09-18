@@ -41,6 +41,7 @@
                (:file "tests/policy")
                (:file "tests/seccomp")
                (:file "tests/cgroup")
+               (:file "tests/supervisor")
                (:file "tests/doctor"))
   :perform (test-op (o c)
              (declare (ignore o c))

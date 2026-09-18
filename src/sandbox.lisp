@@ -281,25 +281,73 @@ signal a pid that has already been collected."
     (let ((stage (read-child-stage resources)))
       (values (wait-for-child pid) stage))))
 
+(defun user-namespaces-available-p ()
+  "Whether this kernel will let an unprivileged process create a user namespace."
+  (let ((maximum (read-first-line "/proc/sys/user/max_user_namespaces"))
+        (permitted (read-first-line "/proc/sys/kernel/unprivileged_userns_clone")))
+    (and (or (null maximum) (plusp (or (parse-integer maximum :junk-allowed t) 0)))
+         ;; Debian and its descendants carry this switch; most kernels do not.
+         (or (null permitted) (string= "1" (string-trim " " permitted))))))
+
+(defun preflight (plan)
+  "Check everything PLAN asks for before acquiring any of it.
+
+Failures would surface anyway, one at a time, as each control was installed.
+Asking first serves two purposes: nothing is created that then has to be
+unwound, and an operator on a host that cannot do the job learns everything
+that is wrong at once instead of once per attempt."
+  (let ((missing '()))
+    (flet ((note (control detail)
+             (push (format nil "~A: ~A" control detail) missing)))
+      (unless (user-namespaces-available-p)
+        (note "user namespaces" "this kernel will not let an unprivileged ~
+                                 process create one"))
+      (when (launch-plan-filesystem plan)
+        (unless (landlock-abi-version)
+          (note "landlock" "this kernel does not implement it, and the plan ~
+                            asks for filesystem rules")))
+      (handler-case (v0-seccomp-filter)
+        (scute-error (condition) (note "seccomp" (princ-to-string condition))))
+      (when (launch-plan-limits plan)
+        (multiple-value-bind (installable root explanation) (limits-installable-p)
+          (declare (ignore root))
+          (unless installable
+            (note "resource limits"
+                  (format nil "~A. ~A" explanation +delegation-remedy+))))))
+    (when missing
+      (setup-error :preflight
+                   :detail (format nil "~{~A~^; ~}" (nreverse missing))))
+    (refuse-unimplemented-controls plan)))
+
+(defun spawn-sandbox-child (resources)
+  "Create the child that will become the command, and answer its pid.
+
+In the child this never returns: it becomes the command, or exits saying which
+stage refused.  Buffered output is flushed first, because the child inherits a
+copy of it and would write it a second time."
+  (finish-output *standard-output*)
+  (finish-output *error-output*)
+  (let ((pid (clone3 +sandbox-clone-flags+)))
+    (when (zerop pid)
+      (run-child resources))                ; never returns
+    pid))
+
 (defun run-launch-plan (plan)
   "Enact PLAN: launch its command in the sandbox it describes and supervise it.
 
 Everything PLAN asks for is established before the command exists.  A control
 PLAN requests that this build cannot install is an error, not an omission."
-  (refuse-unimplemented-controls plan)
-  (let ((resources (acquire-launch-resources plan))
-        ;; Created before the child exists, so a limit that cannot be installed
-        ;; is a launch that does not happen.
-        (cgroup (let ((limits (launch-plan-limits plan)))
-                  (and limits (create-sandbox-cgroup limits)))))
+  (preflight plan)
+  ;; Acquisition order follows the design's startup sequence, and every step is
+  ;; unwound in reverse by the unwind-protects below.
+  (let ((cgroup (let ((limits (launch-plan-limits plan)))
+                  (and limits (create-sandbox-cgroup limits))))
+        (resources nil))
     (unwind-protect
          (progn
-           (finish-output *standard-output*)
-           (finish-output *error-output*)
-           (let ((pid (clone3 +sandbox-clone-flags+))
+           (setf resources (acquire-launch-resources plan))
+           (let ((pid (spawn-sandbox-child resources))
                  (reaped nil))
-             (when (zerop pid)
-               (run-child resources))       ; never returns
              (unwind-protect
                   (progn
                     (write-identity-maps pid)
@@ -320,7 +368,7 @@ PLAN requests that this build cannot install is an error, not an omission."
                (unless reaped
                  (%kill pid +sigkill+)
                  (%waitpid pid (cffi:null-pointer) 0)))))
-      (release-launch-resources resources)
+      (when resources (release-launch-resources resources))
       (when cgroup (delete-sandbox-cgroup cgroup)))))
 
 (defun run-namespaced-command (command &key filesystem directory)

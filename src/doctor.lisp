@@ -90,9 +90,7 @@ them on a host that cannot give them."
     (make-probe "resource limits" (if installable :ok :info)
                 (if installable
                     explanation
-                    (format nil "~A; run under a cgroup of its own, e.g. ~
-                                 systemd-run --user --scope -p Delegate=yes"
-                            explanation)))))
+                    (format nil "~A. ~A" explanation +delegation-remedy+)))))
 
 (defun probe-seccomp ()
   "Build the v0 filter to answer this, rather than only looking for the library:

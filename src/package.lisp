@@ -52,6 +52,8 @@
            #:path-rule-kind
            #:path-rule-path
            #:run-launch-plan
+           #:preflight
+           #:user-namespaces-available-p
            #:*stop-grace-seconds*
            ;; The kernel boundary
            #:run-namespaced-command
