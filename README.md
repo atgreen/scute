@@ -369,15 +369,20 @@ authority that stays put, and systemd confining the process that holds your
 secrets.
 
 ```sh
-cp releng/keyfence.service ~/.config/systemd/user/
-systemctl --user enable --now keyfence
+sudo dnf install keyfence                                    # ships the units
+systemctl --user enable --now keyfence.socket keyfence-api.socket
 ```
 
-The shipped unit listens on loopback only, generates a control API key on first
-start where scute looks for it, and runs the broker with `NoNewPrivileges`,
-`ProtectSystem=strict`, an empty capability bounding set and a system call
-filter — the process holding the real credentials should be able to do less than
-the agent it protects, not more.
+Those are socket units, so systemd holds the ports and starts the broker on the
+first connection: enabled costs nothing until something wants a credential
+swapped. KeyFence's units listen on loopback only, generate a control API key on
+first start where scute looks for it, and run the broker with `NoNewPrivileges`,
+`ProtectSystem=strict`, an empty capability bounding set and a system call filter
+— the process holding the real credentials should be able to do less than the
+agent it protects, not more.
+
+`releng/keyfence.service` here is the same unit without the socket activation,
+for a broker you built rather than installed.
 
 ### Anything else beside the sandbox
 
