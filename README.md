@@ -377,9 +377,10 @@ reach *some other host* on the proxy's port number — it cannot reach 443, and 
 token is worthless anywhere but its destination, but a listener on port 10210
 elsewhere is a path out for data the command can already read.
 
-Where the [address-level guard](#an-address-allowlist) can be installed, scute
-closes that itself: naming a proxy binds the proxy's **address**, not just its
-port, without your having to say it twice. `--dry-run` shows which you got —
+Where the [address-level guard](#an-address-allowlist) can be installed — which
+needs both the capability and a cgroup of its own — scute closes that itself:
+naming a proxy binds the proxy's **address**, not just its port, without your
+having to say it twice. `--dry-run` shows which you got —
 
 ```console
 network      the host's, shared
@@ -388,8 +389,15 @@ network      the host's, shared
              connect tcp 10210                      # port-level
 ```
 
-— and where the privilege is absent the `allow` line is missing, which is the
-honest report: port-level egress, and a policy to read as such.
+— and where either is absent the `allow` line is missing, which is the honest
+report: port-level egress, and a policy to read as such. Automatic narrowing is a
+courtesy, so it is skipped rather than refused where it cannot be enacted; an
+`allow` list you wrote yourself is still refused loudly. To get the address-level
+form for a proxy, give scute a cgroup:
+
+```sh
+systemd-run --user --scope -p Delegate=yes scute run --policy agent.policy -- claude
+```
 
 `scute run --dry-run` prints which file a policy would read before it reads it,
 and `scute doctor` says whether a broker is there to attach to. Attaching means

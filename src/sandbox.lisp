@@ -416,7 +416,12 @@ that is wrong at once instead of once per attempt."
         (multiple-value-bind (installable root explanation) (limits-installable-p)
           (declare (ignore root))
           (unless installable
-            (note "resource limits"
+            ;; Name the control that actually wants the cgroup. An allow list is
+            ;; attached to one, so a policy asking only for addresses used to be
+            ;; turned away over "resource limits" it never mentioned.
+            (note (if (cgroup-limits-p (launch-plan-limits plan))
+                      "resource limits"
+                      "address-level egress")
                   (format nil "~A. ~A" explanation +delegation-remedy+))))))
     (when missing
       (setup-error :preflight

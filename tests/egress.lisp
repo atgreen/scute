@@ -192,3 +192,25 @@ the guard with the same rule twice."
     (check (= 1 (length allow))
            "the proxy's address was added beside an identical entry (~D entries)"
            (length allow))))
+
+(deftest test-binding-the-proxy-needs-a-cgroup-as-well-as-a-capability
+  "Granting the binary CAP_BPF is not enough to bind a proxy's address: the guard
+attaches to a cgroup, and a host without delegation has none to attach it to.
+
+This is the regression the parameter exists for.  Binding was added whenever the
+capabilities were held, so granting them made every proxy policy on an ordinary
+host start failing in preflight -- over a control the policy had not asked for.
+Narrowing beyond what a policy said is a courtesy, so where it cannot be enacted
+the plan is left alone; an allow list the policy wrote itself is still refused."
+  (let ((plan (plan-for-proxy-policy)))
+    (check (null (call-scute 'launch-plan-allow
+                             (call-scute 'plan-with-proxy-bound-by-address plan nil)))
+           "a proxy address was bound on a host that cannot install the guard")
+    (check (call-scute 'launch-plan-allow
+                       (call-scute 'plan-with-proxy-bound-by-address plan t))
+           "a proxy address was not bound on a host that can install the guard")
+    ;; And what the host can actually do is both halves together, so the
+    ;; predicate says so rather than only checking capabilities.
+    (multiple-value-bind (capable) (call-scute 'egress-guard-available-p)
+      (check (or (not (call-scute 'proxy-address-bindable-p)) capable)
+             "bindable without the capability to load the program"))))

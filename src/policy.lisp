@@ -738,8 +738,17 @@ A plan is immutable, so an override makes another one rather than changing it."
                                   (and limits (resource-limits-wall-clock limits))
                                   wall-clock))))))
 
+(defun proxy-address-bindable-p ()
+  "Whether this host could enact an address rule for a proxy right now.
+
+Both halves are needed: the capabilities to load and attach the guard, and a
+cgroup to attach it to.  Asking for one without the other is how granting
+capabilities to the binary made working policies start failing -- the rule was
+added automatically, and then nothing could install it."
+  (and (egress-guard-available-p) (limits-installable-p)))
+
 (defun plan-with-proxy-bound-by-address (plan &optional (guard-available
-                                                    (egress-guard-available-p)))
+                                                    (proxy-address-bindable-p)))
   "PLAN with its proxy's address permitted, not only its port.
 
 Landlock filters TCP ports and not addresses, so a policy naming a proxy permits
@@ -747,12 +756,17 @@ that port -- on any host.  The sandbox cannot reach ordinary HTTPS, but it can
 reach a listener on the proxy's port number somewhere else, which is a way out
 for anything the command can already read.
 
-The address-level guard closes that, and it is BPF, so it needs a capability this
-process may not hold.  When it does, the proxy's own address is added to what the
-guard permits, which is what the policy meant by naming a proxy.  When it does
-not, the plan is left as it was: port-level, which --dry-run and the manual both
-say plainly, rather than a refusal that would make every proxy policy unusable on
-an ordinary host."
+The address-level guard closes that, and it is BPF attached to a cgroup, so it
+needs both a capability this process may not hold and a cgroup it may not have.
+When it has them, the proxy's own address is added to what the guard permits,
+which is what the policy meant by naming a proxy.  When it does not, the plan is
+left as it was: port-level, which --dry-run and the manual both say plainly.
+
+Narrowing further than a policy asked for is a courtesy, so declining it where it
+cannot be enacted is not the silent degradation Scute refuses elsewhere -- an
+allow list the policy wrote itself is still refused loudly.  The distinction
+matters: without it, granting the binary a capability would break every proxy
+policy on a host without cgroup delegation, which is most of them."
   (let ((proxy (launch-plan-proxy plan)))
     (if (or (null proxy) (not guard-available))
         plan

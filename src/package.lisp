@@ -95,6 +95,7 @@
            #:parse-endpoint
            #:proxy-url-host
            #:plan-with-proxy-bound-by-address
+           #:proxy-address-bindable-p
            #:compile-egress-guard
            #:egress-guard-available-p
            #:sandbox-policy-connect-tcp
