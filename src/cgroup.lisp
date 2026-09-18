@@ -102,6 +102,12 @@ Scute has already stepped aside into a supervisor cgroup under it."
                (:cpu-percent (resource-limits-cpu-percent limits)))
           collect controller))
 
+(defun cgroup-limits-p (limits)
+  "Whether LIMITS asks for anything a cgroup is needed for.
+A wall-clock limit is the supervisor's own business, and asking for one should
+not drag in a delegated subtree that nothing will use."
+  (and limits (required-controllers limits) t))
+
 (defun step-aside (root)
   "Move this process into a supervisor cgroup under ROOT, so ROOT can give its
 children controllers.  Only ever moves Scute itself."

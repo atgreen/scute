@@ -258,6 +258,17 @@ Scute forwards the signal, waits a grace period of five seconds, and then sends
 and acts within the grace period decides its own exit status. A second stop
 signal does not start the wait again.
 
+The grace period is skipped where it would be spent waiting for nothing:
+`/proc/<pid>/status` reports which signals a process catches, and a command that
+catches none will never see the one it is being asked to stop by. It is killed
+at once instead.
+
+A wall-clock limit shares this machinery. There is one real-time timer, so which
+job it is doing is a matter of state: while the command runs it is the deadline,
+and once stopping it is the grace period running out. A command stopped for time
+exits 124, as `timeout(1)` has it, because the signal that ended it says nothing
+about why.
+
 ### What the filter denies, and what it cannot
 
 The seccomp filter follows the same split as Landlock. The parent builds it with

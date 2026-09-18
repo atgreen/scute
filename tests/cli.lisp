@@ -301,3 +301,17 @@ judge of whether it is roff."
                                 :int))
                         "groff complained about the manual page")))
         (delete-scratch page (format nil "~A.err" page))))))
+
+(deftest test-the-timeout-flag
+  "--timeout is the flag a script reaches for, so it answers 124 the way
+timeout(1) does, and a duration it cannot read is the caller's mistake."
+  (multiple-value-bind (status said)
+      (scute-run "run --namespaces-only --timeout 1s -- /bin/sleep 60")
+    (check (= 124 status) "a command stopped for time exited ~D: ~A" status said)
+    (check (search "time limit" said) "the message was ~S" said))
+  (multiple-value-bind (status said)
+      (scute-run "run --namespaces-only --timeout 5s -- /bin/sh -c 'exit 3'")
+    (check (= 3 status) "a command that finished in time exited ~D: ~A" status said))
+  (multiple-value-bind (status said)
+      (scute-run "run --namespaces-only --timeout nonsense -- /bin/true")
+    (check (= 64 status) "an unreadable duration exited ~D, not 64: ~A" status said)))

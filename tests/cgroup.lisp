@@ -173,3 +173,57 @@ a person can act on -- never enforced in part."
           (check (search "systemd-run" (princ-to-string condition))
                  "the refusal does not say how to get a delegated cgroup: ~A"
                  condition)))))
+
+;;── A limit on time ────────────────────────────────────────────────────────────
+
+(defun run-for-at-most (seconds command)
+  "Run COMMAND with a wall-clock limit, and answer the result and the wall time."
+  (let* ((plan (call-scute 'plan-with-wall-clock
+                           (call-scute 'compile-command-launch-plan command '())
+                           seconds))
+         (start (get-internal-real-time))
+         (result (call-scute 'run-launch-plan plan)))
+    (values result (/ (- (get-internal-real-time) start)
+                      internal-time-units-per-second))))
+
+(deftest test-a-time-limit-stops-a-command
+  "A command that runs past its limit is stopped and reported as such -- and
+promptly, because a command that catches nothing will never see the signal it is
+being asked to stop by, being PID 1 of its namespace."
+  (multiple-value-bind (result elapsed) (run-for-at-most 1 '("/bin/sleep" "60"))
+    (check (call-scute 'sandbox-result-timed-out result)
+           "the command was not reported as having run out of time: ~S" result)
+    (check (eql 9 (call-scute 'sandbox-result-term-signal result))
+           "expected it to be killed, got ~S" result)
+    (check (< elapsed 3)
+           "stopping took ~,1Fs, so a grace period was waited out for a command ~
+            that could not receive the signal" elapsed)))
+
+(deftest test-a-time-limit-leaves-a-prompt-command-alone
+  "A command that finishes inside its limit keeps its own exit status, and a
+command that catches the signal gets the grace period to act on it."
+  (multiple-value-bind (result) (run-for-at-most 5 '("/bin/sh" "-c" "exit 3"))
+    (check (eql 3 (call-scute 'sandbox-result-exit-code result))
+           "a command that finished in time did not keep its status: ~S" result)
+    (check (not (call-scute 'sandbox-result-timed-out result))
+           "a command that finished in time was reported as timed out"))
+  (multiple-value-bind (result elapsed)
+      (run-for-at-most 1 '("/bin/sh" "-c"
+                           "trap 'exit 9' TERM; i=0; ~
+                            while [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done"))
+    (check (eql 9 (call-scute 'sandbox-result-exit-code result))
+           "a command that caught the signal did not choose its own exit: ~S" result)
+    (check (call-scute 'sandbox-result-timed-out result)
+           "it was still stopped for time, and should say so")
+    (check (< elapsed 4) "the trapped stop took ~,1Fs" elapsed)))
+
+(deftest test-a-time-limit-needs-no-cgroup
+  "A wall-clock limit is the supervisor's own clock, so asking for one must not
+demand a delegated cgroup subtree that nothing would use."
+  (let ((plan (call-scute 'plan-with-wall-clock
+                          (call-scute 'compile-command-launch-plan '("/bin/true") '())
+                          5)))
+    (call-scute 'preflight plan)          ; signals if it wants a cgroup
+    (check (eql 0 (call-scute 'sandbox-result-exit-code
+                              (call-scute 'run-launch-plan plan)))
+           "a plan with only a time limit would not run")))

@@ -15,14 +15,15 @@
 
 (defstruct (sandbox-result
             (:constructor make-sandbox-result (pid exit-code term-signal
-                                               &optional events)))
+                                               &optional events timed-out)))
   "How a sandboxed command ended.  Exactly one of EXIT-CODE and TERM-SIGNAL is
 non-NIL.  EVENTS carries what the kernel recorded about the sandbox's limits,
 when limits were asked for."
   (pid         nil :read-only t)
   (exit-code   nil :read-only t)
   (term-signal nil :read-only t)
-  (events      nil :read-only t))
+  (events      nil :read-only t)
+  (timed-out   nil :read-only t))     ; stopped for taking too long
 
 (defun sandbox-result-oom-killed-p (result)
   "Whether the memory limit is what ended this command.
@@ -242,6 +243,9 @@ collector."
 
 ;;── The parent ─────────────────────────────────────────────────────────────────
 
+(defvar *stopped-for-time* nil
+  "Whether the last supervised command was stopped for exceeding its time.")
+
 (defparameter *stop-grace-seconds* 5
   "How long a sandboxed command is given to act on a stop signal before it is
 killed.  A command is free to trap a signal and exit as it likes; it is not
@@ -262,7 +266,7 @@ notifications and wave anything through."
       (%write (launch-resources-listener-go-write resources) buffer 1)
       (watch-child listener pid observations))))
 
-(defun call-with-forwarded-signals (pid function)
+(defun call-with-forwarded-signals (pid function &optional deadline)
   "Run FUNCTION with terminating signals forwarded to PID, then enforced.
 
 Forwarding alone is not enough.  The command is PID 1 of its namespace, and
@@ -279,31 +283,49 @@ still be stopped.  SBCL offers no way to read a signal's current handler back
 -- ENABLE-INTERRUPT answers NIL, not the handler it replaced -- so a caller
 embedding Scute in a larger image must reinstate its own handlers."
   (let* ((signals (list +sighup+ +sigint+ +sigquit+ +sigterm+))
-         (state :running)
+         (state (if deadline :waiting :running))
+         (timed-out nil)
+         (begin-stopping
+           (lambda (signal)
+             (%kill pid signal)
+             (setf state :stopping)
+             ;; A command that catches the signal has earned its grace period.
+             ;; One that does not will never see the signal at all, being PID 1
+             ;; of its namespace, so waiting would be five seconds of nothing.
+             (if (ignore-errors (catches-signal-p pid signal))
+                 (arm-real-timer *stop-grace-seconds*)
+                 (%kill pid +sigkill+))))
          (forward (lambda (signal info context)
                     (declare (ignore info context))
-                    (%kill pid signal)
                     (case state
-                      (:running (setf state :stopping)
-                                (arm-real-timer *stop-grace-seconds*))
-                      (:stopping (%kill pid +sigkill+)))))
+                      ((:running :waiting) (funcall begin-stopping signal))
+                      (:stopping (%kill pid signal) (%kill pid +sigkill+)))))
+         ;; One real-time timer serves both jobs, so which job it is doing is a
+         ;; matter of state: while waiting it is the deadline, and once stopping
+         ;; it is the grace period running out.
          (enforce (lambda (signal info context)
                     (declare (ignore signal info context))
-                    (when (eq state :stopping)
-                      (%kill pid +sigkill+)))))
+                    (case state
+                      (:waiting (setf timed-out t)
+                                (funcall begin-stopping +sigterm+))
+                      (:stopping (%kill pid +sigkill+))))))
     (dolist (signal signals)
       (sb-sys:enable-interrupt signal forward))
     (sb-sys:enable-interrupt +sigalrm+ enforce)
+    (when deadline (arm-real-timer deadline))
     (unwind-protect (funcall function)
       ;; Once this runs the child is ours no longer, so a timer that fires from
       ;; here on must do nothing.
       (setf state :finished)
       (arm-real-timer 0)
       (dolist (signal (cons +sigalrm+ signals))
-        (sb-sys:enable-interrupt signal :default)))))
+        (sb-sys:enable-interrupt signal :default))
+      ;; Answering through a special is unlovely, but the caller needs to know
+      ;; why the command stopped and the cleanup is the only place that knows.
+      (setf *stopped-for-time* timed-out))))
 
-(defmacro with-forwarded-signals ((pid) &body body)
-  `(call-with-forwarded-signals ,pid (lambda () ,@body)))
+(defmacro with-forwarded-signals ((pid &optional deadline) &body body)
+  `(call-with-forwarded-signals ,pid (lambda () ,@body) ,deadline))
 
 (defun read-child-stage (resources)
   "Wait for the child to reach execve.
@@ -328,17 +350,17 @@ the child failed at and the errno it failed with."
                    ((= (errno) +eintr+))
                    (t (setup-error :waitpid :errno (errno)))))))
 
-(defun classify-wait-status (pid status &optional events)
+(defun classify-wait-status (pid status &optional events timed-out)
   (if (exited-p status)
-      (make-sandbox-result pid (exit-status status) nil events)
-      (make-sandbox-result pid nil (termination-signal status) events)))
+      (make-sandbox-result pid (exit-status status) nil events timed-out)
+      (make-sandbox-result pid nil (termination-signal status) events timed-out)))
 
-(defun supervise-child (resources pid &optional observe)
+(defun supervise-child (resources pid &optional observe deadline)
   "Release PID into the sandbox and supervise it until it ends.
 Returns its raw wait status, and the stage it failed at if it never reached
 the command.  Reaping PID is this function's job alone: nothing above it may
 signal a pid that has already been collected."
-  (with-forwarded-signals (pid)
+  (with-forwarded-signals (pid deadline)
     (%close (launch-resources-sync-read resources))
     (setf (launch-resources-sync-read resources) nil)
     (unless (= 1 (%write (launch-resources-sync-write resources)
@@ -379,7 +401,9 @@ that is wrong at once instead of once per attempt."
                             asks for filesystem rules")))
       (handler-case (v0-seccomp-filter)
         (scute-error (condition) (note "seccomp" (princ-to-string condition))))
-      (when (launch-plan-limits plan)
+      ;; Only the limits a cgroup enforces need a delegated subtree; a
+      ;; wall-clock limit is the supervisor's own clock.
+      (when (cgroup-limits-p (launch-plan-limits plan))
         (multiple-value-bind (installable root explanation) (limits-installable-p)
           (declare (ignore root))
           (unless installable
@@ -417,7 +441,7 @@ rules to enforce, while an explaining run has the caller's."
   ;; Acquisition order follows the design's startup sequence, and every step is
   ;; unwound in reverse by the unwind-protects below.
   (let ((cgroup (let ((limits (launch-plan-limits plan)))
-                  (and limits (create-sandbox-cgroup limits))))
+                  (and (cgroup-limits-p limits) (create-sandbox-cgroup limits))))
         (resources nil)
         (observations nil))
     (unwind-protect
@@ -439,7 +463,10 @@ rules to enforce, while an explaining run has the caller's."
                         (supervise-child resources pid
                                          (when observe
                                            (lambda (child)
-                                             (observe-child resources child observations))))
+                                             (observe-child resources child observations)))
+                                         (let ((limits (launch-plan-limits plan)))
+                                           (and limits
+                                                (resource-limits-wall-clock limits))))
                       (setf reaped t)
                       (when stage
                         (error 'child-failure :operation (child-stage-name stage)
@@ -447,7 +474,8 @@ rules to enforce, while an explaining run has the caller's."
                                               :errno child-errno))
                       (values (classify-wait-status
                                pid status
-                               (and cgroup (read-cgroup-events cgroup)))
+                               (and cgroup (read-cgroup-events cgroup))
+                               *stopped-for-time*)
                               observations)))
                ;; Setup failed with the child still parked on the pipe, or the
                ;; wait was abandoned: it must not be left behind.  Once PID has

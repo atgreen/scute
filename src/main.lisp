@@ -10,11 +10,17 @@
 
 ;;── Exit status ────────────────────────────────────────────────────────────────
 
+(defconstant +exit-timed-out+ 124
+  "What timeout(1) answers when it has to stop a command, and so does scute.")
+
 (defun command-exit-status (result)
   "The status Scute exits with to report RESULT, by shell convention: the
-command's own code, or 128 plus the signal that killed it."
-  (or (sandbox-result-exit-code result)
-      (+ 128 (sandbox-result-term-signal result))))
+command's own code, or 128 plus the signal that killed it -- except a command
+stopped for taking too long, which is 124 as timeout(1) has it, because the
+signal that ended it says nothing about why."
+  (cond ((sandbox-result-timed-out result) +exit-timed-out+)
+        ((sandbox-result-exit-code result))
+        (t (+ 128 (sandbox-result-term-signal result)))))
 
 (defun die (status format-control &rest format-arguments)
   "Report a failure on stderr and leave with STATUS."
@@ -79,6 +85,20 @@ argument gets you.")
         append (mapcar (lambda (path) (list kind path))
                        (clingon:getopt cmd kind))))
 
+(defmacro with-timeout-from (duration plan-form)
+  "PLAN-FORM's plan, with DURATION as its wall-clock limit when one was given."
+  `(let ((plan ,plan-form)
+         (duration ,duration))
+     (if duration
+         (plan-with-wall-clock
+          plan
+          ;; A bad duration on the command line is the caller's mistake, not a
+          ;; policy that will not do.
+          (handler-case (parse-duration duration nil)
+            (policy-error (condition)
+              (usage-error (princ-to-string condition)))))
+         plan)))
+
 (defun run-handler (cmd)
   (reporting-failures
    (run-command cmd)))
@@ -107,7 +127,8 @@ argument gets you.")
   (let ((command (clingon:command-arguments cmd)))
     (when (null command)
       (usage-error "no command given; see scute run --help"))
-    (let ((plan (launch-plan-for cmd command)))
+    (let ((plan (with-timeout-from (clingon:getopt cmd :timeout)
+                                   (launch-plan-for cmd command))))
       (cond ((clingon:getopt cmd :dry-run)
              ;; Print first, then refuse: the plan is what the caller asked to
              ;; see, and a refusal explains itself better beside it.
@@ -145,6 +166,9 @@ argument gets you.")
                (when (sandbox-result-oom-killed-p result)
                  (format *error-output*
                          "~&scute: the command was killed by its memory limit~%"))
+               (when (sandbox-result-timed-out result)
+                 (format *error-output*
+                         "~&scute: the command ran past its time limit and was stopped~%"))
                (uiop:quit (command-exit-status result) t)))))))
 
 (defun make-run-command ()
@@ -169,6 +193,9 @@ argument gets you.")
                    (clingon:make-option
                     :flag :short-name #\n :long-name "dry-run" :key :dry-run
                     :description "Print the compiled plan and run nothing")
+                   (clingon:make-option
+                    :string :long-name "timeout" :key :timeout :parameter "DURATION"
+                    :description "Stop the command if it runs longer than this, e.g. 30s")
                    (clingon:make-option
                     :list :long-name "keep-env" :key :keep-env :parameter "NAME"
                     :description "Also give the command this environment variable")

@@ -71,8 +71,13 @@
            #:sandbox-result-term-signal
            #:sandbox-result-events
            #:sandbox-result-oom-killed-p
+           #:sandbox-result-timed-out
+           #:resource-limits-wall-clock
+           #:plan-with-wall-clock
+           #:parse-duration
            #:capability-sets
            #:verify-no-capabilities
+           #:catches-signal-p
            #:namespace-id
            ;; The system-call filter
            #:v0-seccomp-filter

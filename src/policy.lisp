@@ -63,11 +63,14 @@ parser read it."
   (path nil :read-only t))
 
 (defstruct (resource-limits (:constructor make-resource-limits
-                                (&key memory processes cpu-percent)))
-  "The limits a policy asks for.  NIL means the policy did not ask."
+                                (&key memory processes cpu-percent wall-clock)))
+  "The limits a policy asks for.  NIL means the policy did not ask.
+WALL-CLOCK is in seconds and is the supervisor's business rather than the
+kernel's: cgroups bound what a command may consume, not how long it may take."
   (memory      nil :read-only t)
   (processes   nil :read-only t)
-  (cpu-percent nil :read-only t))
+  (cpu-percent nil :read-only t)
+  (wall-clock  nil :read-only t))
 
 (defparameter +kept-environment+
   '("PATH" "HOME" "TERM" "LANG" "LC_ALL" "LC_CTYPE" "LC_MESSAGES" "TZ"
@@ -173,6 +176,27 @@ is the only kind anyone can check.")
                       pathname))
       :none)))
 
+(defparameter +duration-multipliers+
+  '((#\s . 1) (#\m . 60) (#\h . 3600)))
+
+(defun parse-duration (text pathname)
+  "Seconds named by TEXT: plain digits, or digits with s, m, or h."
+  (unless (and (stringp text) (plusp (length text)))
+    (policy-error "a duration is a string, like \"30s\"" pathname))
+  (let* ((suffix (assoc (char-downcase (char text (1- (length text))))
+                        +duration-multipliers+))
+         (digits (if suffix (subseq text 0 (1- (length text))) text))
+         (count (handler-case (parse-integer digits)
+                  (error ()
+                    (policy-error
+                     (format nil "~S is not a duration; expected digits with an ~
+                                  optional s, m, or h"
+                             text)
+                     pathname)))))
+    (unless (plusp count)
+      (policy-error (format nil "~S is not a usable time limit" text) pathname))
+    (* count (if suffix (cdr suffix) 1))))
+
 (defparameter +memory-multipliers+
   '((#\K . 1024) (#\M . 1048576) (#\G . 1073741824) (#\T . 1099511627776)))
 
@@ -195,7 +219,7 @@ T suffix."
 
 (defun validate-limits (value pathname)
   (let ((entries (table-entries value "limits" pathname)))
-    (check-known-keys entries '("memory" "processes" "cpu-percent")
+    (check-known-keys entries '("memory" "processes" "cpu-percent" "wall-clock")
                       "[limits]" pathname)
     (flet ((entry (key) (assoc key entries :test #'string=)))
       (make-resource-limits
@@ -208,7 +232,12 @@ T suffix."
                       (positive-integer (cdr processes) "processes" pathname)))
        :cpu-percent (let ((cpu (entry "cpu-percent")))
                       (when cpu
-                        (positive-integer (cdr cpu) "cpu-percent" pathname)))))))
+                        (positive-integer (cdr cpu) "cpu-percent" pathname)))
+       :wall-clock (let ((clock (entry "wall-clock")))
+                     (when clock
+                       (parse-duration (scalar-string (cdr clock) "wall-clock"
+                                                      pathname)
+                                       pathname)))))))
 
 (defparameter +audit-event-names+
   '(("exec" . :exec) ("open" . :open) ("connect" . :connect))
@@ -414,6 +443,22 @@ a policy's would be, so the two routes cannot diverge."
                          :directory (or directory (sb-posix:getcwd))
                          :keep keep)))
 
+(defun plan-with-wall-clock (plan seconds)
+  "PLAN with SECONDS as its wall-clock limit, whatever its policy said."
+  (let ((limits (launch-plan-limits plan)))
+    (%make-launch-plan
+     :command (launch-plan-command plan)
+     :directory (launch-plan-directory plan)
+     :environment (launch-plan-environment plan)
+     :filesystem (launch-plan-filesystem plan)
+     :network (launch-plan-network plan)
+     :audit (launch-plan-audit plan)
+     :limits (make-resource-limits
+              :memory (and limits (resource-limits-memory limits))
+              :processes (and limits (resource-limits-processes limits))
+              :cpu-percent (and limits (resource-limits-cpu-percent limits))
+              :wall-clock seconds))))
+
 (defun refuse-unimplemented-controls (plan)
   "Refuse a plan asking for a control this build cannot install.
 Enacting such a plan quietly would hand back a weaker sandbox than the one that
@@ -443,10 +488,12 @@ was asked for."
       (format stream "filesystem   unrestricted~%"))
   (let ((limits (launch-plan-limits plan)))
     (when limits
-      (format stream "limits       ~@[memory ~D ~]~@[processes ~D ~]~@[cpu-percent ~D~]~%"
+      (format stream "limits       ~@[memory ~D ~]~@[processes ~D ~]~
+                      ~@[cpu-percent ~D ~]~@[wall-clock ~Ds~]~%"
               (resource-limits-memory limits)
               (resource-limits-processes limits)
-              (resource-limits-cpu-percent limits))))
+              (resource-limits-cpu-percent limits)
+              (resource-limits-wall-clock limits))))
   (let ((audit (launch-plan-audit plan)))
     (when audit
       (format stream "audit        ~{~(~A~)~^ ~}~%" (audit-policy-events audit))))

@@ -182,6 +182,23 @@ exec could add, and nothing can be added to an empty permitted set under
 no_new_privs.  The child is a different matter -- it holds CAP_SETPCAP inside
 its own user namespace, clears its bounding set there, and the tests check it.")
 
+(defun catches-signal-p (pid signal)
+  "Whether PID has a handler installed for SIGNAL, as /proc reports it.
+
+This decides whether a grace period is worth waiting out.  The sandboxed command
+is PID 1 of its namespace, and pid_namespaces(7) discards a signal sent to PID 1
+unless PID 1 installed a handler for it -- so giving a command that catches
+nothing five seconds to tidy up means five seconds of nothing happening."
+  (with-open-file (stream (format nil "/proc/~D/status" pid)
+                          :direction :input :if-does-not-exist nil)
+    (when stream
+      (loop for line = (read-line stream nil nil)
+            while line
+            when (and (> (length line) 7) (string= "SigCgt:" line :end2 7))
+              do (let ((mask (ignore-errors
+                              (parse-integer line :start 7 :radix 16 :junk-allowed t))))
+                   (return (and mask (logbitp (1- signal) mask))))))))
+
 (defun verify-no-capabilities ()
   "Check that this process holds no capability it could pass to a child.
 The design says drop and verify, because dropping is a syscall and a syscall

@@ -66,10 +66,18 @@ Resource limits work where the kernel will allow them:
 memory = "2G"          # and no swapping around it
 processes = 256
 cpu-percent = 200      # two processors' worth
+wall-clock = "5m"      # or --timeout 5m
 ```
 
-Cgroup v2 will not let a cgroup hold processes and give controllers to its
-children at the same time, so limits need Scute to have a cgroup of its own —
+A command stopped for running too long exits **124**, as `timeout(1)` has it.
+It is sent `SIGTERM` first and given five seconds to act on it — unless it has
+no handler for `SIGTERM`, in which case it would never see it at all, being PID
+1 of its namespace, and is killed immediately instead. Nothing waits for a
+signal nobody is listening for.
+
+A wall-clock limit needs nothing of the host; the rest are cgroup v2, and
+cgroup v2 will not let a cgroup hold processes and give controllers to its
+children at the same time, so those need Scute to have a cgroup of its own —
 `systemd-run --user --scope -p Delegate=yes scute run ...`, or a service with
 `Delegate=yes`. Where that is not the case, asking for limits is refused with
 the remedy in the message rather than quietly ignored. `scute doctor` says which
@@ -283,6 +291,7 @@ Every table and key it may contain:
 | `[limits]` | `memory` | size, e.g. `"2G"` | and no swapping around it |
 | | `processes` | integer | `pids.max` |
 | | `cpu-percent` | integer | 100 is one processor |
+| | `wall-clock` | duration, e.g. `"30s"` | stop the command if it runs longer |
 | `[audit]` | `events` | `["exec", "open"]` | what to record; `"connect"` waits for networking |
 | `[environment]` | `keep` | array of names | variables to pass, beyond the short default list |
 
