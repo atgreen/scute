@@ -325,7 +325,7 @@ it:
 ```toml
 [network]
 mode = "host"
-proxy = "http://127.0.0.1:10210"       # the broker: the only reachable address
+proxy = "http://127.0.0.1:10210"       # the broker: the only port it may reach
 
 [credentials.anthropic]
 secret-file = "~/.secrets/anthropic"   # read by scute, never by the sandbox
@@ -345,14 +345,33 @@ revokes the token afterwards. The command's environment holds
 The reason to run the broker under scute is that `HTTPS_PROXY` is only a
 convention. An agent that ignores it, a subprocess that never read it, or a
 prompt-injected one told to avoid it connects straight out, and a proxy never
-sees the request. Here the kernel permits the proxy's port and refuses every
-other address. Nor can the command mint tokens of its own — the broker's control
-port is not the proxy port, so it is refused like anything else:
+sees the request. Here the kernel refuses that: ordinary HTTPS is gone, because
+naming a proxy permits its port and no other. Nor can the command mint tokens of
+its own — the broker's control port is not the proxy port, so it is refused like
+anything else:
 
 ```console
 $ scute run --policy agent.policy -- bash -c 'exec 3<>/dev/tcp/127.0.0.1/10212'
 bash: /dev/tcp/127.0.0.1/10212: Permission denied
 ```
+
+Be precise about what that buys, though, because Landlock filters ports and not
+addresses: the sandbox may still reach *some other host* on the proxy's port
+number. It cannot reach 443, so it cannot talk to the API it holds a token for,
+and the token is worthless anywhere but its destination in any case — but a
+listener on port 10210 elsewhere is a path out for data the command can already
+read. Close it by naming the address, which is enforced by the BPF guard rather
+than by Landlock:
+
+```toml
+[network]
+mode = "host"
+proxy = "http://127.0.0.1:10210"
+allow = ["127.0.0.1:10210"]          # the address too, not just the port
+```
+
+That needs [the one privilege](#an-address-allowlist). Without it, a policy gets
+port-level egress and should be read as such.
 
 `scute run --dry-run` prints which file a policy would read before it reads it,
 and `scute doctor` says whether a broker is there to attach to. Attaching means
