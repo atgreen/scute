@@ -308,3 +308,29 @@ events = [\"connect\"]"))
          (condition (nth-value 1 (ignore-errors (call-scute 'run-launch-plan plan)))))
     (check (typep condition 'scute:control-not-implemented)
            "auditing connections was accepted, got ~S" condition)))
+
+(deftest test-a-learned-policy-always-loads
+  "A learned policy must be one scute will accept.  A loader probes for library
+variants that are not installed, and a rule naming a missing path is an error,
+so those observations are left out however they arrived."
+  (let* ((observations (scute::make-observations nil))
+         (workspace (scratch-pathname "learn-loads")))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist (format nil "~A/" workspace))
+           ;; One real path, one that exists nowhere at all.
+           (scute::record-observation observations nil "/etc/hostname" :read)
+           (scute::record-observation observations nil
+                                      "/no/such/prefix/glibc-hwcaps/x/libc.so.6" :read)
+           (let* ((rules (call-scute 'learned-rules observations workspace))
+                  (text (with-output-to-string (stream)
+                          (call-scute 'write-learned-policy rules stream))))
+             (check (not (search "/no/such/prefix" text))
+                    "a learned policy named a path that does not exist:~%~A" text)
+             ;; And what it wrote is a policy scute accepts.
+             (let ((policy (call-scute 'validate-sandbox-policy
+                                       (call-scute 'parse-policy-text text))))
+               (check (call-scute 'compile-launch-plan policy '("/bin/true")
+                                  :directory workspace)
+                      "the learned policy would not compile"))))
+      (ignore-errors (sb-posix:rmdir workspace)))))

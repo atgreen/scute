@@ -157,6 +157,10 @@ access includes it.
   refusal of unix-domain sockets, which no namespace confines.
 - **Resources:** `memory.max`, `pids.max`, `cpu.max`, and `memory.swap.max`
   beneath a delegated cgroup-v2 subtree.
+- **Environment:** a short allowlist -- the variables a program needs to run at
+  all -- plus whatever the policy names. Everything else is dropped, because a
+  sandbox that confines the filesystem and passes on an `AWS_SECRET_ACCESS_KEY`
+  or an `SSH_AUTH_SOCK` has not confined much.
 - **Audit:** optional, and unprivileged: the same seccomp notification that
   `learn` uses, writing a record per event. Fixed Whistler programs attached to
   the sandbox cgroup remain the design for auditing connections, which needs

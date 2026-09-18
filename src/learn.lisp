@@ -105,6 +105,18 @@ the same refusals during a learning run as during a real one."
              (values program watched)))
       (cffi:foreign-funcall "seccomp_release" :pointer context :void))))
 
+(defun reachable-path-p (path)
+  "Whether PATH is somewhere a rule could name.
+
+A dynamic loader probes for library variants that are not installed, and those
+attempts fail because there is nothing there, not because a policy refused
+them.  Suggesting rules for paths that do not exist would also produce a policy
+that will not load, since a rule naming a missing path is an error.  A path
+about to be created counts: its directory is what governs it."
+  (or (probe-file path)
+      (let ((slash (position #\/ path :from-end t)))
+        (and slash (plusp slash) (probe-file (subseq path 0 slash))))))
+
 ;;── What was seen ──────────────────────────────────────────────────────────────
 
 (defstruct (observations (:constructor make-observations (watched)))
@@ -128,9 +140,14 @@ yet -- a file about to be created -- is answered through its directory."
               (format nil "~A~A" parent (subseq path (1+ slash)))))))
       path))
 
-(defun record-observation (observations pid path access)
+(defun record-observation (observations pid path access &optional still-valid)
+  "Record that PATH was reached for with ACCESS.
+STILL-VALID, when given, is asked after the path has been read: an answer of NIL
+means the task that asked has gone and the path may have come from whatever
+process now holds its pid, so it is discarded rather than believed."
   (declare (ignore pid))
-  (when (and path (plusp (length path)))
+  (when (and path (plusp (length path))
+             (or (null still-valid) (funcall still-valid)))
     (let* ((canonical (canonical-observed-path path))
            (known (gethash canonical (observations-paths observations))))
       (setf (gethash canonical (observations-paths observations))
@@ -148,6 +165,13 @@ symptom is every receive answering ECANCELED."
                                         :unsigned-long 0 :pointer sizes :long))
       (setup-error :seccomp-notif-sizes :errno (errno)))
     (values (cffi:mem-aref sizes :uint16 0) (cffi:mem-aref sizes :uint16 1))))
+
+(defun notification-valid-p (listener request)
+  "Whether the notification in REQUEST still refers to a living task."
+  (zerop (cffi:foreign-funcall "seccomp_notify_id_valid"
+                               :int listener
+                               :uint64 (cffi:mem-ref request :uint64 0)
+                               :int)))
 
 (defun steal-listener (pid child-fd)
   "Take the listener CHILD-FD out of PID, so the supervisor holds it.
@@ -237,11 +261,14 @@ blocked on a notification nobody will answer would otherwise hang for ever."
                (let* ((number (cffi:mem-ref request :int32 16))
                       (from (cffi:mem-ref request :uint32 8))
                       (syscall (cdr (assoc number (observations-watched observations)))))
-                 (when (and syscall
-                            (zerop (cffi:foreign-funcall "seccomp_notify_id_valid"
-                                                         :int listener
-                                                         :uint64 (cffi:mem-ref request :uint64 0)
-                                                         :int)))
+                 ;; Validate, read, then validate again.  A notification names a
+                 ;; pid, and a pid can be reused: if the task exits between the
+                 ;; check and the read, process_vm_readv answers with some other
+                 ;; process's memory and the path belongs to whatever now holds
+                 ;; that number.  This is how a watched shell came to report
+                 ;; reading dbus's libraries.  The second check is what makes the
+                 ;; answer belong to the task that asked.
+                 (when (and syscall (notification-valid-p listener request))
                    (record-observation
                     observations from
                     (resolve-target-path
@@ -259,7 +286,8 @@ blocked on a notification nobody will answer would otherwise hang for ever."
                         (let ((index (watched-syscall-flags-argument syscall)))
                           (if index
                               (flags-access (cffi:mem-ref request :uint64 (+ 32 (* 8 index))))
-                              :read)))))
+                              :read)))
+                    (lambda () (notification-valid-p listener request))))
                  (dotimes (index response-size)
                    (setf (cffi:mem-aref response :uint8 index) 0))
                  (setf (cffi:mem-ref response :uint64 0) (cffi:mem-ref request :uint64 0)
@@ -308,16 +336,27 @@ shell wanted a terminal is not."
         ((find-if (lambda (anchor) (beneath-p path anchor)) +policy-anchors+))
         ((string= "/" path) "/")
         ((uiop:directory-exists-p path) (trim-trailing-slash path))
-        (t path)))
+        ((probe-file path) path)
+        ;; Not there yet -- a file about to be created.  What governs creating it
+        ;; is the directory it will appear in, and a rule must name something
+        ;; that exists or the policy will not load at all.
+        (t (let ((slash (position #\/ path :from-end t)))
+             (if (and slash (plusp slash)) (subseq path 0 slash) "/")))))
 
 (defun learned-rules (observations directory)
   "Fold what was observed into as few rules as say the same thing.
-Answers an alist of access kind to the paths it should name."
+Answers an alist of access kind to the paths it should name.
+
+Paths that exist nowhere are left out.  A loader probes for library variants
+that are not installed, and a rule naming a missing path is an error -- so a
+learned policy that kept them would be a policy that will not load, which is a
+worse outcome than a policy that is slightly too narrow."
   (let ((accesses (make-hash-table :test #'equal)))
     (maphash (lambda (path seen)
+               (when (reachable-path-p path)
                (let ((rule-path (policy-path-for path (trim-trailing-slash directory))))
                  (setf (gethash rule-path accesses)
-                       (union seen (gethash rule-path accesses)))))
+                       (union seen (gethash rule-path accesses))))))
              (observations-paths observations))
     ;; A path covered by a shallower rule needs no rule of its own.
     (let ((paths (sort (loop for path being the hash-keys of accesses collect path)
@@ -370,18 +409,6 @@ Answers an alist of access kind to the paths it should name."
 
 (defun permitted-access-p (rules path access abi)
   (and (granting-rule rules path access abi) t))
-
-(defun reachable-path-p (path)
-  "Whether PATH is somewhere a rule could name.
-
-A dynamic loader probes for library variants that are not installed, and those
-attempts fail because there is nothing there, not because a policy refused
-them.  Suggesting rules for paths that do not exist would also produce a policy
-that will not load, since a rule naming a missing path is an error.  A path
-about to be created counts: its directory is what governs it."
-  (or (probe-file path)
-      (let ((slash (position #\/ path :from-end t)))
-        (and slash (plusp slash) (probe-file (subseq path 0 slash))))))
 
 (defun refused-observations (observations rules)
   "The paths in OBSERVATIONS that RULES do not allow, and what was wanted.

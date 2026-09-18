@@ -95,9 +95,11 @@ argument gets you.")
           ((and rules namespaces-only)
            (usage-error "--namespaces-only asks for no filesystem restriction, but filesystem rules were given too"))
           (policy
-           (compile-launch-plan (read-sandbox-policy policy) command))
+           (compile-launch-plan (read-sandbox-policy policy) command
+                                :keep (clingon:getopt cmd :keep-env)))
           ((or rules namespaces-only)
-           (compile-command-launch-plan command rules))
+           (compile-command-launch-plan command rules nil
+                                        (clingon:getopt cmd :keep-env)))
           (t
            (usage-error +nothing-declared-message+)))))
 
@@ -167,6 +169,9 @@ argument gets you.")
                    (clingon:make-option
                     :flag :short-name #\n :long-name "dry-run" :key :dry-run
                     :description "Print the compiled plan and run nothing")
+                   (clingon:make-option
+                    :list :long-name "keep-env" :key :keep-env :parameter "NAME"
+                    :description "Also give the command this environment variable")
                    (clingon:make-option
                     :string :long-name "audit" :key :audit :parameter "FILE"
                     :description "Write the audit trail a policy asks for here, not to stderr")

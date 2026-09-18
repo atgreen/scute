@@ -69,6 +69,18 @@ parser read it."
   (processes   nil :read-only t)
   (cpu-percent nil :read-only t))
 
+(defparameter +kept-environment+
+  '("PATH" "HOME" "TERM" "LANG" "LC_ALL" "LC_CTYPE" "LC_MESSAGES" "TZ"
+    "USER" "LOGNAME")
+  "The variables a sandbox is given unless a policy says otherwise.
+
+Everything else is dropped.  A sandbox exists to run code you have reason to
+distrust, and the environment it inherits is where the credentials are: an
+AWS_SECRET_ACCESS_KEY, a GITHUB_TOKEN, an SSH_AUTH_SOCK naming an agent that
+will sign anything asked of it.  A policy that says nothing about the
+environment should not be handing those over, and a list short enough to read
+is the only kind anyone can check.")
+
 (defstruct (audit-policy (:constructor make-audit-policy (events)))
   "The events a policy asks to be audited."
   (events nil :read-only t))
@@ -79,6 +91,7 @@ parser read it."
   (network    :none :read-only t)
   (limits     nil :read-only t)
   (audit      nil :read-only t)
+  (environment nil :read-only t)     ; extra variables to keep, beyond the default
   (pathname   nil :read-only t))
 
 ;;── The document Scute expects ─────────────────────────────────────────────────
@@ -220,12 +233,35 @@ silently.")
              (string-array (cdr (assoc "events" entries :test #'string=))
                            "events" pathname)))))
 
+(defun validate-environment (value pathname)
+  "The variables a policy asks to keep, beyond the ones kept anyway."
+  (let ((entries (table-entries value "environment" pathname)))
+    (check-known-keys entries '("keep") "[environment]" pathname)
+    (let ((keep (cdr (assoc "keep" entries :test #'string=))))
+      (mapcar (lambda (name)
+                (when (find #\= name)
+                  (policy-error
+                   (format nil "~S is not a variable name" name) pathname))
+                name)
+              (string-array keep "keep" pathname)))))
+
+(defun kept-environment (extra &optional (environment (sb-ext:posix-environ)))
+  "ENVIRONMENT with only the variables scute keeps and EXTRA names."
+  (let ((wanted (append +kept-environment+ extra)))
+    (remove-if-not (lambda (entry)
+                     (let ((equals (position #\= entry)))
+                       (and equals
+                            (member (subseq entry 0 equals) wanted
+                                    :test #'string=))))
+                   environment)))
+
 (defun validate-sandbox-policy (document &optional pathname)
   "Check DOCUMENT against the policy schema and answer a SANDBOX-POLICY.
 Anything the schema does not name is an error: a policy Scute half understands
 is a sandbox the operator half asked for."
   (let ((tables (table-entries document "policy" pathname)))
-    (check-known-keys tables '("filesystem" "network" "limits" "audit")
+    (check-known-keys tables '("filesystem" "network" "limits" "audit"
+                               "environment")
                       "a policy" pathname)
     (flet ((table (name) (cdr (assoc name tables :test #'string=))))
       (let ((filesystem (table "filesystem")))
@@ -242,6 +278,8 @@ is a sandbox the operator half asked for."
                    (validate-limits (table "limits") pathname))
          :audit (when (table "audit")
                   (validate-audit (table "audit") pathname))
+         :environment (when (table "environment")
+                        (validate-environment (table "environment") pathname))
          :pathname pathname)))))
 
 ;;── The launch plan ────────────────────────────────────────────────────────────
@@ -335,7 +373,8 @@ was not asked about."
 
 (defun compile-launch-plan (policy command
                             &key (directory (sb-posix:getcwd))
-                                 (environment (sb-ext:posix-environ)))
+                                 (environment (sb-ext:posix-environ))
+                                 (keep '()))
   "Resolve POLICY and COMMAND into an immutable launch plan.
 Paths are canonical, the command is the program that will actually run, and
 nothing here touches the kernel."
@@ -345,7 +384,10 @@ nothing here touches the kernel."
     (%make-launch-plan
      :command (cons (resolve-executable (first command) directory) (rest command))
      :directory directory
-     :environment (copy-list environment)
+     ;; Deny-by-default applies to the environment too: what a command is given
+     ;; is the short list plus whatever the policy and the caller named.
+     :environment (kept-environment (append (sandbox-policy-environment policy) keep)
+                                   environment)
      :filesystem (mapcar (lambda (rule)
                            (resolve-rule rule directory
                                          (sandbox-policy-pathname policy)))
@@ -354,7 +396,7 @@ nothing here touches the kernel."
      :limits (sandbox-policy-limits policy)
      :audit (sandbox-policy-audit policy))))
 
-(defun compile-command-launch-plan (command filesystem &optional directory)
+(defun compile-command-launch-plan (command filesystem &optional directory keep)
   "A launch plan for COMMAND with FILESYSTEM given as (KIND PATH) forms.
 The path a caller with no policy file takes: the forms are checked exactly as
 a policy's would be, so the two routes cannot diverge."
@@ -369,7 +411,8 @@ a policy's would be, so the two routes cannot diverge."
                              (make-filesystem-rule kind path)))
                          filesystem))))
     (compile-launch-plan policy command
-                         :directory (or directory (sb-posix:getcwd)))))
+                         :directory (or directory (sb-posix:getcwd))
+                         :keep keep)))
 
 (defun refuse-unimplemented-controls (plan)
   "Refuse a plan asking for a control this build cannot install.
@@ -387,6 +430,12 @@ was asked for."
   (format stream "~&command      ~{~S~^ ~}~%" (launch-plan-command plan))
   (format stream "directory    ~A~%" (launch-plan-directory plan))
   (format stream "network      ~(~A~)~%" (launch-plan-network plan))
+  ;; Names only.  The values are the caller's own, but a plan is the sort of
+  ;; thing that ends up in a log.
+  (format stream "environment  ~:[nothing~;~:*~{~A~^ ~}~]~%"
+          (sort (mapcar (lambda (entry) (subseq entry 0 (position #\= entry)))
+                        (launch-plan-environment plan))
+                #'string<))
   (if (launch-plan-filesystem plan)
       (dolist (rule (launch-plan-filesystem plan))
         (format stream "filesystem   ~(~18A~) ~A~%"

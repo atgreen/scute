@@ -77,7 +77,27 @@ when SIGTERM reaches it with the default disposition, so a test that lets a
 signal through would otherwise abort the suite and still report success -- and
 a suite that can pass without running is worse than no suite.")
 
+(defun call-with-quiet-stdin (function)
+  "Run FUNCTION with standard input on /dev/null.
+
+Not tidiness: bash decides it was started by a remote shell daemon when its
+standard input is a socket, and then sources ~/.bashrc even non-interactively.
+A suite run from a harness whose stdin is a socket would therefore watch a shell
+drag in the developer's dotfiles, and what a sandbox needs would depend on who
+ran the tests."
+  (let ((saved (sb-posix:dup 0))
+        (null (sb-posix:open "/dev/null" sb-posix:o-rdonly)))
+    (unwind-protect
+         (progn (sb-posix:dup2 null 0)
+                (funcall function))
+      (sb-posix:dup2 saved 0)
+      (sb-posix:close null)
+      (sb-posix:close saved))))
+
 (defun run-tests ()
+  (call-with-quiet-stdin #'run-tests-now))
+
+(defun run-tests-now ()
   (ignore-errors (delete-file +completion-sentinel+))
   (setf *failures* 0 *ran* 0)
   (mapc #'run-test (reverse *tests*))

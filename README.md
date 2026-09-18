@@ -211,6 +211,13 @@ from the command. Nothing is restricted during a learning run — that is the
 point — but the rest of the sandbox still applies, because the notifications and
 the denylist live in the same filter.
 
+One surprise worth knowing before you learn a policy for a shell script: bash
+sources `~/.bashrc` even non-interactively when its standard input is a socket,
+because it concludes it was started by a remote shell daemon. Under CI or an
+agent harness, that means your dotfiles — and everything they source — become
+part of what the sandbox needs. `scute learn < /dev/null`, or invoking the shell
+as `bash --norc`, keeps the answer about your program rather than your prompt.
+
 Two honest caveats. One run sees one path through a program: a build that
 downloads on a cold cache and not on a warm one will teach you the warm case.
 And the mechanism is sound for *watching* but not for *deciding* — a path can
@@ -277,6 +284,7 @@ Every table and key it may contain:
 | | `processes` | integer | `pids.max` |
 | | `cpu-percent` | integer | 100 is one processor |
 | `[audit]` | `events` | `["exec", "open"]` | what to record; `"connect"` waits for networking |
+| `[environment]` | `keep` | array of names | variables to pass, beyond the short default list |
 
 A relative path means what it says from where scute was invoked and may not
 climb out of it. Anything the schema does not name — an unknown table, an
@@ -322,6 +330,34 @@ start.
 Some tests exercise the kernel directly, so they need a Linux host with
 unprivileged user namespaces and Landlock enabled.
 
+## The environment
+
+A sandbox that confines the filesystem and hands over `AWS_SECRET_ACCESS_KEY`
+has not confined much. Scute passes a short list and drops the rest:
+
+```
+HOME  LANG  LC_ALL  LC_CTYPE  LC_MESSAGES  LOGNAME  PATH  TERM  TZ  USER
+```
+
+Anything else is named, by the policy or on the command line:
+
+```toml
+[environment]
+keep = ["CARGO_HOME", "RUSTUP_HOME"]
+```
+
+```sh
+scute run --policy scute.policy --keep-env CARGO_HOME -- cargo build
+```
+
+`--dry-run` lists the variable names a command will be given — names only,
+because a plan is the sort of thing that ends up in a log.
+
+This is the one place where a sandbox that is stricter than you expect will bite
+first: a tool that needs `JAVA_HOME` or `SSH_AUTH_SOCK` will not find it until
+you say so. That is the trade, and it is deliberate — `SSH_AUTH_SOCK` in
+particular names an agent that will sign anything asked of it.
+
 ## When something will not run
 
 | What you see | What it usually means |
@@ -330,6 +366,8 @@ unprivileged user namespaces and Landlock enabled.
 | `/dev/null: Permission denied` | Landlock grants nothing implicitly. Name `/dev/null`, and usually `/proc`, in the policy. |
 | A binary you just built will not run | A directory granted `read-write` can hold it; running it needs `read-write-execute`. |
 | `This build cannot enforce resource limits` | Cgroup v2 will not let a cgroup holding processes give controllers to its children. Run scute in a cgroup of its own: `systemd-run --user --scope -p Delegate=yes scute run ...` |
+| A learned policy is full of your dotfiles | bash sources `~/.bashrc` non-interactively when stdin is a socket, as under CI. Run with `< /dev/null`, or use `bash --norc`. |
+| A tool cannot find its home directory or cache | The environment is filtered. Name the variable: `--keep-env JAVA_HOME`, or `[environment] keep = [...]`. |
 | `command not found` for something on your `PATH` | The command must be an absolute path: a sandbox whose command is chosen by searching `PATH` depends on the environment it inherited. |
 | `scute doctor` exits non-zero | It names the missing control. Landlock needs Linux 5.13 or newer, and unprivileged user namespaces must be enabled. |
 

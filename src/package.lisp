@@ -34,6 +34,9 @@
            #:sandbox-policy-network
            #:sandbox-policy-limits
            #:sandbox-policy-audit
+           #:sandbox-policy-environment
+           #:kept-environment
+           #:launch-plan-environment
            #:filesystem-rule
            #:filesystem-rule-kind
            #:filesystem-rule-path

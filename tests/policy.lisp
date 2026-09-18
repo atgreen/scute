@@ -260,3 +260,76 @@ every other test in this file is in service of."
       (dolist (leftover '("witness" "leak"))
         (ignore-errors (delete-file (format nil "~A/~A" workspace leftover))))
       (ignore-errors (sb-posix:rmdir workspace)))))
+
+;;── The environment ────────────────────────────────────────────────────────────
+
+(deftest test-the-environment-is-filtered
+  "What a command is given is the short list, not everything the caller had."
+  (let ((environment '("PATH=/usr/bin" "HOME=/home/someone" "TERM=xterm"
+                       "AWS_SECRET_ACCESS_KEY=hunter2" "GITHUB_TOKEN=ghp_x"
+                       "SSH_AUTH_SOCK=/run/user/1000/keyring/ssh"
+                       "CARGO_HOME=/home/someone/.cargo")))
+    (let ((kept (call-scute 'kept-environment '() environment)))
+      (dolist (expected '("PATH=/usr/bin" "HOME=/home/someone" "TERM=xterm"))
+        (check (member expected kept :test #'string=)
+               "~S was dropped, and things will not run without it" expected))
+      (dolist (secret '("AWS_SECRET_ACCESS_KEY=hunter2" "GITHUB_TOKEN=ghp_x"
+                        "SSH_AUTH_SOCK=/run/user/1000/keyring/ssh"))
+        (check (not (member secret kept :test #'string=))
+               "~S crossed into the sandbox" secret)))
+    ;; And what a policy or a caller names is kept as well.
+    (let ((kept (call-scute 'kept-environment '("CARGO_HOME") environment)))
+      (check (member "CARGO_HOME=/home/someone/.cargo" kept :test #'string=)
+             "a variable that was asked for was dropped anyway"))))
+
+(deftest test-a-policy-may-keep-a-variable
+  "The policy decides, the same way it decides about paths."
+  (let ((policy (policy-from-string "[filesystem]
+read-execute = [\"/usr\"]
+[environment]
+keep = [\"CARGO_HOME\", \"RUSTUP_HOME\"]")))
+    (check (equal '("CARGO_HOME" "RUSTUP_HOME")
+                  (call-scute 'sandbox-policy-environment policy))
+           "the policy's environment list was not read: ~S"
+           (call-scute 'sandbox-policy-environment policy)))
+  (check (refused-p "[filesystem]
+read = [\"/etc\"]
+[environment]
+inherit = true")
+         "an unknown key in [environment] was accepted")
+  (check (refused-p "[filesystem]
+read = [\"/etc\"]
+[environment]
+keep = [\"NAME=value\"]")
+         "something that is not a variable name was accepted"))
+
+(deftest test-secrets-do-not-reach-the-command
+  "End to end: a secret in the caller's environment is not in the sandbox's, and
+a variable the policy names is."
+  (let ((report (scratch-pathname "environment")))
+    (unwind-protect
+         (progn
+           (sb-posix:putenv "SCUTE_TEST_SECRET=hunter2")
+           (sb-posix:putenv "SCUTE_TEST_KEPT=wanted")
+           (let* ((policy (policy-from-string
+                           (format nil "[filesystem]~%~
+                                        read-execute = [\"/usr\"]~%~
+                                        read-write = [\"/tmp\"]~%~
+                                        [environment]~%keep = [\"SCUTE_TEST_KEPT\"]~%")))
+                  (plan (call-scute 'compile-launch-plan policy
+                                    (list "/bin/sh" "-c"
+                                          (format nil "echo \"secret=[$SCUTE_TEST_SECRET] ~
+                                                       kept=[$SCUTE_TEST_KEPT] ~
+                                                       path=[$PATH]\" > ~A"
+                                                  report))))
+                  (result (call-scute 'run-launch-plan plan))
+                  (said (read-file-string report)))
+             (check (eql 0 (call-scute 'sandbox-result-exit-code result))
+                    "the command did not finish: ~S" result)
+             (check (search "secret=[]" said)
+                    "a secret crossed into the sandbox:~%~A" said)
+             (check (search "kept=[wanted]" said)
+                    "the variable the policy named did not arrive:~%~A" said)
+             (check (not (search "path=[]" said))
+                    "PATH was dropped, and nothing will run:~%~A" said)))
+      (delete-scratch report))))
