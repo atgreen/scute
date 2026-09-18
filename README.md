@@ -113,6 +113,18 @@ $ scute run --policy scute.policy -- curl -sS https://example.com
 curl: (6) Could not resolve host: example.com
 ```
 
+A command that needs the network — a build fetching dependencies — asks for it:
+
+```toml
+[network]
+mode = "host"
+```
+
+That is the host's network, shared, with no filtering of its own: scute has no
+proxy and no allowlist yet, so a policy saying `host` is saying "this command may
+talk to anything I can". It has to be written down for that reason. Pair it with
+something that governs egress if that matters — see below.
+
 The write landed because the policy allows this directory. The key was refused
 because nothing in the policy names it. The network is gone because the sandbox
 has a network namespace of its own with nothing in it — not a proxy, not a
@@ -300,7 +312,7 @@ Every table and key it may contain:
 | | `read-execute` | array of paths | the same, and execute |
 | | `read-write` | array of paths | read, write, create, delete, rename |
 | | `read-write-execute` | array of paths | the same, and execute |
-| `[network]` | `mode` | `"none"` | the only mode v0 knows |
+| `[network]` | `mode` | `"none"` or `"host"` | no network at all, or the host's, shared |
 | | `unix-sockets` | `true` / `false` | may the command open an AF_UNIX socket (default `false`) |
 | `[limits]` | `memory` | size, e.g. `"2G"` | and no swapping around it |
 | | `processes` | integer | `pids.max` |
@@ -380,6 +392,42 @@ This is the one place where a sandbox that is stricter than you expect will bite
 first: a tool that needs `JAVA_HOME` or `SSH_AUTH_SOCK` will not find it until
 you say so. That is the trade, and it is deliberate — `SSH_AUTH_SOCK` in
 particular names an agent that will sign anything asked of it.
+
+## Where this sits
+
+Scute confines one command on your own kernel. That is the whole of it: a single
+unprivileged binary, no daemon, no container, no image to build, about 20 ms of
+overhead, and a policy you can read in one screen.
+
+It deliberately does not do two things that matter for agent work, and there are
+better tools for both:
+
+- **Egress control.** `network mode = "host"` is all or nothing. NVIDIA's
+  [OpenShell](https://github.com/NVIDIA/OpenShell) runs agent sandboxes behind a
+  proxy that enforces policy at the HTTP method and path level, in containers or
+  MicroVMs, with a gateway and a Kubernetes path. If what you need is "this agent
+  may GET the GitHub API but not POST", that is the shape of tool to reach for.
+- **Credentials.** Scute drops secrets from the environment, which stops a
+  command reading what it was never given — but a command that legitimately needs
+  a key still holds one.
+  [KeyFence](https://github.com/atgreen/keyfence) makes the key worthless outside
+  its destination: the agent holds an opaque `kf_` token and the real credential
+  never enters its address space.
+
+They compose. Scute confines the process, KeyFence contains its credentials:
+
+```toml
+[filesystem]
+read-execute = ["/usr"]
+read = ["/etc", "/proc"]
+read-write = [".", "/dev/null"]
+
+[network]
+mode = "host"            # to reach the proxy on localhost
+
+[environment]
+keep = ["ANTHROPIC_API_KEY", "HTTPS_PROXY"]   # the key here is a kf_ token
+```
 
 ## When something will not run
 

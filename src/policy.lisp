@@ -173,14 +173,16 @@ Answers the mode and that permission."
     (let ((mode (scalar-string (cdr (assoc "mode" entries :test #'string=))
                                "mode" pathname))
           (unix (assoc "unix-sockets" entries :test #'string=)))
-      (unless (string= "none" mode)
-        (policy-error (format nil "network mode ~S is not part of v0, which ~
-                                   knows only \"none\""
-                              mode)
-                      pathname))
-      (when (and unix (not (member (cdr unix) '(t nil))))
-        (policy-error "unix-sockets is true or false" pathname))
-      (values :none (and unix (eq t (cdr unix)))))))
+      (let ((setting (cond ((string= "none" mode) :none)
+                           ((string= "host" mode) :host)
+                           (t (policy-error
+                               (format nil "network mode ~S is not one v0 knows; ~
+                                            expected \"none\" or \"host\""
+                                       mode)
+                               pathname)))))
+        (when (and unix (not (member (cdr unix) '(t nil))))
+          (policy-error "unix-sockets is true or false" pathname))
+        (values setting (and unix (eq t (cdr unix))))))))
 
 (defparameter +duration-multipliers+
   '((#\s . 1) (#\m . 60) (#\h . 3600)))
@@ -497,7 +499,10 @@ was asked for."
   (format stream "~&command      ~{~S~^ ~}~%" (launch-plan-command plan))
   (format stream "directory    ~A~%" (launch-plan-directory plan))
   (format stream "network      ~(~A~)~:[~;, unix sockets allowed~]~%"
-          (launch-plan-network plan) (launch-plan-unix-sockets plan))
+          (case (launch-plan-network plan)
+            (:host "the host's, shared")
+            (t "none"))
+          (launch-plan-unix-sockets plan))
   ;; Names only.  The values are the caller's own, but a plan is the sort of
   ;; thing that ends up in a log.
   (format stream "environment  ~:[nothing~;~:*~{~A~^ ~}~]~%"

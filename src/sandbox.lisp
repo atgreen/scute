@@ -416,7 +416,7 @@ that is wrong at once instead of once per attempt."
                    :detail (format nil "~{~A~^; ~}" (nreverse missing))))
     (refuse-unimplemented-controls plan)))
 
-(defun spawn-sandbox-child (resources)
+(defun spawn-sandbox-child (resources &optional (network :none))
   "Create the child that will become the command, and answer its pid.
 
 In the child this never returns: it becomes the command, or exits saying which
@@ -424,7 +424,7 @@ stage refused.  Buffered output is flushed first, because the child inherits a
 copy of it and would write it a second time."
   (finish-output *standard-output*)
   (finish-output *error-output*)
-  (let ((pid (clone3 +sandbox-clone-flags+)))
+  (let ((pid (clone3 (clone-flags-for-network network))))
     (when (zerop pid)
       (run-child resources))                ; never returns
     pid))
@@ -452,7 +452,7 @@ rules to enforce, while an explaining run has the caller's."
                (acquire-launch-resources plan :observe observe)
              (setf resources acquired
                    observations (and observe (make-observations watched))))
-           (let ((pid (spawn-sandbox-child resources))
+           (let ((pid (spawn-sandbox-child resources (launch-plan-network plan)))
                  (reaped nil))
              (unwind-protect
                   (progn

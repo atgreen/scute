@@ -154,7 +154,10 @@ access includes it.
 - **Process:** user, PID, mount, UTS, and network namespaces; `no_new_privs`;
   zero capabilities; and a denylist seccomp filter installed after setup.
 - **Network:** an isolated network namespace with no external route, and a
-  refusal of unix-domain sockets, which no namespace confines.
+  refusal of unix-domain sockets, which no namespace confines. A policy may
+  instead share the host's network, which is all or nothing: scute has no proxy
+  and no allowlist, so saying `host` is saying the command may reach whatever the
+  caller can. It is a policy decision because it has to be a visible one.
 - **Resources:** `memory.max`, `pids.max`, `cpu.max`, and `memory.swap.max`
   beneath a delegated cgroup-v2 subtree.
 - **Environment:** a short allowlist -- the variables a program needs to run at

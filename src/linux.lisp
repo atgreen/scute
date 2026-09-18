@@ -30,6 +30,16 @@
   (logior +clone-newuser+ +clone-newns+ +clone-newpid+
           +clone-newuts+ +clone-newnet+))
 
+(defun clone-flags-for-network (mode)
+  "The clone flags for a sandbox whose policy asked for network MODE.
+
+A network namespace of its own is how a sandbox has no network: leaving it out
+is how a policy says the command shares the host's, which some builds need and
+which the policy therefore has to say out loud."
+  (ecase mode
+    (:none +sandbox-clone-flags+)
+    (:host (logandc2 +sandbox-clone-flags+ +clone-newnet+))))
+
 (defconstant +clone-args-size-ver0+ 64)
 
 (defconstant +sigchld+ 17)

@@ -360,3 +360,45 @@ a variable the policy names is."
              (check (not (search "path=[]" said))
                     "PATH was dropped, and nothing will run:~%~A" said)))
       (delete-scratch report))))
+
+(deftest test-the-network-mode-is-the-policys-to-choose
+  "A sandbox has no network because it has a network namespace of its own.  A
+policy that needs one -- a build that fetches dependencies -- says so, and then
+shares the host's."
+  (check (eq :none (call-scute 'sandbox-policy-network
+                               (policy-from-string "[filesystem]
+read = [\"/etc\"]")))
+         "a policy that says nothing did not default to no network")
+  (check (eq :host (call-scute 'sandbox-policy-network
+                               (policy-from-string "[filesystem]
+read = [\"/etc\"]
+[network]
+mode = \"host\"")))
+         "a policy asking for the host's network was not read")
+  (check (refused-p "[filesystem]
+read = [\"/etc\"]
+[network]
+mode = \"bridged\"")
+         "a network mode v0 does not know was accepted")
+  ;; And it reaches the kernel: routes exist in one and not the other.
+  (flet ((routes (mode)
+           (let* ((report (scratch-pathname "routes"))
+                  (policy (policy-from-string
+                           (format nil "[filesystem]~%read-execute = [\"/usr\"]~%~
+                                        read = [\"/proc\"]~%~
+                                        read-write = [\"/tmp\"]~%~
+                                        [network]~%mode = ~S~%" mode))))
+             (unwind-protect
+                  (progn
+                    (call-scute 'run-launch-plan
+                                (call-scute 'compile-launch-plan policy
+                                            (list "/bin/sh" "-c"
+                                                  (format nil "tail -n +2 /proc/net/route ~
+                                                               | wc -l > ~A"
+                                                          report))))
+                    (parse-integer (read-file-string report) :junk-allowed t))
+               (delete-scratch report)))))
+    (check (eql 0 (routes "none"))
+           "a sandbox with no network had a route")
+    (check (plusp (or (routes "host") 0))
+           "a sandbox sharing the host's network had no route")))
