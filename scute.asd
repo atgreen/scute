@@ -26,9 +26,22 @@
   :build-pathname "scute"
   :entry-point "scute:main")
 
+;;; Startup latency is paid on every invocation of a tool meant to wrap every
+;;; command; disk is paid once.  A compressed core is about 15 MiB and takes
+;;; some 215 ms to start; uncompressed it is about 67 MiB and takes some 75 ms,
+;;; and the compression level barely moves either number, because the cost is
+;;; decompressing the core at all.  So: fast by default, small on request with
+;;; SCUTE_COMPRESSION=9 (or any zstd level) for anyone who would rather have
+;;; the disk back.
 #+sb-core-compression
 (defmethod asdf:perform ((o asdf:image-op) (c asdf:system))
-  (uiop:dump-image (asdf:output-file o c) :executable t :compression t))
+  (uiop:dump-image (asdf:output-file o c)
+                   :executable t
+                   :compression (let ((level (uiop:getenv "SCUTE_COMPRESSION")))
+                                  (cond ((or (null level) (string= "" level)) nil)
+                                        ((every #'digit-char-p level)
+                                         (parse-integer level))
+                                        (t t)))))
 
 (asdf:defsystem #:scute/test
   :description "Tests for Scute."

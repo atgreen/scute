@@ -104,3 +104,12 @@ The fault is in the declaration, so it is reported as one."
                                  (run-with-rules "true" '((:read-only "/usr")))))))
     (check (typep condition 'scute:usage-error)
            "an unknown access kind was accepted, got ~S" condition)))
+
+(deftest test-a-rule-on-the-root
+  "A policy may name the root.  Trimming its trailing slash would leave an empty
+path the kernel cannot open, so the root is the one path that keeps its slash."
+  (let ((result (call-scute 'run-namespaced-command
+                            '("/bin/sh" "-c" "cat /etc/hostname > /dev/null")
+                            :filesystem '((:read-write-execute "/")))))
+    (check (eql 0 (call-scute 'sandbox-result-exit-code result))
+           "a sandbox granted the whole filesystem could not read /etc: ~S" result)))

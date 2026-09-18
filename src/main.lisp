@@ -151,6 +151,56 @@ argument gets you.")
                ("Run with the process layer alone, filesystem unrestricted:"
                 . "scute run --namespaces-only -- /bin/sh -i"))))
 
+(defun report-path-access (rules path stream)
+  "Say what RULES allow at PATH.  Answers whether anything is allowed at all."
+  (multiple-value-bind (report examined) (path-access-report rules path)
+    (let* ((granted (remove nil report :key #'cdr))
+           (accesses (mapcar #'car granted))
+           ;; One path can draw its accesses from more than one rule, so name
+           ;; every rule involved rather than whichever came first.
+           (rules-involved (remove-duplicates (mapcar #'cdr granted))))
+      (format stream "~&~A~30T~{~(~A~)~^ ~}~:[nothing~;~]" path accesses accesses)
+      (when rules-involved
+        (format stream "~48T(~{~(~A~) ~A~^, ~})"
+                (loop for rule in rules-involved
+                      append (list (path-rule-kind rule) (path-rule-path rule)))))
+      ;; "via" belongs only where the path itself does not exist and its nearest
+      ;; existing ancestor is what governs it.
+      (cond ((null examined)
+             (format stream "~48T(no part of this path exists)"))
+            ((not (probe-file path))
+             (format stream " via ~A" examined)))
+      (terpri stream)
+      (and granted t))))
+
+(defun check-handler (cmd)
+  (reporting-failures
+   (let ((policy (clingon:getopt cmd :policy))
+         (paths (clingon:command-arguments cmd)))
+     (unless policy
+       (usage-error "scute check needs a policy: --policy FILE"))
+     (unless paths
+       (usage-error "scute check needs one or more paths to ask about"))
+     (let* ((plan (compile-launch-plan (read-sandbox-policy policy) '("/bin/true")))
+            (rules (launch-plan-filesystem plan))
+            (denied 0))
+       (dolist (path paths)
+         (unless (report-path-access rules path *standard-output*)
+           (incf denied)))
+       (uiop:quit (if (plusp denied) 1 0) t)))))
+
+(defun make-check-command ()
+  (clingon:make-command
+   :name "check"
+   :description "Ask a policy what it allows at a path"
+   :usage "--policy FILE PATH [PATH ...]"
+   :options (list (clingon:make-option
+                   :string :long-name "policy" :key :policy
+                   :description "Policy file to ask about"))
+   :handler #'check-handler
+   :examples '(("Will the build be able to write here?"
+                . "scute check --policy scute.policy . /usr/bin/gcc /etc/passwd"))))
+
 ;;── doctor ─────────────────────────────────────────────────────────────────────
 
 (defun doctor-handler (cmd)
@@ -184,7 +234,8 @@ argument gets you.")
    :authors (list "Anthony Green <green@moxielogic.com>")
    :license "MIT"
    :usage "[GLOBAL-OPTIONS] COMMAND [OPTIONS] [ARGUMENTS ...]"
-   :sub-commands (list (make-run-command) (make-doctor-command))
+   :sub-commands (list (make-run-command) (make-check-command)
+                       (make-doctor-command))
    :handler (lambda (cmd)
               (clingon:print-usage-and-exit cmd *standard-output*))))
 

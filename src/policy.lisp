@@ -300,7 +300,7 @@ was not asked about."
          (format nil "~S resolves to ~A, outside ~A" declared path directory)
          pathname))
       (make-path-rule (filesystem-rule-kind rule)
-                      (string-right-trim "/" path)
+                      (trim-trailing-slash path)
                       (and (uiop:directory-exists-p truename) t)))))
 
 (defun compile-launch-plan (policy command

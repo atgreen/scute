@@ -54,6 +54,7 @@
            #:path-rule
            #:path-rule-kind
            #:path-rule-path
+           #:path-access-report
            #:run-launch-plan
            #:preflight
            #:user-namespaces-available-p

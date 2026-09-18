@@ -176,3 +176,54 @@ host can sandbox at all."
                             :int))
                     "doctor --json is not valid JSON:~%~A" said))
         (delete-scratch checker)))))
+
+(deftest test-check-answers-what-a-policy-allows
+  "check is the command that makes a policy reviewable: it asks the rules what
+they permit at a path, launches nothing, and fails if anything is wholly denied."
+  (let* ((workspace (scratch-pathname "check-space"))
+         (policy nil))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist (format nil "~A/" workspace))
+           (setf policy (policy-file (format nil "[filesystem]~%~
+                                                  read-execute = [\"/usr\"]~%~
+                                                  read = [\"/etc\"]~%~
+                                                  read-write = [\"~A\"]~%"
+                                            workspace)))
+           ;; Everything asked about is allowed something.
+           (multiple-value-bind (status said)
+               (scute-run (format nil "check --policy ~A /usr/bin/env /etc ~A"
+                                  policy workspace))
+             (check (zerop status) "check exited ~D where all paths are allowed: ~A"
+                    status said)
+             (check (search "execute" said) "/usr/bin/env was not reported executable:~%~A" said)
+             (check (search "read-execute /usr" said)
+                    "the rule granting it was not named:~%~A" said))
+           ;; One path allowed nothing: that is a failure, so CI can lean on it.
+           (multiple-value-bind (status said)
+               (scute-run (format nil "check --policy ~A /var/tmp" policy))
+             (check (= 1 status) "a wholly denied path exited ~D: ~A" status said)
+             (check (search "nothing" said) "the denial was not reported:~%~A" said))
+           ;; A path that does not exist yet is answered by what governs creating it.
+           (multiple-value-bind (status said)
+               (scute-run (format nil "check --policy ~A ~A/not/there/yet"
+                                  policy workspace))
+             (check (zerop status) "a path under a writable directory exited ~D: ~A"
+                    status said)
+             (check (search "via" said)
+                    "the answer did not say which directory governs it:~%~A" said))
+           ;; A path with no existing ancestor at all still answers.
+           (multiple-value-bind (status said)
+               (scute-run (format nil "check --policy ~A /nonexistent/deep/path" policy))
+             (check (= 1 status) "an unreachable path exited ~D" status)
+             (check (search "via /" said)
+                    "the answer did not name the directory it reasoned from:~%~A"
+                    said))
+           ;; check launches nothing: it works even where a sandbox could not run.
+           (multiple-value-bind (status)
+               (scute-run (format nil "check --policy ~A" policy))
+             (check (= 64 status) "check with no paths exited ~D" status))
+           (multiple-value-bind (status) (scute-run "check /usr")
+             (check (= 64 status) "check with no policy exited ~D" status)))
+      (when policy (delete-scratch policy))
+      (ignore-errors (sb-posix:rmdir workspace)))))

@@ -131,13 +131,22 @@ one of these, which is what the kernel is eventually told about."
   (kind-rights (path-rule-kind rule) abi
                :directoryp (path-rule-directoryp rule)))
 
+(defun trim-trailing-slash (path)
+  "PATH without a trailing slash -- except the root, which is only a slash.
+Trimming the root down to an empty string is how a policy naming \"/\" would
+turn into a rule the kernel cannot open."
+  (let ((trimmed (string-right-trim "/" path)))
+    (if (zerop (length trimmed)) "/" trimmed)))
+
 (defun rule-covers-p (rule path)
   "Whether PATH lies at or beneath RULE's path."
-  (let ((base (string-right-trim "/" (path-rule-path rule))))
-    (or (string= base path)
-        (and (<= (length base) (length path))
-             (string= base path :end2 (length base))
-             (char= #\/ (char path (length base)))))))
+  (let ((base (trim-trailing-slash (path-rule-path rule))))
+    (cond ((string= "/" base)
+           (and (plusp (length path)) (char= #\/ (char path 0))))
+          ((string= base path) t)
+          (t (and (< (length base) (length path))
+                  (string= base path :end2 (length base))
+                  (char= #\/ (char path (length base))))))))
 
 (defun ensure-executable-permitted (rules executable abi)
   "Refuse a launch whose own command no rule allows to execute.
@@ -216,3 +225,47 @@ Returns the ruleset descriptor and the ABI version it was built for."
                         :int ruleset
                         :unsigned-long 0
                         :long))
+
+;;── Reading a ruleset back ─────────────────────────────────────────────────────
+;;
+;;; A policy is a set of rules; what a person wants to know is whether their
+;;; build will be able to write somewhere.  Answering that by hand means holding
+;;; Landlock's access rights in your head, so Scute answers it instead.
+
+(defparameter +access-questions+
+  (list (cons :read (logior +fs-read-file+ +fs-read-dir+))
+        (cons :write (logior +fs-write-file+ +fs-make-reg+))
+        (cons :execute +fs-execute+))
+  "The three things anyone actually asks of a path, and the rights each needs.")
+
+(defun nearest-existing-path (path)
+  "PATH if it exists, or the deepest ancestor of it that does.
+A policy is often checked against a path a command has yet to create, and what
+governs creating it is the directory it will appear in."
+  (labels ((walk (pathname)
+             (cond ((probe-file pathname) (probe-file pathname))
+                   (t (let ((parent (uiop:pathname-parent-directory-pathname
+                                     (uiop:ensure-directory-pathname pathname))))
+                        (unless (equal parent (uiop:ensure-directory-pathname pathname))
+                          (walk parent)))))))
+    (walk path)))
+
+(defun granting-rule (rules path access abi)
+  "The rule in RULES that grants ACCESS at PATH, or NIL if none does."
+  (let ((wanted (cdr (assoc access +access-questions+))))
+    (find-if (lambda (rule)
+               (and (rule-covers-p rule path)
+                    (= wanted (logand wanted (rule-rights rule abi)))))
+             rules)))
+
+(defun path-access-report (rules path)
+  "What RULES allow at PATH: an alist of access kind to the rule granting it.
+Answers the path actually examined as a second value, which differs from PATH
+when PATH does not exist yet."
+  (let* ((abi (or (landlock-abi-version) 1))
+         (existing (nearest-existing-path path))
+         (examined (and existing (trim-trailing-slash (namestring existing)))))
+    (values (when examined
+              (loop for (access . nil) in +access-questions+
+                    collect (cons access (granting-rule rules examined access abi))))
+            examined)))

@@ -104,6 +104,21 @@ scute run --policy scute.policy --dry-run -- /bin/sh -i   # show, run nothing
 actually run, and the directory it runs in. Reviewing that is cheaper than
 reasoning about what a policy implies.
 
+And when the question is "will my build be able to write there?", ask:
+
+```sh
+$ scute check --policy scute.policy . /usr/bin/gcc /etc/passwd /var/tmp/out
+.                             read write        (read-write /home/you/project)
+/usr/bin/gcc                  read execute      (read-execute /usr)
+/etc/passwd                   read              (read /etc)
+/var/tmp/out                  nothing           via /var/tmp
+```
+
+`check` is pure arithmetic over the policy — it launches nothing — and exits
+non-zero if any path is wholly denied, so it belongs in CI next to the policy
+it guards. A path that does not exist yet is answered by the nearest directory
+that does, because that is what governs creating it.
+
 ## Building
 
 Scute needs SBCL and [ocicl](https://github.com/ocicl/ocicl) for its
@@ -112,8 +127,14 @@ dependencies, which `ocicl.csv` pins.
 ```sh
 ocicl install
 make          # builds ./scute
-make test     # runs the test suite
+make test     # builds it, then runs the suite against it
 ```
+
+`make` leaves the core uncompressed, which starts in around 75 ms rather than
+around 215 ms, at the cost of a larger file on disk. A tool you wrap around
+every command should not make you wait for it. Build with
+`SCUTE_COMPRESSION=9 make` for roughly a quarter of the size and the slower
+start.
 
 Some tests exercise the kernel directly, so they need a Linux host with
 unprivileged user namespaces and Landlock enabled.
