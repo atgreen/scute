@@ -133,3 +133,62 @@ should not be where these are discovered."
                   it:~%~S" after))))
     (check (= #x95 (first (car (last insns))))
            "the guard does not end in exit")))
+
+(defun plan-for-proxy-policy (&optional allow)
+  (let* ((text (format nil "~
+[filesystem]~%read = [\"/etc\"]~%~%[network]~%mode = \"host\"~%~
+proxy = \"http://127.0.0.1:10210\"~%~@[allow = [~S]~%~]" allow))
+         (policy (call-scute 'validate-sandbox-policy (call-scute 'parse-policy-text text))))
+    (call-scute 'compile-launch-plan policy '("/bin/true"))))
+
+(deftest test-a-named-proxy-is-bound-by-address-when-the-kernel-can
+  "Landlock filters ports, not addresses, so a policy naming a proxy permits that
+port on any host.  Where the BPF guard can be installed, the proxy's own address
+is added to what it permits, which is what naming a proxy was meant to say.
+
+Both answers are exercised whatever this host can do: the availability of the
+guard is a parameter, so the branch that matters is not the one that happens to
+be untestable here."
+  (let ((plan (plan-for-proxy-policy)))
+    (check (null (call-scute 'launch-plan-allow plan))
+           "the policy named no allow entries, so the plan should have had none")
+    (let ((allow (call-scute 'launch-plan-allow
+                             (call-scute 'plan-with-proxy-bound-by-address plan t))))
+      (check (= 1 (length allow))
+             "expected the proxy's address to be permitted, got ~D entries" (length allow))
+      (when allow
+        (check (equal '(127 0 0 1)
+                      (coerce (call-scute 'endpoint-address (first allow)) 'list))
+               "the address bound was not the proxy's")
+        (check (= 10210 (call-scute 'endpoint-port (first allow)))
+               "the port bound was not the proxy's")))
+    ;; Without the capability there is nothing to install, and refusing would make
+    ;; every proxy policy unusable on an ordinary host.
+    (check (null (call-scute 'launch-plan-allow
+                             (call-scute 'plan-with-proxy-bound-by-address plan nil)))
+           "an address guard was added on a host that cannot install one")))
+
+(deftest test-binding-the-proxy-does-not-disturb-an-explicit-allow-list
+  "A policy that already names addresses keeps them: the proxy joins the set
+rather than replacing it, because the sandbox has to be able to reach it."
+  (let* ((plan (plan-for-proxy-policy "127.0.0.1:9999"))
+         (allow (call-scute 'launch-plan-allow
+                            (call-scute 'plan-with-proxy-bound-by-address plan t))))
+    (check (= 1 (length (call-scute 'launch-plan-allow plan)))
+           "the policy's own allow entry went missing before binding")
+    (check (= 2 (length allow))
+           "expected the policy's entry and the proxy's, got ~D" (length allow))
+    (check (find 9999 allow :key (lambda (e) (call-scute 'endpoint-port e)))
+           "the policy's own allow entry was dropped")
+    (check (find 10210 allow :key (lambda (e) (call-scute 'endpoint-port e)))
+           "the proxy's address was not added")))
+
+(deftest test-a-proxy-already-named-in-the-allow-list-is-not-added-twice
+  "Naming the proxy's address explicitly, as the README suggests, must not leave
+the guard with the same rule twice."
+  (let ((allow (call-scute 'launch-plan-allow
+                           (call-scute 'plan-with-proxy-bound-by-address
+                                       (plan-for-proxy-policy "127.0.0.1:10210") t))))
+    (check (= 1 (length allow))
+           "the proxy's address was added beside an identical entry (~D entries)"
+           (length allow))))

@@ -127,7 +127,8 @@ argument gets you.")
   (let ((command (clingon:command-arguments cmd)))
     (when (null command)
       (usage-error "no command given; see scute run --help"))
-    (let ((plan (revised-launch-plan
+    (let ((plan (plan-with-proxy-bound-by-address
+                 (revised-launch-plan
                  (launch-plan-for cmd command)
                  :wall-clock (let ((duration (clingon:getopt cmd :timeout)))
                                (if duration
@@ -137,7 +138,7 @@ argument gets you.")
                                    :keep))
                  :unix-sockets (if (clingon:getopt cmd :allow-unix-sockets)
                                    t
-                                   :keep))))
+                                   :keep)))))
       ;; A dry run answers before anything is started: no helper, no broker, and
       ;; above all no secret read.  Printing what would happen must not be a way
       ;; to make some of it happen.

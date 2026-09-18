@@ -93,6 +93,8 @@
            #:endpoint-port
            #:endpoint-address
            #:parse-endpoint
+           #:proxy-url-host
+           #:plan-with-proxy-bound-by-address
            #:compile-egress-guard
            #:egress-guard-available-p
            #:sandbox-policy-connect-tcp

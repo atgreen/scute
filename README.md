@@ -355,23 +355,25 @@ $ scute run --policy agent.policy -- bash -c 'exec 3<>/dev/tcp/127.0.0.1/10212'
 bash: /dev/tcp/127.0.0.1/10212: Permission denied
 ```
 
-Be precise about what that buys, though, because Landlock filters ports and not
-addresses: the sandbox may still reach *some other host* on the proxy's port
-number. It cannot reach 443, so it cannot talk to the API it holds a token for,
-and the token is worthless anywhere but its destination in any case — but a
-listener on port 10210 elsewhere is a path out for data the command can already
-read. Close it by naming the address, which is enforced by the BPF guard rather
-than by Landlock:
+How tightly that is enforced depends on one privilege. Landlock filters TCP
+ports, not addresses, so port-level enforcement alone leaves the sandbox able to
+reach *some other host* on the proxy's port number — it cannot reach 443, and the
+token is worthless anywhere but its destination, but a listener on port 10210
+elsewhere is a path out for data the command can already read.
 
-```toml
-[network]
-mode = "host"
-proxy = "http://127.0.0.1:10210"
-allow = ["127.0.0.1:10210"]          # the address too, not just the port
+Where the [address-level guard](#an-address-allowlist) can be installed, scute
+closes that itself: naming a proxy binds the proxy's **address**, not just its
+port, without your having to say it twice. `--dry-run` shows which you got —
+
+```console
+network      the host's, shared
+             through http://127.0.0.1:10210
+             allow 127.0.0.1:10210 (127.0.0.1)      # address-level
+             connect tcp 10210                      # port-level
 ```
 
-That needs [the one privilege](#an-address-allowlist). Without it, a policy gets
-port-level egress and should be read as such.
+— and where the privilege is absent the `allow` line is missing, which is the
+honest report: port-level egress, and a policy to read as such.
 
 `scute run --dry-run` prints which file a policy would read before it reads it,
 and `scute doctor` says whether a broker is there to attach to. Attaching means

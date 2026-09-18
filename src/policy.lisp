@@ -186,6 +186,16 @@ is the only kind anyone can check.")
           append (mapcar (lambda (path) (make-filesystem-rule kind path))
                          (string-array paths key pathname)))))
 
+(defun proxy-url-host (url)
+  "The host a proxy URL names, or NIL if it names none."
+  (let* ((scheme-end (search "://" url))
+         (authority (if scheme-end (subseq url (+ scheme-end 3)) url))
+         (slash (position #\/ authority))
+         (authority (if slash (subseq authority 0 slash) authority))
+         (colon (position #\: authority :from-end t)))
+    (let ((host (if colon (subseq authority 0 colon) authority)))
+      (when (plusp (length host)) host))))
+
 (defun proxy-url-port (url pathname)
   "The TCP port a proxy URL names, defaulting by scheme."
   (let* ((scheme-end (search "://" url))
@@ -682,7 +692,7 @@ a policy's would be, so the two routes cannot diverge."
 
 (defun revised-launch-plan (plan &key (wall-clock :keep) (unix-sockets :keep)
                                       (network :keep) (environment :keep)
-                                      (filesystem :keep))
+                                      (filesystem :keep) (allow :keep))
   "PLAN with what the command line overrode, whatever its policy said.
 A plan is immutable, so an override makes another one rather than changing it."
   (let ((limits (launch-plan-limits plan)))
@@ -702,7 +712,7 @@ A plan is immutable, so an override makes another one rather than changing it."
      :connect-tcp (launch-plan-connect-tcp plan)
      :bind-tcp (launch-plan-bind-tcp plan)
      :proxy (launch-plan-proxy plan)
-     :allow (launch-plan-allow plan)
+     :allow (if (eq allow :keep) (launch-plan-allow plan) allow)
      :audit (launch-plan-audit plan)
      :broker (launch-plan-broker plan)
      :credentials (launch-plan-credentials plan)
@@ -715,6 +725,42 @@ A plan is immutable, so an override makes another one rather than changing it."
                   :wall-clock (if (eq wall-clock :keep)
                                   (and limits (resource-limits-wall-clock limits))
                                   wall-clock))))))
+
+(defun plan-with-proxy-bound-by-address (plan &optional (guard-available
+                                                    (egress-guard-available-p)))
+  "PLAN with its proxy's address permitted, not only its port.
+
+Landlock filters TCP ports and not addresses, so a policy naming a proxy permits
+that port -- on any host.  The sandbox cannot reach ordinary HTTPS, but it can
+reach a listener on the proxy's port number somewhere else, which is a way out
+for anything the command can already read.
+
+The address-level guard closes that, and it is BPF, so it needs a capability this
+process may not hold.  When it does, the proxy's own address is added to what the
+guard permits, which is what the policy meant by naming a proxy.  When it does
+not, the plan is left as it was: port-level, which --dry-run and the manual both
+say plainly, rather than a refusal that would make every proxy policy unusable on
+an ordinary host."
+  (let ((proxy (launch-plan-proxy plan)))
+    (if (or (null proxy) (not guard-available))
+        plan
+        (let* ((host (proxy-url-host proxy))
+               (port (proxy-url-port proxy nil))
+               (endpoint (and host port
+                              (handler-case
+                                  (parse-endpoint (format nil "~A:~D" host port) nil)
+                                (policy-error () nil)))))
+          (if (null endpoint)
+              plan
+              (let ((allow (launch-plan-allow plan)))
+                (if (find-if (lambda (existing)
+                               (and (equalp (endpoint-address existing)
+                                            (endpoint-address endpoint))
+                                    (= (endpoint-port existing)
+                                       (endpoint-port endpoint))))
+                             allow)
+                    plan
+                    (revised-launch-plan plan :allow (append allow (list endpoint))))))))))
 
 (defun plan-with-wall-clock (plan seconds)
   "PLAN with SECONDS as its wall-clock limit."
