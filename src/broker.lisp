@@ -126,9 +126,32 @@ is not an error here -- whether one was needed is the broker's answer to give."
             (when (plusp (length key)) key))))))
 
 (defun broker-answering-p (port)
-  "Whether a broker is already listening on PORT and healthy."
+  "Whether anything is listening on PORT and calls itself healthy."
   (handler-case (= 200 (http-response-status
                         (loopback-request port "GET" "/health" :seconds 2)))
+    (error () nil)))
+
+(defun identify-broker (port key)
+  "What is answering on PORT: :BROKER, :UNAUTHORIZED, or NIL for anything else.
+
+Health is not identity.  Attaching means posting the operator's plaintext
+credential to whatever is on that port, so it is not enough that something there
+answers 200 -- plenty of things would.  A broker is recognised by its control
+API: listing tokens is a request only a broker understands, and it answers with
+a JSON array.  Anything that does not is left alone, with the secret unsent."
+  (handler-case
+      (let ((response (loopback-request port "GET" "/tokens" :seconds 2
+                                        :headers (when key
+                                                   (list (cons "Authorization"
+                                                               (format nil "Bearer ~A"
+                                                                       key)))))))
+        (case (http-response-status response)
+          ((200) (let ((body (string-left-trim '(#\Space #\Tab #\Newline #\Return)
+                                               (http-response-body response))))
+                   (when (and (plusp (length body)) (char= #\[ (char body 0)))
+                     :broker)))
+          ((401 403) :unauthorized)
+          (t nil)))
     (error () nil)))
 
 (defun start-broker (settings &key program (certificate (broker-certificate-path)))
@@ -139,7 +162,27 @@ without the service usable, but it pays the broker's startup on every sandbox
 and leaves credentials in a process nobody is supervising."
   (let ((control (broker-settings-control-port settings)))
     (if (broker-answering-p control)
-        (%make-broker settings nil (broker-control-key-from-host) certificate)
+        (let ((key (broker-control-key-from-host)))
+          (ecase (identify-broker control key)
+            (:broker (%make-broker settings nil key certificate))
+            (:unauthorized
+             (setup-error
+              :start-broker
+              :detail (format nil "a credential broker is running on port ~D but ~
+                                   will not accept the control key ~:[Scute could ~
+                                   not find~;Scute has~].  Put the right one in ~
+                                   KEYFENCE_API_KEY or in ~A"
+                              control key
+                              (expand-home (concatenate 'string
+                                                        +broker-data-directory+
+                                                        "api-key")))))
+            ((nil)
+             (setup-error
+              :start-broker
+              :detail (format nil "something is listening on port ~D, but it does ~
+                                   not answer a credential broker's control API.  ~
+                                   Scute will not hand a credential to it"
+                              control)))))
         (let* ((executable (resolve-executable (or program (broker-program settings))))
                (control-key (random-hex 16))
                (helper (start-helper-arguments
@@ -160,6 +203,14 @@ and leaves credentials in a process nobody is supervising."
                            :detail (format nil "~A did not answer on its control ~
                                                 port ~D within fifteen seconds"
                                            executable control)))
+            ;; Checked on this side too: a port can be taken between our looking
+            ;; and our starting, and what answers may not be what we started.
+            (unless (eq :broker (identify-broker control control-key))
+              (stop-helper helper)
+              (setup-error :start-broker
+                           :detail (format nil "what is answering on port ~D is ~
+                                                not the broker ~A was started to be"
+                                           control executable)))
             broker)))))
 
 (defun stop-broker (broker)

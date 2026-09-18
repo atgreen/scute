@@ -22,7 +22,10 @@
                      "    def log_message(self,*a): pass"
                      "    def do_GET(self):"
                      "        self.send_response(200); self.end_headers()"
-                     "        self.wfile.write(b'{\"status\":\"ok\"}')"
+                     "        if self.path.startswith('/tokens'):"
+                     "            self.wfile.write(b'[]')"
+                     "        else:"
+                     "            self.wfile.write(b'{\"status\":\"ok\"}')"
                      "    def do_POST(self):"
                      "        n=int(self.headers['Content-Length'])"
                      "        body=json.loads(self.rfile.read(n))"
@@ -143,3 +146,64 @@ the broker gets it, and what the sandbox is handed is the token."
                           "the token outlived the run that minted it"))))
           (when helper (call-scute 'stop-helper helper))
           (delete-scratch record secret-file)))))
+
+(defun write-healthy-stranger (port)
+  "Something that is not a broker, answering 200 on /health as many things do."
+  (let ((path (format nil "~A.py" (scratch-pathname "stranger"))))
+    (with-open-file (stream path :direction :output :if-exists :supersede)
+      (dolist (line (list
+                     "import http.server"
+                     "class H(http.server.BaseHTTPRequestHandler):"
+                     "    def log_message(self,*a): pass"
+                     "    def do_GET(self):"
+                     "        if self.path.startswith('/health'):"
+                     "            self.send_response(200); self.end_headers()"
+                     "            self.wfile.write(b'{\"status\":\"ok\"}')"
+                     "        else:"
+                     "            self.send_error(404)"
+                     "    def do_POST(self):"
+                     (format nil "        open(~S,'a').write(self.rfile.read(int(self.headers['Content-Length'])).decode())"
+                             (format nil "~A.received" (scratch-pathname "stranger")))
+                     "        self.send_response(200); self.end_headers()"
+                     (format nil "http.server.HTTPServer(('127.0.0.1',~D),H).serve_forever()"
+                             port)))
+        (write-line line stream)))
+    path))
+
+(deftest test-a-secret-is-not-handed-to-whatever-answers-the-port
+  "Attaching to a broker means posting the operator's plaintext credential to it,
+so health is not enough to go on: plenty of things answer 200.  Something on the
+port that cannot answer a broker's control API gets nothing."
+  (if (plusp (cffi:foreign-funcall "system" :string
+                                  "command -v python3 >/dev/null 2>&1" :int))
+      (format *error-output* "~&SKIP: no python3 to stand in for a stranger~%")
+      (let* ((received (format nil "~A.received" (scratch-pathname "stranger")))
+             (secret-file (format nil "~A.secret" (scratch-pathname "broker")))
+             (helper nil))
+        (with-open-file (stream secret-file :direction :output :if-exists :supersede)
+          (write-line "sk-ant-not-a-real-key" stream))
+        (sb-posix:chmod secret-file #o600)
+        (unwind-protect
+             (progn
+               (setf helper (call-scute 'start-helper-arguments
+                                        (list "/usr/bin/python3"
+                                              (write-healthy-stranger
+                                               +broker-control-port+))))
+               (check (call-scute 'wait-for-port +broker-control-port+ 10)
+                      "the stand-in stranger never answered")
+               (let* ((policy (call-scute 'validate-sandbox-policy
+                                          (call-scute 'parse-policy-text
+                                                      (brokered-policy-text))))
+                      (plan (call-scute 'compile-launch-plan policy '("/bin/true")))
+                      (ran nil))
+                 (check (nth-value 1 (ignore-errors
+                                      (call-scute 'call-with-broker plan
+                                                  (lambda (revised)
+                                                    (declare (ignore revised))
+                                                    (setf ran t)))))
+                        "Scute attached to something that is not a broker")
+                 (check (not ran) "the sandbox ran with a credential nobody brokered")
+                 (check (not (probe-file received))
+                        "the credential was posted to something that is not a broker")))
+          (when helper (call-scute 'stop-helper helper))
+          (delete-scratch received secret-file)))))

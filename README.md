@@ -555,6 +555,19 @@ bash: /dev/tcp/127.0.0.1/10212: Permission denied
 `scute run --dry-run` prints which file a policy would read before it reads it,
 and `scute doctor` says whether a broker is there to attach to.
 
+Attaching to a broker means handing it your plaintext credential, so scute
+checks what is on the port before it does: a broker is recognised by answering
+its own control API, not by returning 200 to a health check, which plenty of
+things would. Something else on that port is an error, and the secret stays
+unread.
+
+```console
+$ scute run --policy agent.policy -- claude
+scute: Sandbox setup failed at start-broker: something is listening on port
+10212, but it does not answer a credential broker's control API.  Scute will
+not hand a credential to it
+```
+
 ### Run the broker as a service
 
 Scute attaches to a broker that is already running, and starts one per run only

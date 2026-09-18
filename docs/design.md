@@ -377,6 +377,10 @@ The arrangement:
   systemd user service, which costs no startup per run, keeps one certificate
   authority between runs, and confines the process holding the secrets more
   tightly than the shell Scute was started from.
+- What is on the control port is identified before anything is sent to it. A
+  broker is recognised by answering its own control API; returning 200 to a
+  health check is not identity, and attaching means handing over the operator's
+  plaintext credential. Anything unrecognised is an error with the secret unread.
 - Secrets are read in the supervisor, before the sandbox exists, and handed to
   the broker over loopback. They are never placed in the sandbox's environment,
   never written into a command line, and never passed through a shell.
