@@ -86,3 +86,50 @@ read = [\"/etc\"]
 mode = \"none\"
 allow = [\"localhost:443\"]")
          "an allowlist was accepted on a network that is not there"))
+
+(defun guard-instructions ()
+  "The guard's bytecode, decoded into (opcode dst src offset immediate) tuples."
+  (multiple-value-bind (maps progs) (call-scute 'compile-egress-guard)
+    (declare (ignore maps))
+    (let ((insns (getf (first progs) :insns)))
+      (loop for i from 0 below (length insns) by 8
+            collect (list (aref insns i)
+                          (ldb (byte 4 0) (aref insns (+ i 1)))
+                          (ldb (byte 4 4) (aref insns (+ i 1)))
+                          (let ((v (logior (aref insns (+ i 2))
+                                           (ash (aref insns (+ i 3)) 8))))
+                            (if (> v 32767) (- v 65536) v))
+                          (logior (aref insns (+ i 4))
+                                  (ash (aref insns (+ i 5)) 8)
+                                  (ash (aref insns (+ i 6)) 16)
+                                  (ash (aref insns (+ i 7)) 24)))))))
+
+(deftest test-the-guard-does-what-it-claims
+  "The program cannot be loaded here, so it is read instead.
+
+Three things have to be true of it and none of them need a kernel: it reads the
+destination from where struct bpf_sock_addr keeps it, it checks the map lookup
+for NULL before dereferencing it -- a verifier rejects a program that does not,
+so this is the difference between working and not loading at all -- and a miss
+answers 0, which is a refusal.  The first sandbox run on a privileged host
+should not be where these are discovered."
+  (let ((insns (guard-instructions)))
+    ;; struct bpf_sock_addr: user_ip4 at 4, user_port at 24, both network order.
+    (check (find-if (lambda (i) (and (= #x61 (first i)) (= 4 (fourth i)))) insns)
+           "the guard does not read user_ip4 from offset 4")
+    (check (find-if (lambda (i) (and (= #x61 (first i)) (= 24 (fourth i)))) insns)
+           "the guard does not read user_port from offset 24")
+    ;; The lookup, and the NULL check that must follow it.
+    (let ((call (position-if (lambda (i) (and (= #x85 (first i)) (= 1 (fifth i))))
+                             insns)))
+      (check call "the guard never calls bpf_map_lookup_elem")
+      (when call
+        (let ((after (subseq insns (1+ call) (min (length insns) (+ call 4)))))
+          (check (find-if (lambda (i) (and (member (first i) '(#x15 #x55))
+                                           (zerop (fifth i))))
+                          after)
+                 "nothing compares the lookup result against zero, so the guard ~
+                  would dereference NULL on a miss and the verifier would reject ~
+                  it:~%~S" after))))
+    (check (= #x95 (first (car (last insns))))
+           "the guard does not end in exit")))
