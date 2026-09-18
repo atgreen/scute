@@ -509,6 +509,7 @@ something that does not trust the other two.
 | A learned policy is full of your dotfiles | bash sources `~/.bashrc` non-interactively when stdin is a socket, as under CI. Run with `< /dev/null`, or use `bash --norc`. |
 | A tool cannot find its home directory or cache | The environment is filtered. Name the variable: `--keep-env JAVA_HOME`, or `[environment] keep = [...]`. |
 | `command not found` for something on your `PATH` | The command must be an absolute path: a sandbox whose command is chosen by searching `PATH` depends on the environment it inherited. |
+| Strange runtime failures after editing `scute.asd` | Fasls compiled against the previous component order. `make` recompiles everything when the system definition changes, but `make clean-cache` is the hammer if one slips through. |
 | `cannot start a sandbox from inside one` | Exactly that: a sandbox refuses the syscalls a sandbox needs, so scute does not nest. Run it from outside. |
 | `scute doctor` exits non-zero | It names the missing control. Landlock needs Linux 5.13 or newer, and unprivileged user namespaces must be enabled. |
 

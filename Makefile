@@ -3,8 +3,18 @@
 # where that prefix is absent.  releng/smoke.sh says so if it happens.
 SBCL ?= sbcl
 
+# A changed system definition gets a full recompile.  Reordering components
+# otherwise leaves fasls compiled against the old order, and the mixture shows
+# up only at runtime -- once, as EPERM writing a child's setgroups, which looks
+# like a kernel permission problem and is not.
 scute: src/*.lisp *.asd
-	$(SBCL) --eval "(asdf:make :scute)" --quit
+	@if [ ! -f .system-stamp ] || [ scute.asd -nt .system-stamp ]; then \
+		echo "$(SBCL): scute.asd changed, recompiling everything"; \
+		$(SBCL) --eval "(asdf:make :scute :force t)" --quit; \
+	else \
+		$(SBCL) --eval "(asdf:make :scute)" --quit; \
+	fi
+	@cp scute.asd .system-stamp
 
 completions: scute
 	mkdir -p completions
@@ -40,7 +50,11 @@ smoke: scute
 
 check: test smoke
 
-clean:
-	rm -rf *~ scute scute-sbom.spdx.json completions man
+# Everything compiled from this tree, wherever ASDF put it.
+clean-cache:
+	rm -rf $(HOME)/.cache/common-lisp/*$(CURDIR)
 
-.PHONY: sbom completions man demo test smoke check clean
+clean: clean-cache
+	rm -rf *~ scute scute-sbom.spdx.json completions man .system-stamp .test-passed
+
+.PHONY: sbom completions man demo test smoke check clean clean-cache
