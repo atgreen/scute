@@ -313,10 +313,25 @@ tool that ignores `HTTPS_PROXY` gets proxied anyway instead of failing, so a
 credential swap applies to code that never heard of a proxy.
 
 Where the connection was going is not lost: the client still believes it is
-talking to the original host, so it sends that host's name in the TLS handshake
-and the proxy reads it there. TLS to a bare IP address has no name to read and is
-refused. Only 80 and 443 are redirected — sending SSH or a database connection to
-an HTTP proxy would break it, and refusing is clearer than mangling.
+talking to the original host, so it sends that host's name in the TLS handshake,
+and the proxy reads it there. Cleartext HTTP has no handshake, so the `Host`
+header answers instead. TLS to a bare IP address has neither and is refused.
+
+Verified end to end, with no proxy variables in the sandbox at all:
+
+```console
+$ scute run --policy proxied.policy -- curl -s http://httpbin.org/bearer \
+    -H "Authorization: Bearer $DEMO_TOKEN"
+{ "authenticated": true, "token": "the-real-secret" }
+```
+
+The service received the real credential; the sandbox only ever had `kf_…`; and
+nothing told curl a proxy existed.
+
+Only 80 and 443 are redirected — sending SSH or a database connection to an HTTP
+proxy would break it, and refusing is clearer than mangling. Port 53 is left alone
+because a client resolves a name before it connects, and a sandbox that cannot
+resolve never reaches the connect being redirected.
 
 This needs [the one privilege](#an-address-allowlist) and a cgroup of its own, as
 the address allowlist does.
