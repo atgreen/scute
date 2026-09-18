@@ -1,0 +1,255 @@
+;;; cgroup.lisp
+;;;
+;;; SPDX-License-Identifier: MIT
+;;;
+;;; Copyright (C) 2026 Anthony Green
+
+(in-package #:scute)
+
+;;; Resource limits, beneath the caller's own delegated cgroup-v2 subtree and
+;;; nowhere else.
+;;;
+;;; Cgroup v2 forbids a cgroup from holding processes and enabling controllers
+;;; for its children at the same time, which shapes everything here.  A Scute
+;;; sharing its cgroup with a shell and its other children cannot enable
+;;; anything for children of it, and says so instead of pretending.  A Scute
+;;; alone in a delegated cgroup steps aside into a supervisor cgroup of its own,
+;;; leaving the cgroup empty and able to give its children controllers.
+
+(defparameter +cgroup-mount+ "/sys/fs/cgroup")
+
+(defparameter +supervisor-cgroup-name+ "scute.supervisor"
+  "Where Scute puts itself so that its own cgroup can hand controllers to
+children.  Recognized on a later run, so that the second sandbox in a scope
+lands beside the first rather than one level deeper.")
+
+(defparameter +limit-controllers+
+  '((:memory . "memory") (:processes . "pids") (:cpu-percent . "cpu"))
+  "The controller each kind of limit needs enabled.")
+
+(defvar *sandbox-cgroup-counter* 0)
+
+(defun read-first-line (pathname)
+  (with-open-file (stream pathname :direction :input :if-does-not-exist nil)
+    (and stream (read-line stream nil nil))))
+
+(defun own-cgroup ()
+  "The caller's cgroup-v2 path, as /proc reports it."
+  (let ((line (read-first-line "/proc/self/cgroup")))
+    (when (and line (eql 0 (search "0::" line)))
+      (subseq line 3))))
+
+(defun cgroup-directory (path)
+  (format nil "~A~A" +cgroup-mount+ (string-right-trim "/" path)))
+
+(defun cgroup-file (directory name)
+  (format nil "~A/~A" directory name))
+
+(defun cgroup-processes (directory)
+  "The pids in DIRECTORY's cgroup."
+  (with-open-file (stream (cgroup-file directory "cgroup.procs")
+                          :direction :input :if-does-not-exist nil)
+    (when stream
+      (loop for line = (read-line stream nil nil)
+            while line
+            collect (parse-integer line :junk-allowed t)))))
+
+(defun enabled-controllers (directory)
+  (let ((line (read-first-line (cgroup-file directory "cgroup.subtree_control"))))
+    (if (and line (plusp (length line)))
+        (uiop:split-string line :separator " ")
+        '())))
+
+(defun discover-cgroup2 ()
+  "The caller's own cgroup directory, or a refusal.
+Everything Scute creates lives beneath this and nowhere else."
+  (let ((path (own-cgroup)))
+    (unless path
+      (setup-error :discover-cgroup2
+                   :detail "no unified hierarchy in /proc/self/cgroup"))
+    (unless (probe-file (cgroup-file +cgroup-mount+ "cgroup.controllers"))
+      (setup-error :discover-cgroup2
+                   :detail (format nil "~A is not a cgroup-v2 mount" +cgroup-mount+)))
+    (let ((directory (cgroup-directory path)))
+      (unless (zerop (%access directory +w-ok+))
+        (setup-error :discover-cgroup2
+                     :detail (format nil "~A is not writable: no delegated subtree"
+                                     directory)))
+      directory)))
+
+(defun delegated-root (&optional (directory (discover-cgroup2)))
+  "Where sandbox cgroups belong: the delegated cgroup itself, or its parent when
+Scute has already stepped aside into a supervisor cgroup under it."
+  (let ((parent (uiop:native-namestring
+                 (uiop:pathname-parent-directory-pathname
+                  (uiop:ensure-directory-pathname directory)))))
+    (if (and (string= +supervisor-cgroup-name+
+                      (file-namestring (uiop:parse-native-namestring directory)))
+             (zerop (%access parent +w-ok+)))
+        (string-right-trim "/" parent)
+        directory)))
+
+(defun required-controllers (limits)
+  (loop for (kind . controller) in +limit-controllers+
+        when (ecase kind
+               (:memory (resource-limits-memory limits))
+               (:processes (resource-limits-processes limits))
+               (:cpu-percent (resource-limits-cpu-percent limits)))
+          collect controller))
+
+(defun step-aside (root)
+  "Move this process into a supervisor cgroup under ROOT, so ROOT can give its
+children controllers.  Only ever moves Scute itself."
+  (let ((supervisor (cgroup-file root +supervisor-cgroup-name+)))
+    (unless (probe-file (uiop:ensure-directory-pathname supervisor))
+      (handler-case (sb-posix:mkdir supervisor #o755)
+        (sb-posix:syscall-error (condition)
+          (setup-error :create-supervisor-cgroup
+                       :detail (format nil "~A: ~A" supervisor condition)))))
+    (write-proc-file (cgroup-file supervisor "cgroup.procs")
+                     (format nil "~D" (sb-posix:getpid))
+                     :enter-supervisor-cgroup)
+    supervisor))
+
+(defun prepare-delegated-root (root controllers)
+  "Make ROOT able to give CONTROLLERS to its children, or explain why it cannot."
+  (let ((missing (set-difference controllers (enabled-controllers root)
+                                 :test #'string=)))
+    (when missing
+      (let ((others (remove (sb-posix:getpid) (cgroup-processes root))))
+        (when others
+          (setup-error
+           :delegate-cgroup
+           :detail (format nil
+                           "~A holds ~D other ~A, so cgroup v2 will not let it ~
+                            give controllers (~{~A~^, ~}) to children. Run scute ~
+                            under a cgroup of its own, for example: ~
+                            systemd-run --user --scope -p Delegate=yes scute run ..."
+                           root (length others)
+                           (if (= 1 (length others)) "process" "processes")
+                           missing)))
+        (step-aside root))
+      (write-proc-file (cgroup-file root "cgroup.subtree_control")
+                       (format nil "~{+~A~^ ~}" missing)
+                       :enable-cgroup-controllers))
+    root))
+
+(defun cpu-max-setting (percent)
+  "PERCENT of one processor, as cpu.max wants it: a quota and a period."
+  (let ((period 100000))
+    (format nil "~D ~D" (round (* period percent) 100) period)))
+
+(defun create-sandbox-cgroup (limits)
+  "Create one cgroup for one sandbox, configured with LIMITS.
+Returns its directory.  Nothing outside the caller's delegated subtree is
+touched, and nothing is created until every limit is known to be installable."
+  (let* ((root (prepare-delegated-root (delegated-root)
+                                       (required-controllers limits)))
+         (directory (cgroup-file root (format nil "scute.~D.~D" (sb-posix:getpid)
+                                              (incf *sandbox-cgroup-counter*)))))
+    (handler-case (sb-posix:mkdir directory #o755)
+      (sb-posix:syscall-error (condition)
+        (setup-error :create-sandbox-cgroup
+                     :detail (format nil "~A: ~A" directory condition))))
+    (handler-bind ((error (lambda (condition)
+                            (declare (ignore condition))
+                            (delete-sandbox-cgroup directory))))
+      (let ((memory (resource-limits-memory limits))
+            (processes (resource-limits-processes limits))
+            (cpu (resource-limits-cpu-percent limits)))
+        (when memory
+          (write-proc-file (cgroup-file directory "memory.max")
+                           (format nil "~D" memory) :set-memory-max)
+          (cap-swap directory))
+        (when processes
+          (write-proc-file (cgroup-file directory "pids.max")
+                           (format nil "~D" processes) :set-pids-max))
+        (when cpu
+          (write-proc-file (cgroup-file directory "cpu.max")
+                           (cpu-max-setting cpu) :set-cpu-max))))
+    directory))
+
+(defun host-swap-p ()
+  "Whether this host has swap at all.  /proc/swaps carries a header line and
+then one line per swap area."
+  (with-open-file (stream "/proc/swaps" :direction :input :if-does-not-exist nil)
+    (and stream
+         (progn (read-line stream nil nil)            ; the header
+                (and (read-line stream nil nil) t)))))
+
+(defun cap-swap (directory)
+  "Forbid the sandbox from swapping around its memory limit.
+
+A memory limit should mean what it says.  memory.max bounds memory alone, so a
+cgroup with 64M and swap available can hold far more than 64M of pages -- and
+on a host with zram, zero-filled pages compress away to almost nothing, so the
+limit is invisible.  Setting memory.swap.max to 0 makes the number honest.  If
+this kernel cannot account for swap and the host has some, the limit cannot be
+made honest and the launch is refused instead."
+  (let ((pathname (cgroup-file directory "memory.swap.max")))
+    (cond ((probe-file pathname)
+           (write-proc-file pathname "0" :set-memory-swap-max))
+          ((host-swap-p)
+           (setup-error :cap-swap
+                        :detail "this kernel does not account for swap per cgroup, ~
+                                 and the host has swap, so a memory limit could ~
+                                 not be enforced as written")))))
+
+(defun move-process-to-cgroup (pid directory)
+  "Place PID in DIRECTORY's cgroup, before it runs anything of its own."
+  (write-proc-file (cgroup-file directory "cgroup.procs") (format nil "~D" pid)
+                   :enter-sandbox-cgroup))
+
+(defun read-cgroup-events (directory)
+  "What the kernel recorded about DIRECTORY's limits: an alist of counts."
+  (loop for (file . prefix) in '(("memory.events" . "memory")
+                                 ("pids.events" . "pids"))
+        append (with-open-file (stream (cgroup-file directory file)
+                                       :direction :input :if-does-not-exist nil)
+                 (when stream
+                   (loop for line = (read-line stream nil nil)
+                         while line
+                         for space = (position #\Space line)
+                         when space
+                           collect (cons (format nil "~A.~A" prefix
+                                                 (subseq line 0 space))
+                                         (or (parse-integer line :start (1+ space)
+                                                                 :junk-allowed t)
+                                             0)))))))
+
+(defun delete-sandbox-cgroup (directory)
+  "Remove DIRECTORY's cgroup once it is empty.
+A cgroup can stay busy for a moment after its last process is reaped, so this
+gives the kernel a little time before it gives up and says so."
+  (loop repeat 10
+        do (handler-case (return-from delete-sandbox-cgroup
+                           (progn (sb-posix:rmdir directory) t))
+             (sb-posix:syscall-error (condition)
+               (unless (member (sb-posix:syscall-errno condition)
+                               (list sb-posix:ebusy sb-posix:enoent))
+                 (warn "scute: cannot remove ~A: ~A" directory condition)
+                 (return-from delete-sandbox-cgroup nil))
+               (when (= (sb-posix:syscall-errno condition) sb-posix:enoent)
+                 (return-from delete-sandbox-cgroup t))))
+           (sleep 1/50))
+  (warn "scute: cgroup ~A stayed busy and was left behind" directory)
+  nil)
+
+(defun limits-installable-p ()
+  "Whether this host would let Scute install resource limits right now.
+Answers the question doctor asks, without creating anything."
+  (handler-case
+      (let* ((root (delegated-root))
+             (enabled (enabled-controllers root)))
+        (if (every (lambda (controller) (member controller enabled :test #'string=))
+                   '("memory" "pids" "cpu"))
+            (values t root "controllers are already enabled for children")
+            (let ((others (remove (sb-posix:getpid) (cgroup-processes root))))
+              (if others
+                  (values nil root
+                          (format nil "~A holds ~D other ~A, so it cannot give ~
+                                       controllers to children"
+                                  root (length others)
+                                  (if (= 1 (length others)) "process" "processes")))
+                  (values t root "Scute can step aside and enable them")))))
+    (scute-error (condition) (values nil nil (princ-to-string condition)))))

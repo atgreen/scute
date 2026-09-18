@@ -105,7 +105,11 @@ argument gets you.")
              (refuse-unimplemented-controls plan)
              (uiop:quit 0 t))
             (t
-             (uiop:quit (command-exit-status (run-launch-plan plan)) t))))))
+             (let ((result (run-launch-plan plan)))
+               (when (sandbox-result-oom-killed-p result)
+                 (format *error-output*
+                         "~&scute: the command was killed by its memory limit~%"))
+               (uiop:quit (command-exit-status result) t)))))))
 
 (defun make-run-command ()
   (clingon:make-command

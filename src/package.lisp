@@ -52,6 +52,7 @@
            #:path-rule-kind
            #:path-rule-path
            #:run-launch-plan
+           #:*stop-grace-seconds*
            ;; The kernel boundary
            #:run-namespaced-command
            #:sandbox-result
@@ -59,6 +60,8 @@
            #:sandbox-result-pid
            #:sandbox-result-exit-code
            #:sandbox-result-term-signal
+           #:sandbox-result-events
+           #:sandbox-result-oom-killed-p
            #:capability-sets
            #:verify-no-capabilities
            #:namespace-id
@@ -69,6 +72,14 @@
            #:seccomp-filter-unavailable
            #:seccomp-filter-instructions
            #:denied-syscall-names
+           ;; Resource limits
+           #:discover-cgroup2
+           #:delegated-root
+           #:create-sandbox-cgroup
+           #:move-process-to-cgroup
+           #:read-cgroup-events
+           #:delete-sandbox-cgroup
+           #:limits-installable-p
            ;; Host diagnostics
            #:doctor-report
            #:print-doctor-report

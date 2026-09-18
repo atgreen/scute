@@ -215,18 +215,16 @@ read-write = [\"../..\"]")
 
 (deftest test-unimplemented-controls-refuse-to-run
   "A plan asking for a control this build lacks is refused before it launches.
-Enacting it quietly would hand back a weaker sandbox than the one asked for."
-  (dolist (section '("[limits]
-memory = \"2G\"" "[audit]
+Enacting it quietly would hand back a weaker sandbox than the one asked for.
+Auditing is the one left: limits arrived with the cgroup layer."
+  (let* ((policy (policy-from-string "[filesystem]
+read-execute = [\"/usr\"]
+[audit]
 events = [\"exec\"]"))
-    (let* ((policy (policy-from-string (format nil "[filesystem]~%~
-                                                   read-execute = [\"/usr\"]~%~A"
-                                               section)))
-           (plan (call-scute 'compile-launch-plan policy '("/bin/true")))
-           (condition (nth-value 1 (ignore-errors (call-scute 'run-launch-plan plan)))))
-      (check (typep condition 'scute:control-not-implemented)
-             "a plan asking for what this build lacks ran anyway, got ~S"
-             condition))))
+         (plan (call-scute 'compile-launch-plan policy '("/bin/true")))
+         (condition (nth-value 1 (ignore-errors (call-scute 'run-launch-plan plan)))))
+    (check (typep condition 'scute:control-not-implemented)
+           "a plan asking for what this build lacks ran anyway, got ~S" condition)))
 
 (deftest test-policy-file-drives-the-sandbox
   "The whole path, from a file on disk to a kernel that refuses: this is what

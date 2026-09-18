@@ -24,10 +24,6 @@
           '("user namespaces" "landlock" "cgroup v2" "libseccomp")
           :test #'string=))
 
-(defun read-first-line (pathname)
-  (with-open-file (stream pathname :direction :input :if-does-not-exist nil)
-    (and stream (read-line stream nil nil))))
-
 ;;── Probes ─────────────────────────────────────────────────────────────────────
 
 (defun probe-kernel ()
@@ -74,29 +70,29 @@
                                      ((< version 3)
                                       "no TRUNCATE: truncation is not governed"))))))))
 
-(defun own-cgroup ()
-  "The caller's cgroup-v2 path, as /proc reports it."
-  (let ((line (read-first-line "/proc/self/cgroup")))
-    (when (and line (eql 0 (search "0::" line)))
-      (subseq line 3))))
-
 (defun probe-cgroup-v2 ()
-  (let ((cgroup (own-cgroup)))
-    (cond ((null cgroup)
-           (make-probe "cgroup v2" :missing "no unified hierarchy in /proc/self/cgroup"))
-          ((not (probe-file "/sys/fs/cgroup/cgroup.controllers"))
-           (make-probe "cgroup v2" :missing "/sys/fs/cgroup is not a cgroup-v2 mount"))
-          (t
-           (let ((directory (format nil "/sys/fs/cgroup~A" cgroup)))
-             (if (zerop (%access directory +w-ok+))
-                 (make-probe "cgroup v2" :ok
-                             (format nil "~A is delegated (controllers: ~A)" directory
-                                     (or (read-first-line
-                                          (format nil "~A/cgroup.controllers" directory))
-                                         "none")))
-                 (make-probe "cgroup v2" :missing
-                             (format nil "~A is not writable: no delegated subtree"
-                                     directory))))))))
+  (handler-case
+      (let ((directory (discover-cgroup2)))
+        (make-probe "cgroup v2" :ok
+                    (format nil "~A is delegated (controllers: ~A)" directory
+                            (or (read-first-line
+                                 (format nil "~A/cgroup.controllers" directory))
+                                "none"))))
+    (scute-error (condition)
+      (make-probe "cgroup v2" :missing (princ-to-string condition)))))
+
+(defun probe-resource-limits ()
+  "Whether a policy asking for limits could be honoured here.  Not mandatory:
+Scute sandboxes fine without limits, and refuses clearly when a policy wants
+them on a host that cannot give them."
+  (multiple-value-bind (installable root explanation) (limits-installable-p)
+    (declare (ignore root))
+    (make-probe "resource limits" (if installable :ok :info)
+                (if installable
+                    explanation
+                    (format nil "~A; run under a cgroup of its own, e.g. ~
+                                 systemd-run --user --scope -p Delegate=yes"
+                            explanation)))))
 
 (defun probe-seccomp ()
   "Build the v0 filter to answer this, rather than only looking for the library:
@@ -120,6 +116,7 @@ a filter that will not compile here is a launch that will not happen."
         (probe-user-namespaces)
         (probe-landlock)
         (probe-cgroup-v2)
+        (probe-resource-limits)
         (probe-seccomp)
         (probe-capabilities)))
 

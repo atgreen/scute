@@ -45,12 +45,25 @@ scute run --namespaces-only -- COMMAND
 `scute doctor` reports what the host can enforce and exits non-zero if
 something mandatory is absent.
 
-A policy may already ask for resource limits or auditing, and Scute will refuse
-to launch rather than pretend: those controls are designed but not built, and
-silently skipping one would hand back a weaker sandbox than the policy asked
-for.
+Resource limits work where the kernel will allow them:
 
-Still to come: cgroup-v2 resource limits and optional eBPF auditing. `docs/design.md` is the architecture. The task graph
+```toml
+[limits]
+memory = "2G"          # and no swapping around it
+processes = 256
+cpu-percent = 200      # two processors' worth
+```
+
+Cgroup v2 will not let a cgroup hold processes and give controllers to its
+children at the same time, so limits need Scute to have a cgroup of its own —
+`systemd-run --user --scope -p Delegate=yes scute run ...`, or a service with
+`Delegate=yes`. Where that is not the case, asking for limits is refused with
+the remedy in the message rather than quietly ignored. `scute doctor` says which
+you have.
+
+A policy may still ask for auditing, which is designed but not built; Scute
+refuses to launch rather than hand back a weaker sandbox than the policy asked
+for. That is the last of v0 still outstanding. `docs/design.md` is the architecture. The task graph
 lives in [beads](https://github.com/steveyegge/beads); `bd ready` shows what is
 claimable.
 

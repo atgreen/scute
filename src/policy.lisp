@@ -344,12 +344,8 @@ a policy's would be, so the two routes cannot diverge."
 
 (defun refuse-unimplemented-controls (plan)
   "Refuse a plan asking for a control this build cannot install.
-The design has resource limits and auditing; the code does not have them yet.
-Enacting such a plan quietly would hand back a weaker sandbox than the one
-that was asked for."
-  (when (launch-plan-limits plan)
-    (error 'control-not-implemented :control "resource limits"
-                                    :detail "cgroup-v2 limits are not installed by this build"))
+The design has auditing; the code does not have it yet.  Enacting such a plan
+quietly would hand back a weaker sandbox than the one that was asked for."
   (when (launch-plan-audit plan)
     (error 'control-not-implemented :control "auditing"
                                     :detail "the audit programs are not attached by this build")))

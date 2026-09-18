@@ -37,6 +37,7 @@
 (defconstant +sigint+   2)
 (defconstant +sigquit+  3)
 (defconstant +sigkill+  9)
+(defconstant +sigalrm+ 14)
 (defconstant +sigterm+ 15)
 
 (defconstant +o-cloexec+ #o2000000)
@@ -52,6 +53,8 @@
 (defconstant +pr-cap-ambient-clear-all+   4)
 
 (defconstant +linux-capability-version-3+ #x20080522)
+
+(defconstant +itimer-real+ 0)
 
 (defconstant +eintr+  4)
 (defconstant +eperm+  1)
@@ -252,3 +255,20 @@ Returns the read and write descriptors."
   "Whether SONAME can be resolved and loaded right now."
   (not (cffi:null-pointer-p
         (cffi:foreign-funcall "dlopen" :string soname :int 2 :pointer))))
+
+(defun arm-real-timer (seconds)
+  "Ask for SIGALRM in SECONDS, or cancel a pending request when SECONDS is 0.
+Whole seconds are not enough: a stop grace period is a deadline a person waits
+through, and the tests need one short enough to sit in a suite."
+  (cffi:with-foreign-object (timer :uint8 32)       ; two struct timevals
+    (dotimes (index 32)
+      (setf (cffi:mem-aref timer :uint8 index) 0))
+    (multiple-value-bind (whole fraction) (floor seconds)
+      (setf (cffi:mem-ref timer :uint64 16) whole   ; it_value.tv_sec
+            (cffi:mem-ref timer :uint64 24) (round (* fraction 1000000))))
+    (when (minusp (cffi:foreign-funcall "setitimer"
+                                        :int +itimer-real+
+                                        :pointer timer
+                                        :pointer (cffi:null-pointer)
+                                        :int))
+      (setup-error :setitimer :errno (errno)))))

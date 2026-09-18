@@ -151,8 +151,8 @@ access includes it.
 - **Process:** user, PID, mount, UTS, and network namespaces; `no_new_privs`;
   zero capabilities; and a denylist seccomp filter installed after setup.
 - **Network:** an isolated network namespace with no external route in v0.
-- **Resources:** `memory.max`, `pids.max`, and `cpu.max` beneath a delegated
-  cgroup-v2 subtree.
+- **Resources:** `memory.max`, `pids.max`, `cpu.max`, and `memory.swap.max`
+  beneath a delegated cgroup-v2 subtree.
 - **Audit:** optional, fixed Whistler programs attached to the sandbox cgroup at
   startup. Policies cannot inject BPF. Existing map and ring-buffer descriptors
   remain readable after capability removal.
@@ -160,6 +160,45 @@ access includes it.
 Scute never silently weakens a requested control. A host without Landlock,
 user namespaces, cgroup delegation for requested limits, libseccomp, required
 capabilities, or requested BPF support receives a pre-execution error.
+
+### Limits, and the cgroup that carries them
+
+A sandbox with limits gets a cgroup of its own beneath the caller's delegated
+subtree, created before the child exists and removed when it is gone. Cgroup v2
+shapes this more than the design would have chosen: a cgroup may hold processes
+or hand controllers to its children, never both. A Scute sharing its cgroup with
+a shell and that shell's other children therefore cannot install limits at all,
+and says so with the remedy in the message rather than enforcing part of what
+was asked. A Scute alone in a delegated cgroup steps aside into a supervisor
+cgroup of its own, leaving its cgroup empty and able to give its children
+controllers. That supervisor is recognized on a later run, so a second sandbox
+lands beside the first rather than one level deeper.
+
+A memory limit also sets `memory.swap.max` to zero. `memory.max` bounds memory
+alone, so a cgroup limited to 64M on a host with swap can hold far more than 64M
+of pages -- and on a host with zram, zero-filled pages compress away to almost
+nothing, which makes the limit invisible rather than merely loose. If a kernel
+cannot account for swap per cgroup and the host has swap, the limit cannot be
+made to mean what it says, and the launch is refused.
+
+The kernel's account of a sandbox comes back with the result, because an exit
+status cannot distinguish a command killed for exceeding its memory from one
+killed from outside. `memory.events` and `pids.events` are read before the
+cgroup is removed, so `scute run` can say that a memory limit is what ended a
+command.
+
+### Stopping a sandbox
+
+`pid_namespaces(7)` delivers a signal from an ancestor namespace to PID 1 only
+when PID 1 has installed a handler for it; `SIGKILL` and `SIGSTOP` are the
+exceptions. A command that installs no handler therefore never sees a forwarded
+`SIGTERM`, and a supervisor that only forwarded would wait for a command that
+was never told to stop.
+
+Scute forwards the signal, waits a grace period of five seconds, and then sends
+`SIGKILL`, which cannot be ignored or discarded. A command that traps the signal
+and acts within the grace period decides its own exit status. A second stop
+signal does not start the wait again.
 
 ### What the filter denies, and what it cannot
 

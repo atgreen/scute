@@ -14,12 +14,24 @@
 ;;── Results ────────────────────────────────────────────────────────────────────
 
 (defstruct (sandbox-result
-            (:constructor make-sandbox-result (pid exit-code term-signal)))
+            (:constructor make-sandbox-result (pid exit-code term-signal
+                                               &optional events)))
   "How a sandboxed command ended.  Exactly one of EXIT-CODE and TERM-SIGNAL is
-non-NIL."
+non-NIL.  EVENTS carries what the kernel recorded about the sandbox's limits,
+when limits were asked for."
   (pid         nil :read-only t)
   (exit-code   nil :read-only t)
-  (term-signal nil :read-only t))
+  (term-signal nil :read-only t)
+  (events      nil :read-only t))
+
+(defun sandbox-result-oom-killed-p (result)
+  "Whether the memory limit is what ended this command.
+A command killed for running out of its own memory looks exactly like one
+killed from outside; the cgroup is what tells them apart."
+  (and (eql +sigkill+ (sandbox-result-term-signal result))
+       (plusp (or (cdr (assoc "memory.oom_kill" (sandbox-result-events result)
+                              :test #'string=))
+                  0))))
 
 ;;── The child's resources ──────────────────────────────────────────────────────
 ;;
@@ -178,8 +190,21 @@ collector."
 
 ;;── The parent ─────────────────────────────────────────────────────────────────
 
+(defparameter *stop-grace-seconds* 5
+  "How long a sandboxed command is given to act on a stop signal before it is
+killed.  A command is free to trap a signal and exit as it likes; it is not
+free to ignore one forever.")
+
 (defun call-with-forwarded-signals (pid function)
-  "Run FUNCTION with terminating signals forwarded to PID.
+  "Run FUNCTION with terminating signals forwarded to PID, then enforced.
+
+Forwarding alone is not enough.  The command is PID 1 of its namespace, and
+pid_namespaces(7) delivers a signal from an ancestor namespace to PID 1 only if
+it has a handler installed: SIGKILL and SIGSTOP are the exceptions.  So a
+command that installs no handler never sees a forwarded SIGTERM, and a
+supervisor that only forwarded would wait for a command that was never told to
+stop.  Scute forwards, waits *STOP-GRACE-SECONDS*, and then sends SIGKILL,
+which cannot be ignored.  Asking twice does not wait again.
 
 Afterwards the signals are left at their default disposition, which for the
 scute process means \"terminate\", so a supervisor whose command is gone can
@@ -187,13 +212,27 @@ still be stopped.  SBCL offers no way to read a signal's current handler back
 -- ENABLE-INTERRUPT answers NIL, not the handler it replaced -- so a caller
 embedding Scute in a larger image must reinstate its own handlers."
   (let* ((signals (list +sighup+ +sigint+ +sigquit+ +sigterm+))
+         (state :running)
          (forward (lambda (signal info context)
                     (declare (ignore info context))
-                    (%kill pid signal))))
+                    (%kill pid signal)
+                    (case state
+                      (:running (setf state :stopping)
+                                (arm-real-timer *stop-grace-seconds*))
+                      (:stopping (%kill pid +sigkill+)))))
+         (enforce (lambda (signal info context)
+                    (declare (ignore signal info context))
+                    (when (eq state :stopping)
+                      (%kill pid +sigkill+)))))
     (dolist (signal signals)
       (sb-sys:enable-interrupt signal forward))
+    (sb-sys:enable-interrupt +sigalrm+ enforce)
     (unwind-protect (funcall function)
-      (dolist (signal signals)
+      ;; Once this runs the child is ours no longer, so a timer that fires from
+      ;; here on must do nothing.
+      (setf state :finished)
+      (arm-real-timer 0)
+      (dolist (signal (cons +sigalrm+ signals))
         (sb-sys:enable-interrupt signal :default)))))
 
 (defmacro with-forwarded-signals ((pid) &body body)
@@ -219,10 +258,10 @@ byte the child wrote just before giving up."
                    ((= (errno) +eintr+))
                    (t (setup-error :waitpid :errno (errno)))))))
 
-(defun classify-wait-status (pid status)
+(defun classify-wait-status (pid status &optional events)
   (if (exited-p status)
-      (make-sandbox-result pid (exit-status status) nil)
-      (make-sandbox-result pid nil (termination-signal status))))
+      (make-sandbox-result pid (exit-status status) nil events)
+      (make-sandbox-result pid nil (termination-signal status) events)))
 
 (defun supervise-child (resources pid)
   "Release PID into the sandbox and supervise it until it ends.
@@ -248,7 +287,11 @@ signal a pid that has already been collected."
 Everything PLAN asks for is established before the command exists.  A control
 PLAN requests that this build cannot install is an error, not an omission."
   (refuse-unimplemented-controls plan)
-  (let ((resources (acquire-launch-resources plan)))
+  (let ((resources (acquire-launch-resources plan))
+        ;; Created before the child exists, so a limit that cannot be installed
+        ;; is a launch that does not happen.
+        (cgroup (let ((limits (launch-plan-limits plan)))
+                  (and limits (create-sandbox-cgroup limits)))))
     (unwind-protect
          (progn
            (finish-output *standard-output*)
@@ -260,6 +303,8 @@ PLAN requests that this build cannot install is an error, not an omission."
              (unwind-protect
                   (progn
                     (write-identity-maps pid)
+                    (when cgroup
+                      (move-process-to-cgroup pid cgroup))
                     (drop-all-capabilities)
                     (verify-no-capabilities)
                     (multiple-value-bind (status stage) (supervise-child resources pid)
@@ -267,14 +312,16 @@ PLAN requests that this build cannot install is an error, not an omission."
                       (when stage
                         (error 'child-failure :operation (child-stage-name stage)
                                               :status status))
-                      (classify-wait-status pid status)))
+                      (classify-wait-status pid status
+                                            (and cgroup (read-cgroup-events cgroup)))))
                ;; Setup failed with the child still parked on the pipe, or the
                ;; wait was abandoned: it must not be left behind.  Once PID has
                ;; been reaped it is no longer ours to signal.
                (unless reaped
                  (%kill pid +sigkill+)
                  (%waitpid pid (cffi:null-pointer) 0)))))
-      (release-launch-resources resources))))
+      (release-launch-resources resources)
+      (when cgroup (delete-sandbox-cgroup cgroup)))))
 
 (defun run-namespaced-command (command &key filesystem directory)
   "Run COMMAND in the sandbox that FILESYSTEM describes.

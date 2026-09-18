@@ -185,6 +185,39 @@ a process that is PID 1 of its own."
       (check (eql code (call-scute 'command-exit-status result))
              "expected exit ~D, got ~S" code result))))
 
+(deftest test-stop-escalates-when-ignored
+  "A command that ignores a stop signal is stopped anyway.
+
+The command is PID 1 of its namespace, and a signal from an ancestor namespace
+reaches PID 1 only if it has a handler: this one installs an empty trap, so the
+forwarded SIGTERM is discarded and nothing but SIGKILL will do."
+  (let* ((ready (scratch-pathname "ignores-term"))
+         (leaked nil)
+         (guard (lambda (signal info context)
+                  (declare (ignore signal info context))
+                  (setf leaked t)))
+         (previous (sb-sys:enable-interrupt sb-unix:sigterm guard))
+         (scute:*stop-grace-seconds* 1/5)
+         (result nil))
+    (unwind-protect
+         (progn
+           (delete-scratch ready)
+           (spawn-signaller ready (sb-posix:getpid))
+           (setf result
+                 (call-scute 'run-namespaced-command
+                             (list "/bin/sh" "-c"
+                                   (format nil "trap '' TERM; : > ~A; ~
+                                                i=0; while [ $i -lt 300 ]; do ~
+                                                  sleep 0.1; i=$((i+1)); done; exit 99"
+                                           ready))))
+           (check (not leaked)
+                  "SIGTERM was left with the caller's handler: the supervisor ~
+                   installed none")
+           (check (eql 9 (call-scute 'sandbox-result-term-signal result))
+                  "a command ignoring SIGTERM was not killed, got ~S" result))
+      (sb-sys:enable-interrupt sb-unix:sigterm (or previous :default))
+      (delete-scratch ready))))
+
 (deftest test-fail-closed-launch
   "A command Scute cannot resolve is refused before any namespace is created.
 It is the caller's mistake rather than the host's, so it reads as one."
