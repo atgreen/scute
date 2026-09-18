@@ -142,6 +142,7 @@
            #:make-credential-request
            #:credential-request-name
            #:credential-request-secret-file
+           #:credential-request-reference
            #:credential-request-destinations
            #:credential-request-variable
            #:credential-request-ttl

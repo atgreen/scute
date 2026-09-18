@@ -33,7 +33,8 @@
                      (format nil "        open(~S,'a').write(json.dumps(body)+chr(10))"
                              record)
                      "        self.send_response(200); self.end_headers()"
-                     "        t={'token':'kf_'+body['credential'][::-1]}"
+                     "        held=body.get('credential') or body.get('credential_ref')"
+                     "        t={'token':'kf_'+held[::-1]}"
                      "        self.wfile.write(json.dumps(t).encode())"
                      "    def do_DELETE(self):"
                      (format nil "        open(~S,'a').write(json.dumps({'revoked':self.path})+chr(10))"
@@ -207,3 +208,62 @@ port that cannot answer a broker's control API gets nothing."
                         "the credential was posted to something that is not a broker")))
           (when helper (call-scute 'stop-helper helper))
           (delete-scratch received secret-file)))))
+
+(defun referencing-policy-text ()
+  (format nil "~
+[filesystem]~%read-execute = [\"/usr\"]~%read = [\"/etc\"]~%~%~
+[network]~%mode = \"host\"~%proxy = \"http://127.0.0.1:~D\"~%~%~
+[credentials]~%control-port = ~D~%~%~
+[credentials.anthropic]~%ref = \"anthropic\"~%destinations = [\"api.anthropic.com\"]~%~
+env = \"ANTHROPIC_API_KEY\"~%"
+          +broker-proxy-port+ +broker-control-port+))
+
+(deftest test-a-referenced-credential-is-never-read-by-scute
+  "The broker already holds the secret, so Scute names it instead of reading it:
+the request carries credential_ref, no file is opened, and no plaintext passes
+through this process at all."
+  (if (plusp (cffi:foreign-funcall "system" :string
+                                  "command -v python3 >/dev/null 2>&1" :int))
+      (format *error-output* "~&SKIP: no python3 to stand in for a broker~%")
+      (let* ((record (format nil "~A.jsonl" (scratch-pathname "ref-record")))
+             (helper nil))
+        (unwind-protect
+             (progn
+               (setf helper (start-fake-broker record))
+               (let* ((policy (call-scute 'validate-sandbox-policy
+                                          (call-scute 'parse-policy-text
+                                                      (referencing-policy-text))))
+                      (plan (call-scute 'compile-launch-plan policy '("/bin/true")))
+                      (seen nil))
+                 (call-scute 'call-with-broker plan (lambda (revised) (setf seen revised)))
+                 (let ((sent (with-open-file (stream record) (read-line stream nil ""))))
+                   (check (search "credential_ref" sent)
+                          "the broker was not asked for a credential by name: ~S" sent)
+                   (check (search "anthropic" sent)
+                          "the reference did not name the credential")
+                   (check (not (search "\"credential\":" sent))
+                          "a plaintext credential was sent as well as a reference"))
+                 (check (find-if (lambda (entry)
+                                   (and (> (length entry) 18)
+                                        (string= "ANTHROPIC_API_KEY=" entry :end2 18)))
+                                 (call-scute 'launch-plan-environment seen))
+                        "the sandbox was not given a token")))
+          (when helper (call-scute 'stop-helper helper))
+          (delete-scratch record)))))
+
+(deftest test-a-credential-needs-a-secret-file-or-a-ref-and-not-both
+  "One or the other: a secret Scute reads, or one the broker already holds."
+  (flet ((refused-p (credential-lines)
+           (nth-value 1 (ignore-errors
+                         (call-scute 'validate-sandbox-policy
+                                     (call-scute 'parse-policy-text
+                                                 (format nil "~
+[filesystem]~%read = [\"/etc\"]~%~%[network]~%mode = \"host\"~%~
+proxy = \"http://127.0.0.1:10210\"~%~%[credentials.x]~%~A~
+destinations = [\"example.com\"]~%env = \"X\"~%"
+                                                         credential-lines)))))))
+    (check (refused-p "") "a credential naming neither a secret-file nor a ref was accepted")
+    (check (refused-p (format nil "secret-file = \"/etc/hostname\"~%ref = \"x\"~%"))
+           "a credential naming both a secret-file and a ref was accepted")
+    (check (not (refused-p (format nil "ref = \"x\"~%")))
+           "a credential naming only a ref was refused")))

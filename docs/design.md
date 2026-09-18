@@ -378,8 +378,12 @@ mint tokens of its own.
 
 The arrangement:
 
-- `[credentials.NAME]` in a policy names a secret file, the destinations its
-  token is locked to, and the environment variable the token lands in. A policy
+- `[credentials.NAME]` in a policy names the credential, the destinations its
+  token is locked to, and the environment variable the token lands in. The
+  credential is named one of two ways: `ref`, a name the broker already holds it
+  under, or `secret-file`, a path Scute reads. A `ref` is better where it is
+  available -- the plaintext stays in one process rather than passing through
+  two -- and it is what a broker with a credential store makes possible. A policy
   cannot name a program to run: it selects the one broker Scute knows how to
   drive, started with arguments Scute writes. The alternative — a policy that
   could start an arbitrary host process — is a way to run anything at all.

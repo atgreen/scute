@@ -236,11 +236,17 @@ its tokens are still ours to revoke."
                                              (format nil "Bearer ~A" key)))))))
 
 (defun mint-token (broker request seconds)
-  "Swap the credential REQUEST names for a token locked to its destinations."
-  (let* ((secret (read-secret (credential-request-secret-file request)
-                              (credential-request-name request)))
+  "Swap the credential REQUEST names for a token locked to its destinations.
+
+A request naming a ref never reads a secret at all: the broker already holds it,
+Scute says which one, and the plaintext is in one process rather than two."
+  (let* ((reference (credential-request-reference request))
+         (secret (unless reference
+                   (read-secret (credential-request-secret-file request)
+                                (credential-request-name request))))
          (body (format nil "{~A:~A,~A:[~{~A~^,~}],~A:~D,~A:~A}"
-                       (json-escape "credential") (json-escape secret)
+                       (json-escape (if reference "credential_ref" "credential"))
+                       (json-escape (or reference secret))
                        (json-escape "destinations")
                        (mapcar #'json-escape (credential-request-destinations request))
                        (json-escape "ttl_seconds") seconds

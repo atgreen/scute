@@ -191,7 +191,8 @@ table, an unknown key, a value of the wrong shape or a duplicate key is an error
 | | `proxy` | URL | set the proxy variables, and permit only its port |
 | | `allow` | array of `host:port` | the only addresses it may reach ([needs a privilege](#an-address-allowlist)) |
 | | `unix-sockets` | `true` / `false` | may the command open an AF_UNIX socket (default `false`) |
-| `[credentials.NAME]` | `secret-file` | path | a secret scute reads and the sandbox never sees |
+| `[credentials.NAME]` | `ref` | name | a credential the broker holds, named rather than read |
+| | `secret-file` | path | or a secret scute reads and the sandbox never sees |
 | | `destinations` | array of hosts | where the token it is swapped for is worth anything |
 | | `env` | variable name | where the sandbox finds its token |
 | | `ttl` | duration | how long the token lives (default: the run) |
@@ -328,7 +329,7 @@ mode = "host"
 proxy = "http://127.0.0.1:10210"       # the broker: the only port it may reach
 
 [credentials.anthropic]
-secret-file = "~/.secrets/anthropic"   # read by scute, never by the sandbox
+ref = "anthropic"                      # the broker holds it; scute never sees it
 destinations = ["api.anthropic.com"]   # where the token is worth anything
 env = "ANTHROPIC_API_KEY"              # where the sandbox finds its token
 ```
@@ -337,9 +338,24 @@ env = "ANTHROPIC_API_KEY"              # where the sandbox finds its token
 scute run --policy agent.policy -- claude
 ```
 
-Scute reads the secret, mints a destination-locked token, hands the sandbox that
-token and the CA certificate its runtimes must trust, runs the command, and
-revokes the token afterwards. The command's environment holds
+`ref` names a credential registered with the broker — a file in
+`~/.keyfence/credentials`, or one systemd handed it with `LoadCredential=`.
+Scute asks for a token *by name*, so the plaintext lives in one process instead
+of two, and rotating it is replacing that file.
+
+Where nothing is registered, `secret-file` has scute read it and hand it over
+instead:
+
+```toml
+[credentials.anthropic]
+secret-file = "~/.secrets/anthropic"   # read by scute, never by the sandbox
+```
+
+One or the other, never both.
+
+Scute mints a destination-locked token, hands the sandbox that token and the CA
+certificate its runtimes must trust, runs the command, and revokes the token
+afterwards. The command's environment holds
 `ANTHROPIC_API_KEY=kf_dc8b83…` and nothing else of yours.
 
 The reason to run the broker under scute is that `HTTPS_PROXY` is only a

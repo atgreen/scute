@@ -63,10 +63,12 @@ parser read it."
   (path nil :read-only t))
 
 (defstruct (credential-request (:constructor make-credential-request
-                                   (name secret-file destinations variable ttl)))
+                                   (name secret-file destinations variable ttl
+                                    &optional reference)))
   "One credential the sandbox needs, and what the sandbox is given instead."
   (name nil :read-only t)
   (secret-file nil :read-only t)   ; read by the supervisor, never by the sandbox
+  (reference nil :read-only t)     ; or held by the broker, read by nobody here
   (destinations nil :read-only t)  ; hosts the token is locked to
   (variable nil :read-only t)      ; the environment variable the token lands in
   (ttl nil :read-only t))          ; seconds, or NIL for the run's own limit
@@ -280,18 +282,27 @@ had to spell that out could not be shared between two people's machines."
 (defun validate-credential (name value pathname)
   "One [credentials.NAME] table: a secret to hold, and where its token goes."
   (let ((entries (table-entries value (format nil "credentials.~A" name) pathname)))
-    (check-known-keys entries '("secret-file" "destinations" "env" "ttl")
+    (check-known-keys entries '("secret-file" "ref" "destinations" "env" "ttl")
                       (format nil "[credentials.~A]" name) pathname)
     (flet ((entry (key) (cdr (assoc key entries :test #'string=))))
       (let ((secret-file (let ((raw (entry "secret-file")))
                            (when raw (scalar-string raw "secret-file" pathname))))
+            (reference (let ((raw (entry "ref")))
+                         (when raw (scalar-string raw "ref" pathname))))
             (variable (let ((raw (entry "env")))
                         (when raw (scalar-string raw "env" pathname))))
             (destinations (let ((raw (entry "destinations")))
                             (when raw (string-array raw "destinations" pathname)))))
-        (unless secret-file
-          (policy-error (format nil "[credentials.~A] must say which secret-file ~
-                                     holds the credential"
+        (when (and secret-file reference)
+          (policy-error (format nil "[credentials.~A] gives both secret-file and ~
+                                     ref; they are alternatives -- a secret Scute ~
+                                     reads, or one the broker already holds"
+                                name)
+                        pathname))
+        (unless (or secret-file reference)
+          (policy-error (format nil "[credentials.~A] must say either which ~
+                                     secret-file holds the credential, or the ref ~
+                                     it is registered with the broker under"
                                 name)
                         pathname))
         (unless variable
@@ -313,8 +324,9 @@ had to spell that out could not be shared between two people's machines."
                                 name)
                         pathname))
         (make-credential-request
-         name (expand-home secret-file) destinations variable
-         (let ((ttl (entry "ttl"))) (when ttl (parse-duration ttl pathname))))))))
+         name (and secret-file (expand-home secret-file)) destinations variable
+         (let ((ttl (entry "ttl"))) (when ttl (parse-duration ttl pathname)))
+         reference)))))
 
 (defparameter +default-control-port-offset+ 2
   "How far the broker's control API sits from its proxy port, by its own default
@@ -802,7 +814,10 @@ compiles being a plan that runs."
   ;; see which files that is before any of them is opened.
   (dolist (request (launch-plan-credentials plan))
     (format stream "credential   ~A~%" (credential-request-name request))
-    (format stream "~13Tholds ~A~%" (credential-request-secret-file request))
+    (if (credential-request-reference request)
+        (format stream "~13Tthe broker holds it, registered as ~A~%"
+                (credential-request-reference request))
+        (format stream "~13Tholds ~A~%" (credential-request-secret-file request)))
     (format stream "~13Tthe sandbox gets a token in ~A~%"
             (credential-request-variable request))
     (format stream "~13Tusable only at ~{~A~^, ~}~%"
