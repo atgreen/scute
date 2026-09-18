@@ -9,7 +9,10 @@
   :author      "Anthony Green <anthony@atgreen.org>"
   :license     "MIT"
   :version     "0.1.0"
-  :depends-on (:cffi :clingon :clop :version-string :whistler)
+  :depends-on (:cffi :clingon :clop :version-string :whistler
+               "whistler/loader"
+               ;; For resolving the hosts a policy names, before anything runs.
+               (:require "sb-bsd-sockets"))
   :serial t
   :components ((:file "src/package")
                (:file "src/conditions")
@@ -18,6 +21,7 @@
                (:file "src/seccomp")
                (:file "src/cgroup")
                (:file "src/learn")
+               (:file "src/egress")
                (:file "src/policy")
                (:file "src/sandbox")
                (:file "src/doctor")
@@ -85,6 +89,7 @@
                (:file "tests/policy")
                (:file "tests/seccomp")
                (:file "tests/cgroup")
+               (:file "tests/egress")
                (:file "tests/supervisor")
                (:file "tests/cli")
                (:file "tests/learn")

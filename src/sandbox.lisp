@@ -408,7 +408,11 @@ that is wrong at once instead of once per attempt."
         (scute-error (condition) (note "seccomp" (princ-to-string condition))))
       ;; Only the limits a cgroup enforces need a delegated subtree; a
       ;; wall-clock limit is the supervisor's own clock.
-      (when (cgroup-limits-p (launch-plan-limits plan))
+      (when (launch-plan-allow plan)
+        (multiple-value-bind (available reason) (egress-guard-available-p)
+          (unless available (note "address-level egress" reason))))
+      (when (or (cgroup-limits-p (launch-plan-limits plan))
+                (launch-plan-allow plan))
         (multiple-value-bind (installable root explanation) (limits-installable-p)
           (declare (ignore root))
           (unless installable
@@ -446,11 +450,17 @@ rules to enforce, while an explaining run has the caller's."
   ;; Acquisition order follows the design's startup sequence, and every step is
   ;; unwound in reverse by the unwind-protects below.
   (let ((cgroup (let ((limits (launch-plan-limits plan)))
-                  (and (cgroup-limits-p limits) (create-sandbox-cgroup limits))))
+                  ;; An address allowlist needs a cgroup to attach its guard to,
+                  ;; whether or not the policy asked for any limits.
+                  (when (or (cgroup-limits-p limits) (launch-plan-allow plan))
+                    (create-sandbox-cgroup (or limits (make-resource-limits))))))
+        (guard nil)
         (resources nil)
         (observations nil))
     (unwind-protect
          (progn
+           (when (launch-plan-allow plan)
+             (setf guard (install-egress-guard cgroup (launch-plan-allow plan))))
            (multiple-value-bind (acquired watched)
                (acquire-launch-resources plan :observe observe)
              (setf resources acquired
@@ -489,6 +499,7 @@ rules to enforce, while an explaining run has the caller's."
                  (%kill pid +sigkill+)
                  (%waitpid pid (cffi:null-pointer) 0)))))
       (when resources (release-launch-resources resources))
+      (when guard (detach-egress-guard guard))
       (when cgroup (delete-sandbox-cgroup cgroup)))))
 
 (defun run-namespaced-command (command &key filesystem directory)

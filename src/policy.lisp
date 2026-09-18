@@ -99,6 +99,7 @@ is the only kind anyone can check.")
   (connect-tcp nil :read-only t)     ; the only ports it may connect to
   (bind-tcp    nil :read-only t)     ; the only ports it may listen on
   (proxy      nil :read-only t)      ; everything outbound goes through this
+  (allow      nil :read-only t)      ; the only addresses it may reach
   (pathname   nil :read-only t))
 
 ;;── The document Scute expects ─────────────────────────────────────────────────
@@ -188,7 +189,7 @@ is the only kind anyone can check.")
 Answers the mode and that permission."
   (let ((entries (table-entries value "network" pathname)))
     (check-known-keys entries '("mode" "unix-sockets" "connect-tcp" "bind-tcp"
-                                "proxy")
+                                "proxy" "allow")
                       "[network]" pathname)
     (let ((mode (scalar-string (cdr (assoc "mode" entries :test #'string=))
                                "mode" pathname))
@@ -229,7 +230,16 @@ Answers the mode and that permission."
               (policy-error "connect-tcp and bind-tcp name ports on a network, ~
                              and mode is \"none\", which is the absence of one"
                             pathname))
-            (values setting (and unix (eq t (cdr unix))) connect bind proxy)))))))
+            (values setting (and unix (eq t (cdr unix))) connect bind proxy
+                    (let ((named (assoc "allow" entries :test #'string=)))
+                      (when named
+                        (when (eq setting :none)
+                          (policy-error "allow names places to reach on a network, ~
+                                         and mode is \"none\", which is the ~
+                                         absence of one"
+                                        pathname))
+                        (mapcar (lambda (text) (parse-endpoint text pathname))
+                                (string-array (cdr named) "allow" pathname)))))))))))
 
 (defparameter +duration-multipliers+
   '((#\s . 1) (#\m . 60) (#\h . 3600)))
@@ -366,6 +376,8 @@ is a sandbox the operator half asked for."
                      (nth-value 3 (validate-network (table "network") pathname)))
          :proxy (when (table "network")
                   (nth-value 4 (validate-network (table "network") pathname)))
+         :allow (when (table "network")
+                  (nth-value 5 (validate-network (table "network") pathname)))
          :limits (when (table "limits")
                    (validate-limits (table "limits") pathname))
          :audit (when (table "audit")
@@ -392,6 +404,7 @@ is a sandbox the operator half asked for."
   (connect-tcp nil :read-only t)
   (bind-tcp    nil :read-only t)
   (proxy       nil :read-only t)
+  (allow       nil :read-only t)
   (limits      nil :read-only t)
   (audit       nil :read-only t))
 
@@ -505,6 +518,7 @@ nothing here touches the kernel."
      :connect-tcp (sandbox-policy-connect-tcp policy)
      :bind-tcp (sandbox-policy-bind-tcp policy)
      :proxy (sandbox-policy-proxy policy)
+     :allow (sandbox-policy-allow policy)
      :limits (sandbox-policy-limits policy)
      :audit (sandbox-policy-audit policy))))
 
@@ -542,9 +556,10 @@ A plan is immutable, so an override makes another one rather than changing it."
      :connect-tcp (launch-plan-connect-tcp plan)
      :bind-tcp (launch-plan-bind-tcp plan)
      :proxy (launch-plan-proxy plan)
+     :allow (launch-plan-allow plan)
      :audit (launch-plan-audit plan)
-     :limits (if (and (eq wall-clock :keep) limits)
-                 limits
+     :limits (if (eq wall-clock :keep)
+                 limits                       ; including none at all
                  (make-resource-limits
                   :memory (and limits (resource-limits-memory limits))
                   :processes (and limits (resource-limits-processes limits))
@@ -579,6 +594,10 @@ was asked for."
           (launch-plan-unix-sockets plan))
   (let ((proxy (launch-plan-proxy plan)))
     (when proxy (format stream "~13Tthrough ~A~%" proxy)))
+  (dolist (endpoint (launch-plan-allow plan))
+    (format stream "~13Tallow ~A:~D (~{~D~^.~})~%"
+            (endpoint-host endpoint) (endpoint-port endpoint)
+            (coerce (endpoint-address endpoint) 'list)))
   (let ((connect (launch-plan-connect-tcp plan))
         (bind (launch-plan-bind-tcp plan)))
     (when (or connect bind)

@@ -272,6 +272,27 @@ and once stopping it is the grace period running out. A command stopped for time
 exits 124, as `timeout(1)` has it, because the signal that ended it says nothing
 about why.
 
+### Egress by address
+
+Landlock governs ports, not addresses, so a policy naming 443 permits every host
+on 443. A BPF program attached to the sandbox's cgroup sees the destination of
+each `connect(2)` before it happens, and can refuse it: `[network] allow` names
+host and port pairs, resolved in the supervisor so that what a sandbox may reach
+is decided, and printed by `--dry-run`, before it is running.
+
+This is the one thing Scute does that wants a privilege -- `CAP_BPF` to load the
+program, `CAP_NET_ADMIN` to attach it -- and the ordering matters: the guard is
+installed before the parent drops its capabilities, so the child still begins
+with every set empty. A policy asking for it on a host without those
+capabilities is refused, with the `setcap` line in the message, rather than
+falling back to port-level and calling it enforcement.
+
+The program is written in Whistler, which compiles Lisp to BPF bytecode with no
+C toolchain in the path. Compiling it needs nothing of the kernel, so the tests
+can check that it compiles, that it references its map, and that the key Scute
+builds for an endpoint matches what `inet_addr` and `htons` produce -- the byte
+order being the part such code gets wrong.
+
 ### What the filter denies, and what it cannot
 
 The seccomp filter follows the same split as Landlock. The parent builds it with

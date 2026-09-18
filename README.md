@@ -166,6 +166,47 @@ it produces.
 
 Don't want to write that file yourself? `scute learn` will.
 
+## Granting the one privilege
+
+Everything above works as an ordinary user. One thing does not: an
+**address-level** egress allowlist, which loads a BPF program (`CAP_BPF`) and
+attaches it to the sandbox's cgroup (`CAP_NET_ADMIN`).
+
+```toml
+[network]
+mode = "host"
+allow = ["api.github.com:443", "proxy.internal:3128"]
+```
+
+`scute doctor` says whether the host can do it, and a policy that asks for it
+without the privilege is refused rather than quietly downgraded to port-level.
+
+To grant it:
+
+```sh
+releng/grant-capabilities.sh ./scute      # one sudo setcap, once
+```
+
+or, for a package, `setcap cap_bpf,cap_net_admin+ep /usr/bin/scute` in `%post`,
+or a systemd unit with `AmbientCapabilities=CAP_BPF CAP_NET_ADMIN`.
+
+Three things worth knowing before you do:
+
+- **A setuid shell script does nothing.** Linux has ignored the setuid bit on
+  anything with a shebang for decades, because re-opening the interpreted file
+  is racy. It will not fail loudly; it will simply not grant anything.
+- **A setuid wrapper is the wrong shape.** It would hand scute root, where file
+  capabilities hand it exactly two. If you want a helper, have it call `setcap`
+  on a root-owned binary — a helper that caps whatever path it is given is a
+  privilege escalation, not a convenience.
+- **`CAP_BPF` is close to root.** On a machine with users who should not have
+  it, a cap-bearing binary that everyone may execute gives it to all of them.
+  `chmod 750` and a group, or keep it to CI and development hosts.
+
+Scute installs the guard **before** it drops its capabilities, and drops them
+all the same way it always did: the sandboxed command still runs with every
+capability set empty, and the tests check it.
+
 ## What it costs
 
 Best of three passes of 25 runs each, on one developer machine, so read them as

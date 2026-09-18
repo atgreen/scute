@@ -80,6 +80,15 @@
            #:launch-plan-bind-tcp
            #:sandbox-policy-proxy
            #:launch-plan-proxy
+           #:launch-plan-allow
+           #:sandbox-policy-allow
+           #:endpoint-key
+           #:endpoint-host
+           #:endpoint-port
+           #:endpoint-address
+           #:parse-endpoint
+           #:compile-egress-guard
+           #:egress-guard-available-p
            #:sandbox-policy-connect-tcp
            #:sandbox-policy-bind-tcp
            #:sandbox-policy-unix-sockets

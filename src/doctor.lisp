@@ -109,6 +109,14 @@ a filter that will not compile here is a launch that will not happen."
     (scute-error (condition)
       (make-probe "libseccomp" :missing (princ-to-string condition)))))
 
+(defun probe-egress ()
+  "Whether this host can enforce an address-level egress allowlist.
+Optional, like limits: a policy that does not ask for one is unaffected."
+  (multiple-value-bind (available reason) (egress-guard-available-p)
+    (if available
+        (make-probe "address egress" :ok "CAP_BPF and CAP_NET_ADMIN are held")
+        (make-probe "address egress" :info reason))))
+
 (defun probe-audit ()
   "What the host would offer an audit program, without loading one.
 Auditing is optional in the design and absent from this build, so this reports
@@ -175,6 +183,7 @@ the kernel side only, and never as a failure."
         (probe-landlock)
         (probe-cgroup-v2)
         (probe-resource-limits)
+        (probe-egress)
         (probe-seccomp)
         (probe-audit)
         (probe-capabilities)))
