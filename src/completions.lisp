@@ -169,8 +169,13 @@ argument)~%      case $words[1] in~%")
           (short (clingon:option-short-name option)))
       (when long
         (format stream ".TP~%")
-        (format stream ".BR ~@[\\-~A \", \" ~]\\-\\-~A~%"
-                short (roff-escape long))
+        ;; Bold the spellings, italic the argument: that is what man pages do,
+        ;; and it makes --read PATH read as one option taking a value rather
+        ;; than as a flag with a stray word beside it.
+        (format stream ".BR ~@[\\-~A \", \" ~]\\-\\-~A~@[ \" \" \\fI~A\\fR~]~%"
+                short (roff-escape long)
+                (and (clingon:option-parameter option)
+                     (roff-escape (clingon:option-parameter option))))
         (format stream "~A.~%"
                 (roff-escape (clingon:option-description option)))))))
 

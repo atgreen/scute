@@ -485,7 +485,28 @@ better tools for both:
   its destination: the agent holds an opaque `kf_` token and the real credential
   never enters its address space.
 
-They compose. Scute confines the process, KeyFence contains its credentials:
+They compose, and scute can run the proxy for you:
+
+```sh
+scute run --policy agent.policy --with 'keyfence serve' -- claude
+```
+
+`--with` starts that command beside the sandbox — outside it, since it is the
+thing holding your secrets — waits until the port the policy names answers, runs
+the sandboxed command, and stops it afterwards. Three properties fall out, each
+enforced by something that does not trust the others:
+
+- the agent cannot reach the network except through the proxy, because the kernel
+  permits TCP to that port and nothing else;
+- the real credential was never in the sandbox, because the environment filter
+  passed only the opaque token;
+- and the token is worthless anywhere but its destination, because that is what
+  KeyFence does with it.
+
+The command comes from the command line and **never from a policy**. A policy
+travels with the code being sandboxed; one that could start a process on the host
+would be a way to run anything at all. (`--with` splits on spaces, so anything
+with quoting belongs in a small script.)
 
 ```toml
 [filesystem]

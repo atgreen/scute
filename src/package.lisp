@@ -59,6 +59,12 @@
            #:path-rule-path
            #:path-access-report
            #:run-launch-plan
+           #:call-with-helper
+           #:start-helper
+           #:stop-helper
+           #:helper-pid
+           #:helper-running-p
+           #:wait-for-port
            #:preflight
            #:user-namespaces-available-p
            #:*stop-grace-seconds*
@@ -126,6 +132,8 @@
            #:observations-paths
            #:observations-unix-sockets
            #:*learned-unix-sockets*
+           #:*learned-connections*
+           #:observations-connections
            #:watched-syscall
            ;; Shell completions
            #:write-completions

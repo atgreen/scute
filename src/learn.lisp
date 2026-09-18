@@ -63,7 +63,10 @@
         (make-watched-syscall "renameat2" 1 :dirfd-argument 0 :access :write)
         ;; Not a path at all: whether the command wants a unix-domain socket,
         ;; which a policy has to allow before it can have one.
-        (make-watched-syscall "socket" nil :flags-argument 0 :access :unix-socket))
+        (make-watched-syscall "socket" nil :flags-argument 0 :access :unix-socket)
+        ;; Nor is this: where the command tried to connect, which is what an
+        ;; address allowlist has to name and nobody wants to write by hand.
+        (make-watched-syscall "connect" nil :flags-argument 1 :access :connect))
   "What a learning run listens for.
 
 Not openat2: its flags live in a struct in the target's memory rather than in a
@@ -128,7 +131,8 @@ about to be created counts: its directory is what governs it."
   "What a learning run saw: paths, and the access each was reached for with."
   (watched nil :read-only t)          ; syscall number -> watched-syscall
   (paths (make-hash-table :test #'equal) :read-only t)
-  (unix-sockets nil))                 ; the command asked for one
+  (unix-sockets nil)                  ; the command asked for one
+  (connections (make-hash-table :test #'equal) :read-only t))
 
 (defun canonical-observed-path (path)
   "PATH with its symlinks resolved, so that a policy names one place once.
@@ -195,6 +199,42 @@ wave anything through."
              (setup-error :pidfd-getfd :errno (errno)))
            listener)
       (%close pidfd))))
+
+(defun read-target-bytes (pid address buffer size)
+  "Read SIZE bytes of another process's memory.  Answers whether it worked."
+  (cffi:with-foreign-objects ((local :uint64 2) (remote :uint64 2))
+    (setf (cffi:mem-aref local :uint64 0) (cffi:pointer-address buffer)
+          (cffi:mem-aref local :uint64 1) size
+          (cffi:mem-aref remote :uint64 0) address
+          (cffi:mem-aref remote :uint64 1) size)
+    (plusp (cffi:foreign-funcall "syscall" :long +sys-process-vm-readv+
+                                 :int pid :pointer local :unsigned-long 1
+                                 :pointer remote :unsigned-long 1
+                                 :unsigned-long 0 :long))))
+
+(defconstant +af-inet+ 2)
+
+(defun read-target-connection (pid address buffer)
+  "The IPv4 endpoint a connect(2) was aimed at, or NIL for anything else.
+
+struct sockaddr_in is a family, a port in network byte order, and an address in
+network byte order.  Only IPv4 is read: a policy's allowlist guards IPv4, so an
+IPv6 attempt recorded here would produce a rule that guards nothing."
+  (when (read-target-bytes pid address buffer 16)
+    (let ((family (cffi:mem-ref buffer :uint16 0)))
+      (when (= family +af-inet+)
+        (let ((port (let ((network (cffi:mem-ref buffer :uint16 2)))
+                      (logior (ash (logand network #xff) 8) (ash network -8))))
+              (octets (make-array 4 :element-type '(unsigned-byte 8))))
+          (dotimes (index 4)
+            (setf (aref octets index) (cffi:mem-aref buffer :uint8 (+ 4 index))))
+          (cons octets port))))))
+
+(defun record-connection (observations endpoint)
+  (when endpoint
+    (setf (gethash (cons (coerce (car endpoint) 'list) (cdr endpoint))
+                   (observations-connections observations))
+          t)))
 
 (defun read-target-string (pid address buffer size)
   "Read a NUL-terminated string from another process's memory."
@@ -277,10 +317,18 @@ blocked on a notification nobody will answer would otherwise hang for ever."
                  ;; A socket is not a path: what is worth recording is that the
                  ;; command wanted one at all.
                  (when (and syscall (null (watched-syscall-path-argument syscall)))
-                   (when (= +af-unix+
-                            (logand #xffffffff
-                                    (cffi:mem-ref request :uint64 32)))
-                     (setf (observations-unix-sockets observations) t)))
+                   (case (watched-syscall-access syscall)
+                     (:unix-socket
+                      (when (= +af-unix+
+                               (logand #xffffffff
+                                       (cffi:mem-ref request :uint64 32)))
+                        (setf (observations-unix-sockets observations) t)))
+                     (:connect
+                      (when (notification-valid-p listener request)
+                        (record-connection
+                         observations
+                         (read-target-connection
+                          from (cffi:mem-ref request :uint64 40) scratch))))))
                  (when (and syscall (watched-syscall-path-argument syscall)
                             (notification-valid-p listener request))
                    (record-observation
@@ -428,6 +476,9 @@ anchor for a system tree -- so they merge by name."
           (execute :read-execute)
           (t :read))))
 
+(defvar *learned-connections* nil
+  "The endpoints the run being written up tried to reach.")
+
 (defvar *learned-unix-sockets* nil
   "Whether the run being written up asked for a unix-domain socket.")
 
@@ -447,10 +498,19 @@ existing policy must not quietly drop the limits it asked for."
                   scute check.~%~%[filesystem]~%")
   (loop for (kind . paths) in rules
         do (format stream "~(~A~) = [~{~S~^, ~}]~%" kind paths))
-  (format stream "~%[network]~%mode = \"none\"~%")
+  ;; One mode line.  TOML forbids a duplicate key and so does scute, so a policy
+  ;; that said both "none" and "host" would not load at all.
+  (format stream "~%[network]~%mode = ~S~%"
+          (if *learned-connections* "host" "none"))
   (when (or (and carry (sandbox-policy-unix-sockets carry))
             *learned-unix-sockets*)
     (format stream "unix-sockets = true~%"))
+  (when *learned-connections*
+    (format stream "allow = [~{~S~^, ~}]~%"
+            (sort (mapcar (lambda (connection)
+                            (format nil "~{~D~^.~}:~D" (car connection) (cdr connection)))
+                          *learned-connections*)
+                  #'string<)))
   (let ((limits (and carry (sandbox-policy-limits carry))))
     (write-policy-section
      "limits"

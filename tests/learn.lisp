@@ -318,15 +318,24 @@ so those observations are left out however they arrived."
     (unwind-protect
          (progn
            (ensure-directories-exist (format nil "~A/" workspace))
-           ;; One real path, one that exists nowhere at all.
+           ;; One real path, one that exists nowhere at all, and a connection --
+           ;; which changes the network section and so is where a duplicate key
+           ;; would appear.
            (scute::record-observation observations nil "/etc/hostname" :read)
+           (scute::record-connection observations (cons #(127 0 0 1) 443))
            (scute::record-observation observations nil
                                       "/no/such/prefix/glibc-hwcaps/x/libc.so.6" :read)
            (let* ((rules (call-scute 'learned-rules observations workspace))
                   (text (with-output-to-string (stream)
-                          (call-scute 'write-learned-policy rules stream))))
+                          (let ((scute:*learned-connections*
+                                  (loop for c being the hash-keys
+                                          of (scute:observations-connections observations)
+                                        collect c)))
+                            (call-scute 'write-learned-policy rules stream)))))
              (check (not (search "/no/such/prefix" text))
                     "a learned policy named a path that does not exist:~%~A" text)
+             (check (search "allow = [\"127.0.0.1:443\"]" text)
+                    "the connection was not written as an allowlist entry:~%~A" text)
              ;; And what it wrote is a policy scute accepts.
              (let ((policy (call-scute 'validate-sandbox-policy
                                        (call-scute 'parse-policy-text text))))

@@ -138,6 +138,11 @@ argument gets you.")
                  :unix-sockets (if (clingon:getopt cmd :allow-unix-sockets)
                                    t
                                    :keep))))
+      (call-with-helper
+       (clingon:getopt cmd :with)
+       (let ((proxy (launch-plan-proxy plan)))
+         (and proxy (proxy-url-port proxy nil)))
+       (lambda ()
       (cond ((clingon:getopt cmd :dry-run)
              ;; Print first, then refuse: the plan is what the caller asked to
              ;; see, and a refusal explains itself better beside it.
@@ -178,7 +183,7 @@ argument gets you.")
                (when (sandbox-result-timed-out result)
                  (format *error-output*
                          "~&scute: the command ran past its time limit and was stopped~%"))
-               (uiop:quit (command-exit-status result) t)))))))
+               (uiop:quit (command-exit-status result) t)))))))))
 
 (defun make-run-command ()
   (clingon:make-command
@@ -187,7 +192,7 @@ argument gets you.")
    :usage "[--policy FILE | --read PATH ...] -- COMMAND [ARGUMENT ...]"
    :options (append
              (list (clingon:make-option
-                    :string :long-name "policy" :key :policy
+                    :string :long-name "policy" :key :policy :parameter "FILE"
                     :description "Policy file describing the sandbox"))
              (mapcar (lambda (entry)
                        (destructuring-bind (kind . name) entry
@@ -202,6 +207,9 @@ argument gets you.")
                    (clingon:make-option
                     :flag :short-name #\n :long-name "dry-run" :key :dry-run
                     :description "Print the compiled plan and run nothing")
+                   (clingon:make-option
+                    :string :long-name "with" :key :with :parameter "COMMAND"
+                    :description "Run COMMAND beside the sandbox -- a credential proxy, say")
                    (clingon:make-option
                     :flag :long-name "allow-unix-sockets" :key :allow-unix-sockets
                     :description "Let the command open unix-domain sockets (an ssh-agent, D-Bus)")
@@ -224,6 +232,8 @@ argument gets you.")
                 . "scute run --policy scute.policy --dry-run -- sh -i")
                ("Run a shell that can read the system and write only here:"
                 . "scute run --read-execute /usr --read /etc --read-write . -- sh -i")
+               ("Sandbox an agent whose credentials a proxy holds:"
+                . "scute run --policy agent.policy --with 'keyfence serve' -- claude")
                ("Find out what a policy is refusing:"
                 . "scute run --policy scute.policy --explain -- ./build.sh")
                ("Run with the process layer alone, filesystem unrestricted:"
@@ -273,7 +283,7 @@ argument gets you.")
    :description "Ask a policy what it allows at a path"
    :usage "--policy FILE PATH [PATH ...]"
    :options (list (clingon:make-option
-                   :string :long-name "policy" :key :policy
+                   :string :long-name "policy" :key :policy :parameter "FILE"
                    :description "Policy file to ask about"))
    :handler #'check-handler
    :examples '(("Will the build be able to write here?"
@@ -290,11 +300,18 @@ argument gets you.")
      (let ((existing (when (and (clingon:getopt cmd :merge) (probe-file output))
                        (read-sandbox-policy output))))
        (multiple-value-bind (result observations)
-           (run-launch-plan (compile-command-launch-plan command '()) :observe t)
+           (run-launch-plan (revised-launch-plan
+                             (compile-command-launch-plan command '())
+                             :network (if (clingon:getopt cmd :network) :host :keep))
+                            :observe t)
          (let ((rules (merge-learned-rules
                        (learned-rules observations (sb-posix:getcwd))
                        existing))
-               (*learned-unix-sockets* (observations-unix-sockets observations)))
+               (*learned-unix-sockets* (observations-unix-sockets observations))
+               (*learned-connections*
+                 (loop for connection being the hash-keys
+                         of (observations-connections observations)
+                       collect connection)))
            (if output
                (with-open-file (stream output :direction :output
                                               :if-exists :supersede
@@ -311,8 +328,11 @@ argument gets you.")
    :description "Watch a command and write the policy it would have needed"
    :usage "[--output FILE] -- COMMAND [ARGUMENT ...]"
    :options (list (clingon:make-option
-                   :string :short-name #\o :long-name "output" :key :output
+                   :string :short-name #\o :long-name "output" :key :output :parameter "FILE"
                    :description "Write the policy here instead of to standard output")
+                  (clingon:make-option
+                   :flag :long-name "network" :key :network
+                   :description "Give the command the host's network while watching it")
                   (clingon:make-option
                    :flag :long-name "merge" :key :merge
                    :description "Widen the policy already in --output rather than replacing it"))

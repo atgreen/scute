@@ -540,7 +540,8 @@ a policy's would be, so the two routes cannot diverge."
                          :directory (or directory (sb-posix:getcwd))
                          :keep keep)))
 
-(defun revised-launch-plan (plan &key (wall-clock :keep) (unix-sockets :keep))
+(defun revised-launch-plan (plan &key (wall-clock :keep) (unix-sockets :keep)
+                                      (network :keep))
   "PLAN with what the command line overrode, whatever its policy said.
 A plan is immutable, so an override makes another one rather than changing it."
   (let ((limits (launch-plan-limits plan)))
@@ -549,7 +550,7 @@ A plan is immutable, so an override makes another one rather than changing it."
      :directory (launch-plan-directory plan)
      :environment (launch-plan-environment plan)
      :filesystem (launch-plan-filesystem plan)
-     :network (launch-plan-network plan)
+     :network (if (eq network :keep) (launch-plan-network plan) network)
      :unix-sockets (if (eq unix-sockets :keep)
                        (launch-plan-unix-sockets plan)
                        unix-sockets)
