@@ -225,9 +225,13 @@ there is something --explain could find.  SCUTE_NO_HINTS=1 turns it off."
                (when (sandbox-result-timed-out result)
                  (format *error-output*
                          "~&scute: the command ran past its time limit and was stopped~%"))
-               ;; Asked here, while the broker is still on the stack: the next
-               ;; form exits the process.
-               (when *broker*
+               ;; Only when the command failed.  A refusal on the way to a
+               ;; success is usually a step rather than a problem: a client that
+               ;; waits to be challenged sends nothing, is refused, and then sends
+               ;; its credential -- git does exactly that, and reporting the first
+               ;; half as a refusal of a run that worked is noise.  The audit trail
+               ;; keeps everything either way.
+               (when (and *broker* (not (zerop (command-exit-status result))))
                  (report-broker-refusals (broker-events *broker*)))
                (offer-explanation plan result)
                (uiop:quit (command-exit-status result) t)))))
