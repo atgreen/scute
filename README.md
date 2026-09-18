@@ -541,6 +541,12 @@ is outside what scute can promise. If your threat model includes kernel
 exploits, you want a virtual machine, and you want it as well as this rather
 than instead of it.
 
+A smaller one, for anyone embedding this rather than running it: supervising a
+sandbox installs handlers for the signals it forwards, and restores them to the
+default afterwards rather than to whatever was there before. SBCL does not report
+what a handler replaced, so there is nothing to put back. It does not affect
+`scute` the command, whose signal handlers are its own.
+
 Three more limits worth knowing. A sandboxed command shares your kernel's
 clocks and load, so it can observe more than it can touch. A command that wants
 to create its own unix-domain socket — a language server, a test harness talking
