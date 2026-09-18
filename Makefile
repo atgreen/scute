@@ -1,5 +1,10 @@
+# SBCL is overridable because the binary inherits its toolchain: a Lisp
+# installed under a private prefix produces an executable that will not run
+# where that prefix is absent.  releng/smoke.sh says so if it happens.
+SBCL ?= sbcl
+
 scute: src/*.lisp *.asd
-	sbcl --eval "(asdf:make :scute)" --quit
+	$(SBCL) --eval "(asdf:make :scute)" --quit
 
 completions: scute
 	mkdir -p completions
@@ -21,14 +26,17 @@ scute-sbom.spdx.json: ocicl.csv
 # like one that passed.  SBCL exits 0 on an unhandled SIGTERM.
 test: scute
 	rm -f .test-passed
-	sbcl --noinform --non-interactive \
+	$(SBCL) --noinform --non-interactive \
 		--eval '(asdf:test-system :scute)'
 	@test -f .test-passed || { echo "the suite did not run to the end"; exit 1; }
 	@rm -f .test-passed
 
-check: test
+smoke: scute
+	releng/smoke.sh ./scute
+
+check: test smoke
 
 clean:
 	rm -rf *~ scute scute-sbom.spdx.json completions
 
-.PHONY: sbom completions demo test check clean
+.PHONY: sbom completions demo test smoke check clean

@@ -20,6 +20,11 @@ BuildRequires:  ocicl
 BuildRequires:  gcc
 BuildRequires:  make
 
+# Opened by name at runtime rather than linked, so the automatic dependency
+# generator cannot see it: without this the package installs and then refuses
+# to launch anything.
+Requires:       libseccomp
+
 
 %description
 Scute runs one local command inside a deny-by-default Linux sandbox built from

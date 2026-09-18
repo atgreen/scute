@@ -36,7 +36,9 @@ made effective. Scute never applies file capabilities to sandbox children.
 ## Startup sequence
 
 1. Parse the policy as TOML and validate it against a closed schema.
-2. Resolve paths and the command into an immutable launch plan.
+2. Resolve paths and the command into an immutable launch plan, looking a bare
+   command name up on PATH here and recording what it resolved to, so that the
+   child never searches and what will run is decided before anything exists.
 3. Probe every requested kernel and runtime feature, reporting all that are
    missing rather than the first: any missing mandatory control aborts the
    launch before anything has been created.
@@ -151,7 +153,8 @@ access includes it.
   the child on itself immediately before `execve`.
 - **Process:** user, PID, mount, UTS, and network namespaces; `no_new_privs`;
   zero capabilities; and a denylist seccomp filter installed after setup.
-- **Network:** an isolated network namespace with no external route in v0.
+- **Network:** an isolated network namespace with no external route, and a
+  refusal of unix-domain sockets, which no namespace confines.
 - **Resources:** `memory.max`, `pids.max`, `cpu.max`, and `memory.swap.max`
   beneath a delegated cgroup-v2 subtree.
 - **Audit:** optional, fixed Whistler programs attached to the sandbox cgroup at
@@ -268,6 +271,17 @@ state such as quotas and NUMA placement. Denied calls answer `EPERM`. Most of
 them also need a capability the sandbox does not have; they are denied anyway,
 because a syscall that cannot be reached is a syscall whose bugs cannot be
 reached either.
+
+A network namespace is not by itself an absence of network. It removes every
+route and every abstract socket, and Landlock governs what a command may open,
+but neither covers `connect(2)` to a unix socket by its path: a sandbox whose
+policy said the network was off could still reach `systemd-resolved`, the system
+D-Bus, an `ssh-agent`, or a container daemon, and a policy had no way to say
+otherwise. Measured, not reasoned about: `getent hosts example.com` answered
+correctly inside a sandbox with no route at all. `socket(AF_UNIX, ...)` is
+therefore refused, by the same argument test that reads clone's flags.
+`socketpair` is a different syscall and stays allowed, because a program talking
+to itself is not the network.
 
 A nested user namespace is closed by all three of its routes, because it
 deserves more than defence in depth: a process that creates one holds a full

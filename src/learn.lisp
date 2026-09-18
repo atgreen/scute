@@ -89,6 +89,7 @@ the same refusals during a learning run as during a real one."
                                        :unsigned-int 0 :int))))
            (setf watched watched)          ; keep the binding obvious
            (deny-nested-user-namespaces context)
+           (deny-unix-domain-sockets context)
            (dolist (syscall +watched-syscalls+)
              (let ((number (cffi:foreign-funcall "seccomp_syscall_resolve_name"
                                                  :string (watched-syscall-name syscall)

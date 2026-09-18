@@ -133,6 +133,23 @@ as a struct, which is the one a foreign call can build."
                                        name result)))
         t))))
 
+(defconstant +af-unix+ 1)
+
+(defun deny-unix-domain-sockets (context)
+  "Refuse a socket in the unix domain, which no namespace confines.
+
+A network namespace of its own gives a sandbox no route and no abstract socket,
+and Landlock governs what it can open -- but neither covers connect(2) to a
+unix socket by path, so a command could reach systemd-resolved, the system
+D-Bus, an ssh-agent, or a container daemon while the policy said the network
+was off.  It was off; that traffic never went near it.
+
+socketpair is a different syscall and stays allowed, so a program can still
+talk to itself."
+  (when (add-masked-argument-rule context (scmp-act-errno +eperm+) "socket" 0
+                                  #xffffffff +af-unix+)
+    (list "socket(AF_UNIX)")))
+
 (defun deny-nested-user-namespaces (context)
   "Refuse the two ways a command could put itself in a new user namespace."
   (let ((denied '()))
@@ -218,7 +235,9 @@ as a struct, which is the one a foreign call can build."
                             (setup-error :seccomp-rule-add
                                          :detail (format nil "~A: libseccomp answered ~D"
                                                          name result))))))))
-           (setf denied (append (deny-nested-user-namespaces context) denied))
+           (setf denied (append (deny-unix-domain-sockets context)
+                                (deny-nested-user-namespaces context)
+                                denied))
            (multiple-value-bind (program instructions) (export-filter-program context)
              (%make-seccomp-filter :program program
                                    :instructions instructions

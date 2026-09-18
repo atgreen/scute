@@ -158,15 +158,15 @@ argument gets you.")
                     :description "Say which paths the policy refused, and what would allow them")))
    :handler #'run-handler
    :examples '(("Run a shell under a policy file:"
-                . "scute run --policy scute.policy -- /bin/sh -i")
+                . "scute run --policy scute.policy -- sh -i")
                ("Show what a policy would do, without running it:"
-                . "scute run --policy scute.policy --dry-run -- /bin/sh -i")
+                . "scute run --policy scute.policy --dry-run -- sh -i")
                ("Run a shell that can read the system and write only here:"
-                . "scute run --read-execute /usr --read /etc --read-write . -- /bin/sh -i")
+                . "scute run --read-execute /usr --read /etc --read-write . -- sh -i")
                ("Find out what a policy is refusing:"
                 . "scute run --policy scute.policy --explain -- ./build.sh")
                ("Run with the process layer alone, filesystem unrestricted:"
-                . "scute run --namespaces-only -- /bin/sh -i"))))
+                . "scute run --namespaces-only -- sh -i"))))
 
 (defun report-path-access (rules path stream)
   "Say what RULES allow at PATH.  Answers whether anything is allowed at all."

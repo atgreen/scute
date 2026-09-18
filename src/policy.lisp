@@ -263,13 +263,37 @@ is a sandbox the operator half asked for."
                    :detail (format nil "~A does not exist" pathname)))
     (namestring (uiop:ensure-directory-pathname truename))))
 
-(defun resolve-executable (name)
-  "NAME as the canonical path of the program to execute.
-v0 requires an absolute path: a sandbox whose command is found by searching
-PATH is a sandbox whose command depends on the environment it inherited."
-  (unless (and (stringp name) (plusp (length name)) (char= #\/ (char name 0)))
-    (usage-error (format nil "~S is not an absolute path" name)))
-  (let ((truename (probe-file name)))
+(defun path-directories (&optional (path (sb-posix:getenv "PATH")))
+  (when path
+    (loop with start = 0
+          for colon = (position #\: path :start start)
+          collect (let ((entry (subseq path start colon)))
+                    (if (plusp (length entry)) entry "."))
+          while colon
+          do (setf start (1+ colon)))))
+
+(defun search-path-for (name)
+  "The first executable called NAME on PATH."
+  (loop for directory in (path-directories)
+        for candidate = (format nil "~A/~A" (string-right-trim "/" directory) name)
+        when (and (probe-file candidate)
+                  (zerop (%access candidate +x-ok+)))
+          return candidate))
+
+(defun resolve-executable (name &optional (directory (sb-posix:getcwd)))
+  "NAME as the canonical path of the program that will run.
+
+A bare name is looked up on PATH once, here, and the plan records what it
+resolved to.  The point of the old rule -- that a sandbox whose command is
+chosen by searching PATH depends on an environment it inherited -- is kept by
+resolving in the supervisor rather than in the child: what will run is decided
+before anything is created, and scute run --dry-run shows it."
+  (unless (and (stringp name) (plusp (length name)))
+    (usage-error "the command is empty"))
+  (let* ((located (if (find #\/ name)
+                      (merge-pathnames name (uiop:ensure-directory-pathname directory))
+                      (search-path-for name)))
+         (truename (and located (probe-file located))))
     (unless truename
       (error 'command-not-found :pathname name))
     (namestring truename)))
@@ -313,7 +337,7 @@ nothing here touches the kernel."
     (usage-error "the command must be a non-empty list of strings"))
   (let ((directory (canonical-directory directory)))
     (%make-launch-plan
-     :command (cons (resolve-executable (first command)) (rest command))
+     :command (cons (resolve-executable (first command) directory) (rest command))
      :directory directory
      :environment (copy-list environment)
      :filesystem (mapcar (lambda (rule)

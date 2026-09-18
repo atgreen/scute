@@ -219,9 +219,18 @@ forwarded SIGTERM is discarded and nothing but SIGKILL will do."
       (delete-scratch ready))))
 
 (deftest test-fail-closed-launch
-  "A command Scute cannot resolve is refused before any namespace is created.
-It is the caller's mistake rather than the host's, so it reads as one."
+  "A command Scute cannot resolve is refused before any namespace is created,
+and one it can resolve is pinned to what it resolved to: the child never
+searches PATH, so what runs cannot depend on an environment it inherited."
   (let ((condition (nth-value 1 (ignore-errors
-                                 (call-scute 'run-namespaced-command '("sh"))))))
-    (check (typep condition 'scute:usage-error)
-           "a relative command was not refused, got ~S" condition)))
+                                 (call-scute 'run-namespaced-command
+                                             '("no-such-command-anywhere"))))))
+    (check (typep condition 'scute:command-not-found)
+           "an unresolvable command was not refused, got ~S" condition))
+  (let ((plan (call-scute 'compile-command-launch-plan '("sh" "-c" "exit 5") '())))
+    (check (char= #\/ (char (first (call-scute 'launch-plan-command plan)) 0))
+           "a bare command name was not resolved to an absolute path: ~S"
+           (call-scute 'launch-plan-command plan))
+    (check (eql 5 (call-scute 'sandbox-result-exit-code
+                              (call-scute 'run-launch-plan plan)))
+           "the resolved command did not run")))

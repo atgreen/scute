@@ -140,3 +140,44 @@ int main(void) {
                         "clone(CLONE_NEWUSER) was not refused inside the sandbox: ~S"
                         result))))
       (delete-scratch source program))))
+
+(deftest test-unix-domain-sockets-are-refused
+  "A sandbox with no network must not be able to reach the host's daemons.
+
+A network namespace of its own removes every route and every abstract socket,
+and Landlock governs what a command may open -- but neither covers connect(2)
+to a unix socket by path, so systemd-resolved, the system D-Bus and an
+ssh-agent were all reachable from a sandbox whose policy said the network was
+off.  socketpair stays allowed, because a program talking to itself is not the
+network."
+  (check (member "socket(AF_UNIX)"
+                 (call-scute 'seccomp-filter-denied (call-scute 'v0-seccomp-filter))
+                 :test #'string=)
+         "the filter no longer denies unix domain sockets")
+  (let ((source (format nil "~A.c" (scratch-pathname "unixsock")))
+        (program (scratch-pathname "unixsock")))
+    (unwind-protect
+         (progn
+           (with-open-file (stream source :direction :output :if-exists :supersede)
+             (write-string "#include <sys/socket.h>
+#include <unistd.h>
+int main(void) {
+  int pair[2];
+  if (socket(AF_UNIX, SOCK_STREAM, 0) >= 0) return 1;   /* reached the host */
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) < 0) return 2;  /* broke itself */
+  return 7;                                             /* refused, and still whole */
+}
+" stream))
+           (if (plusp (cffi:foreign-funcall
+                       "system" :string
+                       (format nil "gcc -o ~A ~A >/dev/null 2>&1" program source)
+                       :int))
+               (format *error-output* "~&SKIP: no working gcc, so unix sockets are untested~%")
+               (let ((result (call-scute 'run-namespaced-command (list program)
+                                         :filesystem +unrestricted+)))
+                 (check (eql 7 (call-scute 'sandbox-result-exit-code result))
+                        "expected 7 (refused, socketpair intact); 1 means the ~
+                         sandbox could still open a unix socket, 2 means ~
+                         socketpair was broken with it: ~S"
+                        result))))
+      (delete-scratch source program))))
