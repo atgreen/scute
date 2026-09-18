@@ -169,9 +169,12 @@ read = ["/etc"]
 read-write = [".", "/dev/tty"]
 ```
 
-`--explain` enforces the policy exactly as usual; it only watches as well, at
-the cost of a round trip per path, which is why it is a flag and not the
-default.
+`--explain` enforces the policy exactly as usual; it only watches as well, at the
+cost of a round trip per path. That is why it is a flag rather than the default:
+on a command touching 189,000 paths it took 1.57s against 0.19s, while for a small
+one the difference is invisible. When a command fails and someone is watching,
+scute says that `--explain` would answer why; in a script it stays quiet, and
+`SCUTE_NO_HINTS=1` silences it everywhere.
 
 ## Policy reference
 
@@ -536,7 +539,7 @@ trip per event, which is why a policy has to ask for it.
 
 | What you see | What it usually means |
 |---|---|
-| `Permission denied` from the command | The policy is missing a path. Re-run with `--explain` and it names them, with the lines to add. |
+| `Permission denied` from the command | The policy is missing a path. Re-run with `--explain` and it names them, with the lines to add — scute says so itself when a command fails and you are watching. |
 | `/dev/null: Permission denied` | Nothing is granted implicitly. Name `/dev/null`, and usually `/proc`. |
 | A binary you just built will not run | `read-write` can hold it; running it needs `read-write-execute`. |
 | `This build cannot enforce resource limits` | Scute needs a cgroup of its own: `systemd-run --user --scope -p Delegate=yes scute run ...` |
@@ -571,6 +574,13 @@ sandbox installs handlers for the signals it forwards, and restores them to the
 default afterwards rather than to whatever was there before. SBCL does not report
 what a handler replaced, so there is nothing to put back. It does not affect
 `scute` the command, whose signal handlers are its own.
+
+Granting `/proc` grants more than it looks like. The sandbox gets a fresh PID
+namespace, but not a fresh `/proc`: it sees the host's, so `read = ["/proc"]`
+lets it read every process's command line. Environments are safe — the user
+namespace maps your uid elsewhere, so `/proc/PID/environ` is refused — but a
+secret passed as a command-line argument anywhere on the machine is legible to a
+sandbox that has `/proc`. That is one reason to keep secrets out of argv.
 
 Three more limits worth knowing. A sandboxed command shares your kernel's
 clocks and load, so it can observe more than it can touch. A command that wants

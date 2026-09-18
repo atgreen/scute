@@ -345,3 +345,27 @@ so the messages are checked rather than trusted."
       (check (not (find #\~ said))
              "the message for ~S carries a tilde, so a continuation was written ~
               in a plain string:~%~A" arguments said))))
+
+(deftest test-a-failing-command-is-told-how-to-find-out-why
+  "A sandboxed command reports its own confusion and says nothing about the
+sandbox, so somebody who does not already know about --explain cannot learn it at
+the moment they need it.  The hint is for a person watching: a non-zero exit is
+ordinary in a script, where this would be noise."
+  (let ((plan (call-scute 'compile-command-launch-plan
+                          '("/bin/false") '((:read-execute "/usr")))))
+    ;; Reported through stderr, so what this checks is the decision rather than
+    ;; the writing: a failure with filesystem rules, no hint when either is
+    ;; missing, and never when SCUTE_NO_HINTS says so.
+    (check (find-symbol "OFFER-EXPLANATION" '#:scute)
+           "the hint is not where the CLI can reach it")
+    (let ((sb-ext:*posix-argv* sb-ext:*posix-argv*))
+      (sb-posix:setenv "SCUTE_NO_HINTS" "1" 1)
+      (unwind-protect
+           (let ((said (with-output-to-string (stream)
+                         (let ((*error-output* stream))
+                           (call-scute 'offer-explanation plan
+                                       (call-scute 'make-sandbox-result
+                                                   99 1 nil))))))
+             (check (zerop (length said))
+                    "SCUTE_NO_HINTS did not silence the hint: ~S" said))
+        (sb-posix:unsetenv "SCUTE_NO_HINTS")))))

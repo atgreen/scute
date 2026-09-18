@@ -69,7 +69,11 @@ or describe the filesystem on the command line:
   --read-write-execute PATH   the same, plus execute
 
 Nothing outside those paths can be opened.  To run with no filesystem
-restriction at all, say so with --namespaces-only."
+restriction at all, say so with --namespaces-only.
+
+Or have Scute write the policy by watching the command run once:
+
+  scute learn --output scute.policy -- COMMAND"
   "Said when a caller asks for a sandbox without saying what it permits.  An
 unrestricted sandbox has to be asked for by name; it is not what forgetting an
 argument gets you.")
@@ -122,6 +126,30 @@ argument gets you.")
                                         (clingon:getopt cmd :keep-env)))
           (t
            (usage-error +nothing-declared-message+)))))
+
+(defun interactive-error-output-p ()
+  "Whether somebody is reading stderr, rather than a file or a pipe."
+  (plusp (cffi:foreign-funcall "isatty" :int 2 :int)))
+
+(defun offer-explanation (plan result)
+  "Say how to find out which paths a failing command was refused.
+
+A sandboxed command reports its own confusion -- \"Permission denied\", from
+somewhere inside a library -- and nothing in that says a sandbox was involved or
+that Scute can answer the question.  Someone who does not already know about
+--explain has no way to learn it at the moment they need it, and will reasonably
+conclude the filesystem is broken.
+
+Only when a person is watching, because a non-zero exit is ordinary in a script
+and this would be noise there.  Only when the policy restricts the filesystem, so
+there is something --explain could find.  SCUTE_NO_HINTS=1 turns it off."
+  (when (and (launch-plan-filesystem plan)
+             (not (zerop (command-exit-status result)))
+             (interactive-error-output-p)
+             (not (sb-posix:getenv "SCUTE_NO_HINTS")))
+    (format *error-output*
+            "~&scute: the command failed.  If a path was refused, this says which:~%~
+             ~&       scute run --explain ...~%")))
 
 (defun run-command (cmd)
   (let ((command (clingon:command-arguments cmd)))
@@ -190,6 +218,7 @@ argument gets you.")
                (when (sandbox-result-timed-out result)
                  (format *error-output*
                          "~&scute: the command ran past its time limit and was stopped~%"))
+               (offer-explanation plan result)
                (uiop:quit (command-exit-status result) t)))))
          :program (clingon:getopt cmd :broker-path)))))))
 
