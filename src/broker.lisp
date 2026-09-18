@@ -154,6 +154,34 @@ a JSON array.  Anything that does not is left alone, with the secret unsent."
           (t nil)))
     (error () nil)))
 
+(defun fetch-broker-certificate (port)
+  "Ask the broker for its CA certificate and write it where the sandbox can read.
+
+Better than assuming where the broker keeps its data directory, which is the sort
+of thing that goes wrong quietly: the sandbox trusts the wrong CA and the failure
+arrives as a TLS error that reads like a network fault.  The certificate is
+public -- every agent behind the proxy has to trust it -- so asking for it over
+the control API costs nothing.
+
+Answers the path written, or NIL if this broker does not serve one, in which case
+the caller falls back to looking where brokers usually put it."
+  (handler-case
+      (let ((response (loopback-request port "GET" "/ca" :seconds 5)))
+        (when (and (= 200 (http-response-status response))
+                   (search "BEGIN CERTIFICATE" (http-response-body response)))
+          (let* ((directory (format nil "~A/scute-broker-~D/"
+                                    (or (sb-posix:getenv "XDG_RUNTIME_DIR") "/tmp")
+                                    (sb-posix:getpid)))
+                 (path (concatenate 'string directory "ca.pem")))
+            (ensure-directories-exist directory)
+            (sb-posix:chmod (string-right-trim "/" directory) #o755)
+            (with-open-file (stream path :direction :output :if-exists :supersede
+                                         :external-format :utf-8)
+              (write-string (http-response-body response) stream))
+            (sb-posix:chmod path #o644)
+            path)))
+    (error () nil)))
+
 (defun start-broker (settings &key program (certificate (broker-certificate-path)))
   "Reach the broker SETTINGS names: the one already running, or a new one.
 
@@ -164,7 +192,8 @@ and leaves credentials in a process nobody is supervising."
     (if (broker-answering-p control)
         (let ((key (broker-control-key-from-host)))
           (ecase (identify-broker control key)
-            (:broker (%make-broker settings nil key certificate))
+            (:broker (%make-broker settings nil key
+                                   (or (fetch-broker-certificate control) certificate)))
             (:unauthorized
              (setup-error
               :start-broker
@@ -211,7 +240,10 @@ and leaves credentials in a process nobody is supervising."
                            :detail (format nil "what is answering on port ~D is ~
                                                 not the broker ~A was started to be"
                                            control executable)))
-            broker)))))
+            (let ((served (fetch-broker-certificate control)))
+              (if served
+                  (%make-broker settings helper control-key served)
+                  broker)))))))
 
 (defun stop-broker (broker)
   "Revoke what this run minted, and stop the broker if this run started it.
@@ -220,6 +252,12 @@ its tokens are still ours to revoke."
   (revoke-tokens broker)
   (when (broker-helper broker)
     (stop-helper (broker-helper broker)))
+  ;; A certificate fetched for this run goes with it. One found where the broker
+  ;; keeps it belongs to the broker, and is left alone.
+  (let ((certificate (namestring (broker-certificate broker))))
+    (when (search "/scute-broker-" certificate)
+      (ignore-errors (delete-file certificate))
+      (ignore-errors (sb-posix:rmdir (directory-namestring certificate)))))
   t)
 
 ;;── Tokens ─────────────────────────────────────────────────────────────────────
