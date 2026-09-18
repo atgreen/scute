@@ -238,6 +238,25 @@ scute run --policy scute.policy -- /bin/sh -i
 scute run --policy scute.policy --dry-run -- /bin/sh -i   # show, run nothing
 ```
 
+Every table and key it may contain:
+
+| Table | Key | Value | Meaning |
+|---|---|---|---|
+| `[filesystem]` | `read` | array of paths | read files, list directories |
+| | `read-execute` | array of paths | the same, and execute |
+| | `read-write` | array of paths | read, write, create, delete, rename |
+| | `read-write-execute` | array of paths | the same, and execute |
+| `[network]` | `mode` | `"none"` | the only mode v0 knows |
+| `[limits]` | `memory` | size, e.g. `"2G"` | and no swapping around it |
+| | `processes` | integer | `pids.max` |
+| | `cpu-percent` | integer | 100 is one processor |
+| `[audit]` | `events` | `["exec", "connect"]` | designed; this build refuses rather than pretends |
+
+A relative path means what it says from where scute was invoked and may not
+climb out of it. Anything the schema does not name — an unknown table, an
+unknown key, a value of the wrong shape, a duplicate key — is an error, and the
+policy is refused whole rather than enforced in part.
+
 `--dry-run` prints the compiled plan: canonical paths, the command that will
 actually run, and the directory it runs in. Reviewing that is cheaper than
 reasoning about what a policy implies.
