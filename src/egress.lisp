@@ -123,6 +123,18 @@ Answers a second value saying why not."
 attachment outliving its sandbox is the sort of thing that accumulates."
   (ignore-errors (uiop:symbol-call '#:whistler/loader '#:detach attachment)))
 
+(defmacro with-narration-captured (stream &body body)
+  "Run BODY with everything it prints going to STREAM.
+
+Every stream a library might narrate to, not just the obvious two.  Whistler
+writes its progress to *trace-output*, which is easy to forget and shows up as
+noise in the middle of somebody's session."
+  `(let ((*standard-output* ,stream)
+         (*error-output* ,stream)
+         (*trace-output* ,stream)
+         (*debug-io* (make-two-way-stream (make-concatenated-stream) ,stream)))
+     ,@body))
+
 (defun install-egress-guard (cgroup endpoints)
   "Load the guard, allow ENDPOINTS, and attach it to CGROUP.
 Answers the attachment, which the supervisor detaches when the sandbox ends."
@@ -133,12 +145,17 @@ Answers the attachment, which the supervisor detaches when the sandbox ends."
     ;; The loader narrates what it is doing, which belongs in a debugging
     ;; session and not in the middle of a sandboxed command's output.  Kept,
     ;; though: if the load fails, what it said is the best evidence there is.
+    ;;
+    ;; All three streams, because it uses all three: binding *standard-output*
+    ;; and *error-output* left ";; load-program prog-type=18 ..." going to
+    ;; *trace-output*, which is where anything with a ";;" in front of it tends
+    ;; to go, and which turned up in the middle of an interactive agent session.
     (let* ((narration (make-string-output-stream))
-           (maps (let ((*standard-output* narration) (*error-output* narration))
+           (maps (with-narration-captured narration
                    (uiop:symbol-call '#:whistler/loader '#:session-create-maps
                                      map-specs)))
            (progs (handler-case
-                      (let ((*standard-output* narration) (*error-output* narration))
+                      (with-narration-captured narration
                         (uiop:symbol-call '#:whistler/loader '#:session-load-progs
                                           prog-specs maps))
                     (error (condition)
