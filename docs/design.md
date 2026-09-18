@@ -41,10 +41,11 @@ made effective. Scute never applies file capabilities to sandbox children.
    control aborts the launch.
 4. Create a cgroup below the caller's delegated cgroup-v2 subtree.
 5. Load and attach requested fixed Whistler audit programs.
-6. Build one Landlock ruleset: handle every filesystem access right the
-   kernel's reported ABI defines, then add one `PATH_BENEATH` rule per declared
-   path. Refuse any path that does not exist, and any command no rule permits
-   to execute.
+6. Build the enforcement programs: one Landlock ruleset, handling every
+   filesystem access right the kernel's reported ABI defines and carrying one
+   `PATH_BENEATH` rule per declared path; and the seccomp filter, exported as a
+   BPF program. Refuse any path that does not exist, and any command no rule
+   permits to execute.
 7. Create a PID-1 child in user, mount, PID, UTS, and network namespaces with
    `clone3`; it waits on a preallocated synchronization pipe without using Lisp
    runtime services.
@@ -148,7 +149,7 @@ access includes it.
 - **Filesystem:** one Landlock allowlist, built by the parent and enforced by
   the child on itself immediately before `execve`.
 - **Process:** user, PID, mount, UTS, and network namespaces; `no_new_privs`;
-  zero capabilities; and a denylist seccomp filter applied after setup.
+  zero capabilities; and a denylist seccomp filter installed after setup.
 - **Network:** an isolated network namespace with no external route in v0.
 - **Resources:** `memory.max`, `pids.max`, and `cpu.max` beneath a delegated
   cgroup-v2 subtree.
@@ -159,6 +160,31 @@ access includes it.
 Scute never silently weakens a requested control. A host without Landlock,
 user namespaces, cgroup delegation for requested limits, libseccomp, required
 capabilities, or requested BPF support receives a pre-execution error.
+
+### What the filter denies, and what it cannot
+
+The seccomp filter follows the same split as Landlock. The parent builds it with
+libseccomp, where a mistake is an error before anything is created, and exports
+it as a BPF program; the child installs it with one `seccomp(2)` call and never
+touches libseccomp, so nothing between `clone3` and `execve` allocates. It is
+installed before `landlock_restrict_self`, which it permits, and both come after
+`no_new_privs`, which each requires.
+
+It is a denylist. A sandboxed command is ordinary software doing ordinary work,
+and an allowlist of everything a C library might call is a maintenance burden
+that fails closed on the wrong things. What v0 denies is the surface a confined
+command has no business touching: kernel modules and machine control, the kernel
+keyring, BPF and tracing, namespace and mount changes after setup, opening files
+by handle, `userfaultfd` and `io_uring`, setting the clock, and machine-wide
+state such as quotas and NUMA placement. Denied calls answer `EPERM`. Most of
+them also need a capability the sandbox does not have; they are denied anyway,
+because a syscall that cannot be reached is a syscall whose bugs cannot be
+reached either.
+
+One limit is stated here rather than left to be discovered. Denying `unshare`
+does not prevent a program from creating a nested user namespace: `clone` and
+`clone3` can do the same, and seccomp cannot read the struct `clone3` takes its
+flags from. The denial is defence in depth, not a boundary.
 
 One right is deliberately left ungoverned in v0: `LANDLOCK_ACCESS_FS_IOCTL_DEV`
 (ABI 5). Handling it without granting it breaks `tcsetattr` on a terminal, and
@@ -177,8 +203,8 @@ therefore out of v0's scope, stated here rather than discovered later.
   paths into one ruleset, and enforces it on the calling thread.
 - `src/cgroup.lisp` discovers the delegated subtree, creates and configures one
   sandbox cgroup, moves the child, classifies resource events, and cleans up.
-- `src/seccomp.lisp` binds the minimal libseccomp API and installs the v0
-  post-setup filter.
+- `src/seccomp.lisp` binds the minimal libseccomp API, builds the v0 filter in
+  the parent, and exports it as the BPF program the child installs.
 - `src/audit.lisp` defines fixed Whistler programs and decodes their events.
 - `src/sandbox.lisp` orders acquisition, fork synchronization, supervision,
   signal forwarding, result classification, and cleanup.

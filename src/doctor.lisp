@@ -99,12 +99,18 @@
                                      directory))))))))
 
 (defun probe-seccomp ()
-  (if (library-loadable-p "libseccomp.so.2")
-      (make-probe "libseccomp" :ok
-                  (format nil "libseccomp.so.2, kernel actions: ~A"
-                          (or (read-first-line "/proc/sys/kernel/seccomp/actions_avail")
-                              "unreported")))
-      (make-probe "libseccomp" :missing "libseccomp.so.2 could not be loaded")))
+  "Build the v0 filter to answer this, rather than only looking for the library:
+a filter that will not compile here is a launch that will not happen."
+  (handler-case
+      (let ((filter (v0-seccomp-filter)))
+        (make-probe "libseccomp" :ok
+                    (format nil "~D syscalls denied in ~D instructions~@[, ~D not on this architecture~]"
+                            (length (seccomp-filter-denied filter))
+                            (seccomp-filter-instructions filter)
+                            (let ((absent (length (seccomp-filter-unavailable filter))))
+                              (and (plusp absent) absent)))))
+    (scute-error (condition)
+      (make-probe "libseccomp" :missing (princ-to-string condition)))))
 
 ;;── Report ─────────────────────────────────────────────────────────────────────
 

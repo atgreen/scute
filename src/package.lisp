@@ -60,7 +60,15 @@
            #:sandbox-result-exit-code
            #:sandbox-result-term-signal
            #:capability-sets
+           #:verify-no-capabilities
            #:namespace-id
+           ;; The system-call filter
+           #:v0-seccomp-filter
+           #:seccomp-filter
+           #:seccomp-filter-denied
+           #:seccomp-filter-unavailable
+           #:seccomp-filter-instructions
+           #:denied-syscall-names
            ;; Host diagnostics
            #:doctor-report
            #:print-doctor-report

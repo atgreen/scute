@@ -164,6 +164,25 @@ nothing to drop, so EPERM there is not a failure."
       (cffi:foreign-free header)
       (cffi:foreign-free data))))
 
+(defparameter +verified-capability-sets+ '("CapEff" "CapPrm" "CapInh" "CapAmb")
+  "The sets that must be empty before the parent releases the child.
+
+Not CapBnd.  Clearing the bounding set needs CAP_SETPCAP, which an unprivileged
+Scute never had, and it does not need it: the bounding set limits only what an
+exec could add, and nothing can be added to an empty permitted set under
+no_new_privs.  The child is a different matter -- it holds CAP_SETPCAP inside
+its own user namespace, clears its bounding set there, and the tests check it.")
+
+(defun verify-no-capabilities ()
+  "Check that this process holds no capability it could pass to a child.
+The design says drop and verify, because dropping is a syscall and a syscall
+can fail in ways worth noticing before a sandbox is released."
+  (loop for (name . bits) in (capability-sets)
+        when (and (member name +verified-capability-sets+ :test #'string=)
+                  (not (zerop bits)))
+          do (setup-error :verify-no-capabilities
+                          :detail (format nil "~A is still ~(~16,'0X~)" name bits))))
+
 (defun capability-sets (&optional (pathname "/proc/self/status"))
   "Return an alist of the Cap* lines in PATHNAME as (NAME . INTEGER)."
   (with-open-file (stream pathname :direction :input)

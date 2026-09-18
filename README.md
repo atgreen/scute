@@ -20,11 +20,12 @@ kernel is addressed directly — `clone3`, `landlock_create_ruleset`, `capset`,
 
 ## Status
 
-Scute is v0 and unfinished, but it runs. Two layers are in place — the process
-layer (fresh user, mount, PID, UTS, and network namespaces; every capability
-set emptied; `no_new_privs`; the sandbox dies with its supervisor) and the
-filesystem layer, one Landlock ruleset the child enforces on itself just before
-it execs. Policy files work, and so does describing the filesystem directly on
+Scute is v0 and unfinished, but it runs. Three layers are in place — the process
+layer (fresh user, mount, PID, UTS, and network namespaces; every capability set
+emptied; `no_new_privs`; the sandbox dies with its supervisor), the filesystem
+layer (one Landlock ruleset the child enforces on itself just before it execs),
+and a seccomp filter denying the system calls a confined command has no business
+making. Policy files work, and so does describing the filesystem directly on
 the command line:
 
 ```sh
@@ -33,7 +34,9 @@ scute run --read-execute /usr --read /etc --read-write . -- /bin/sh -c 'ls; echo
 
 Nothing outside those paths can be opened — including, note, `/proc` and
 `/dev/null`, which most programs expect; grant them explicitly when a command
-needs them. To run with no filesystem restriction at all, say so:
+needs them. The distinction between `--read-write` and `--read-write-execute`
+is real: a directory granted the first can hold a binary you just compiled, but
+running it needs the second. To run with no filesystem restriction at all, say so:
 
 ```sh
 scute run --namespaces-only -- COMMAND
@@ -47,8 +50,7 @@ to launch rather than pretend: those controls are designed but not built, and
 silently skipping one would hand back a weaker sandbox than the policy asked
 for.
 
-Still to come: cgroup-v2 resource limits, the seccomp filter, and optional eBPF
-auditing. `docs/design.md` is the architecture. The task graph
+Still to come: cgroup-v2 resource limits and optional eBPF auditing. `docs/design.md` is the architecture. The task graph
 lives in [beads](https://github.com/steveyegge/beads); `bd ready` shows what is
 claimable.
 

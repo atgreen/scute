@@ -29,7 +29,7 @@ non-NIL."
 ;;; child cannot afford.
 
 (defstruct (launch-resources (:constructor %make-launch-resources))
-  command path argv envp envp-count landlock-ruleset
+  command path argv envp envp-count landlock-ruleset seccomp-program
   sync-read sync-write status-read status-write
   sync-buffer status-buffer
   cap-header cap-data cap-last)
@@ -41,7 +41,8 @@ non-NIL."
 (defconstant +stage-drop-bounding+ 3)
 (defconstant +stage-capset+        4)
 (defconstant +stage-no-new-privs+  5)
-(defconstant +stage-landlock+      7)
+(defconstant +stage-seccomp+       7)
+(defconstant +stage-landlock+      8)
 (defconstant +stage-execve+        6)
 
 (defun child-stage-name (stage)
@@ -52,6 +53,7 @@ non-NIL."
     (#.+stage-drop-bounding+ :child-drop-bounding-capabilities)
     (#.+stage-capset+        :child-clear-capabilities)
     (#.+stage-no-new-privs+  :child-set-no-new-privs)
+    (#.+stage-seccomp+       :child-install-seccomp-filter)
     (#.+stage-landlock+      :child-restrict-self)
     (#.+stage-execve+        :child-execve)
     (t                       :child-unknown)))
@@ -79,7 +81,11 @@ the child only uses what is already in its hands."
          (path (first command))
          (environment (launch-plan-environment plan))
          (last-capability (cap-last-cap))
-         (ruleset (compile-filesystem-ruleset (launch-plan-filesystem plan) path)))
+         (ruleset (compile-filesystem-ruleset (launch-plan-filesystem plan) path))
+         ;; Built before the child exists, so a filter that will not build is a
+         ;; launch that does not happen.  The program is shared and read-only:
+         ;; these resources borrow it rather than owning it.
+         (filter (v0-seccomp-filter)))
     (multiple-value-bind (sync-read sync-write) (make-sync-pipe)
       (multiple-value-bind (status-read status-write) (make-sync-pipe)
         (multiple-value-bind (cap-header cap-data) (make-empty-capability-request)
@@ -95,7 +101,8 @@ the child only uses what is already in its hands."
            :status-buffer (cffi:foreign-alloc :uint8 :count 1 :initial-element 0)
            :cap-header cap-header :cap-data cap-data
            :cap-last last-capability
-           :landlock-ruleset ruleset))))))
+           :landlock-ruleset ruleset
+           :seccomp-program (seccomp-filter-program filter)))))))
 
 (defun release-launch-resources (resources)
   "Release every parent-side resource RESOURCES holds."
@@ -155,6 +162,10 @@ collector."
         (die +stage-capset+ +child-exit-setup-failed+))
       (when (minusp (%prctl +pr-set-no-new-privs+ 1 0 0 0))
         (die +stage-no-new-privs+ +child-exit-setup-failed+))
+      ;; Seccomp before Landlock, and both after no_new_privs, which each
+      ;; requires.  The filter allows landlock_restrict_self and execve.
+      (when (minusp (%seccomp-install (launch-resources-seccomp-program resources)))
+        (die +stage-seccomp+ +child-exit-setup-failed+))
       ;; Landlock last, and only after no_new_privs: restrict_self requires it.
       (let ((ruleset (launch-resources-landlock-ruleset resources)))
         (when ruleset
@@ -250,6 +261,7 @@ PLAN requests that this build cannot install is an error, not an omission."
                   (progn
                     (write-identity-maps pid)
                     (drop-all-capabilities)
+                    (verify-no-capabilities)
                     (multiple-value-bind (status stage) (supervise-child resources pid)
                       (setf reaped t)
                       (when stage
