@@ -276,3 +276,21 @@ an allow list beside it would be a second answer to the same question."
               (check (member port connect)
                      "port ~D is not permitted, so the rewrite would never be reached: ~S"
                      port connect))))))))
+
+(deftest test-udp-does-not-escape-a-guarded-sandbox
+  "connect4 sees connect(2), and sendto(2) on an unconnected socket never calls
+it.  A sandbox whose TCP was fully accounted for could still send datagrams
+anywhere -- verified as an actual escape before this existed -- so the same shape
+of program answers at sendmsg4, where unconnected UDP does go."
+  (let ((programs (nth-value 1 (call-scute 'compile-egress-udp))))
+    (check (= 1 (length programs)) "expected one program, got ~D" (length programs))
+    (let ((program (first programs)))
+      (check (string= "cgroup/sendmsg4" (getf program :section))
+             "attached at ~S, which is not where unconnected UDP goes"
+             (getf program :section))
+      (check (plusp (length (getf program :insns))) "the program has no instructions")))
+  ;; Name resolution is the exception, because a client resolves before it
+  ;; connects and a failed resolution never reaches the connect being guarded.
+  (check (= 53 (scute-value '+resolver-port+)) "the exception is not port 53")
+  (check (= #x3500 (call-scute 'network-port-word 53))
+         "53 in network order is ~X" (call-scute 'network-port-word 53)))

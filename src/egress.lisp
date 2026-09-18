@@ -267,3 +267,57 @@ reach; this says that it reaches the proxy whatever it asked for."
                           cgroup
                           (symbol-value (uiop:find-symbol* '#:+bpf-cgroup-inet4-connect+
                                                            '#:whistler/loader)))))))
+
+(defparameter +resolver-port+ 53
+  "The one UDP port a guarded sandbox may still send to.
+
+Refusing UDP entirely would be tidier and does not work: a client resolves a name
+before it connects, and if resolution fails it never reaches the connect the guard
+was written for.  So name resolution is permitted and everything else is not.
+
+What that leaves is narrow and worth saying out loud: a command can still talk to
+a nameserver, and a nameserver is a channel.  Narrowing this to the resolvers in
+/etc/resolv.conf would close most of it and is not done yet.")
+
+(defun egress-udp-forms ()
+  "The program that stops UDP leaving a guarded sandbox.
+
+connect4 sees connect(2), and sendto(2) on an unconnected socket never calls it --
+so a sandbox whose TCP was fully accounted for could still send datagrams
+anywhere, which is an exfiltration channel and was open until this existed.  The
+same context type answers at sendmsg4, so the program is the same shape."
+  `((whistler:defprog scute-egress-udp
+     (:type :cgroup-sock-addr :section "cgroup/sendmsg4" :license "GPL")
+     (let* ((dport u32 (ctx user-port)))
+       (if (= dport ,(network-port-word +resolver-port+)) 1 0)))))
+
+(defun compile-egress-udp ()
+  "Compile the UDP guard.  Touches no kernel."
+  (uiop:symbol-call
+   '#:whistler/loader '#:compile-bpf-forms '()
+   (mapcar (lambda (form)
+             (uiop:symbol-call '#:whistler/loader '#:whistler-intern-form form))
+           (egress-udp-forms))))
+
+(defun install-egress-udp (cgroup)
+  "Attach the UDP guard to CGROUP and answer the attachment."
+  (let ((narration (make-string-output-stream)))
+    (multiple-value-bind (map-specs prog-specs) (compile-egress-udp)
+      (declare (ignore map-specs))
+      (let ((progs (handler-case
+                       (with-narration-captured narration
+                         (uiop:symbol-call '#:whistler/loader '#:session-load-progs
+                                           prog-specs '()))
+                     (error (condition)
+                       (setup-error :load-egress-udp
+                                    :detail (format nil "~A~@[; the loader said: ~A~]"
+                                                    condition
+                                                    (let ((said (get-output-stream-string
+                                                                 narration)))
+                                                      (and (plusp (length said)) said))))))))
+        (uiop:symbol-call '#:whistler/loader '#:attach-cgroup
+                          (uiop:symbol-call '#:whistler/loader '#:prog-info-fd
+                                            (cdr (first progs)))
+                          cgroup
+                          (symbol-value (uiop:find-symbol* '#:+bpf-cgroup-udp4-sendmsg+
+                                                           '#:whistler/loader)))))))

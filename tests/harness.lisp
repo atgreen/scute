@@ -35,6 +35,11 @@
     (let ((contents (make-string (file-length stream))))
       (subseq contents 0 (read-sequence contents stream)))))
 
+(defun scute-value (name)
+  "The value of a Scute variable, as call-scute is for its functions."
+  (symbol-value (or (find-symbol (string name) '#:scute)
+                    (error "Scute variable ~A is not there" name))))
+
 (defun scratch-pathname (purpose)
   (format nil "/tmp/scute-test-~A-~D" purpose (sb-posix:getpid)))
 

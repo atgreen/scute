@@ -101,6 +101,10 @@
            #:compile-egress-guard
            #:egress-guard-available-p
            #:install-egress-redirect
+           #:install-egress-udp
+           #:compile-egress-udp
+           #:egress-udp-forms
+           #:+resolver-port+
            #:compile-egress-redirect
            #:egress-redirect-forms
            #:endpoint-address-word

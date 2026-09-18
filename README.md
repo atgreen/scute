@@ -318,6 +318,19 @@ an HTTP proxy would break it, and refusing is clearer than mangling.
 This needs [the one privilege](#an-address-allowlist) and a cgroup of its own, as
 the address allowlist does.
 
+**UDP.** Either guard accounts for `connect(2)`, and `sendto(2)` on an
+unconnected socket never calls it — so until recently a sandbox whose TCP was
+fully controlled could still send datagrams anywhere, which was an exfiltration
+channel and is now closed by a second program at `sendmsg4`. Name resolution is
+the exception, because a client resolves a name before it connects and a failed
+resolution never reaches the connect being guarded. So a guarded sandbox can
+still talk to a nameserver on port 53, and a nameserver is a channel; narrowing
+that to the resolvers in `/etc/resolv.conf` would close most of what is left and
+is not done yet.
+
+QUIC is refused as a side effect, since it is UDP on 443. Clients fall back to
+TCP, which is what you want here — an HTTP proxy cannot terminate QUIC.
+
 `unix-sockets` is separate from all of this, because a network namespace does
 not stop a command reaching `systemd-resolved`, the system bus or an
 `ssh-agent` by socket path. It is refused by default and it is all or nothing:

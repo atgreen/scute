@@ -467,6 +467,7 @@ rules to enforce, while an explaining run has the caller's."
                             (eq :proxied (launch-plan-network plan)))
                     (create-sandbox-cgroup (or limits (make-resource-limits))))))
         (guard nil)
+        (udp-guard nil)
         (resources nil)
         (observations nil))
     (unwind-protect
@@ -479,6 +480,12 @@ rules to enforce, while an explaining run has the caller's."
              ;; proxy and refuses the rest.
              (setf guard (install-egress-redirect
                           cgroup (proxy-endpoint (launch-plan-proxy plan)))))
+           ;; Either guard accounts for connect(2), and sendto(2) on an
+           ;; unconnected socket never calls it.  Without this, a sandbox whose
+           ;; TCP was fully controlled could still send datagrams anywhere.
+           (when (or (launch-plan-allow plan)
+                     (eq :proxied (launch-plan-network plan)))
+             (setf udp-guard (install-egress-udp cgroup)))
            ;; Nothing above needs a capability again, so let them go now rather
            ;; than after the child exists: the shorter that window, the better.
            ;; Dumpability has to come back with them, because a non-dumpable
@@ -524,6 +531,7 @@ rules to enforce, while an explaining run has the caller's."
                  (%waitpid pid (cffi:null-pointer) 0)))))
       (when resources (release-launch-resources resources))
       (when guard (detach-egress-guard guard))
+      (when udp-guard (detach-egress-guard udp-guard))
       (when cgroup (delete-sandbox-cgroup cgroup)))))
 
 (defun run-namespaced-command (command &key filesystem directory)
