@@ -215,7 +215,15 @@ there is something --explain could find.  SCUTE_NO_HINTS=1 turns it off."
                                       *error-output*)
                      (format *error-output*
                              "~&scute: the policy allowed everything the command ~
-                              reached for~%")))
+                              reached for~%"))
+                 ;; A report that saw less than it claims is the other way to be
+                 ;; wrong, so what was dropped is said out loud.
+                 (let ((skipped (observations-skipped observations)))
+                   (when (plusp skipped)
+                     (format *error-output*
+                             "~&scute: ~D path~:P could not be read while watching, ~
+                              so this list may be short~%"
+                             skipped))))
                (uiop:quit (command-exit-status result) t)))
             (t
              (let ((result (run-launch-plan plan)))

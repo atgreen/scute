@@ -150,6 +150,7 @@
            #:*learned-unix-sockets*
            #:*learned-connections*
            #:observations-connections
+           #:observations-skipped
            #:watched-syscall
            ;; Credential brokering
            #:credential-request

@@ -132,7 +132,8 @@ about to be created counts: its directory is what governs it."
   (watched nil :read-only t)          ; syscall number -> watched-syscall
   (paths (make-hash-table :test #'equal) :read-only t)
   (unix-sockets nil)                  ; the command asked for one
-  (connections (make-hash-table :test #'equal) :read-only t))
+  (connections (make-hash-table :test #'equal) :read-only t)
+  (skipped 0))                        ; notifications whose path could not be read
 
 (defun canonical-observed-path (path)
   "PATH with its symlinks resolved, so that a policy names one place once.
@@ -316,7 +317,8 @@ blocked on a notification nobody will answer would otherwise hang for ever."
                  ;; answer belong to the task that asked.
                  ;; A socket is not a path: what is worth recording is that the
                  ;; command wanted one at all.
-                 (when (and syscall (null (watched-syscall-path-argument syscall)))
+                 (handler-case
+                  (when (and syscall (null (watched-syscall-path-argument syscall)))
                    (case (watched-syscall-access syscall)
                      (:unix-socket
                       (when (= +af-unix+
@@ -329,27 +331,40 @@ blocked on a notification nobody will answer would otherwise hang for ever."
                          observations
                          (read-target-connection
                           from (cffi:mem-ref request :uint64 40) scratch))))))
-                 (when (and syscall (watched-syscall-path-argument syscall)
-                            (notification-valid-p listener request))
-                   (record-observation
-                    observations from
-                    (resolve-target-path
-                     from
-                     (read-target-string
-                      from
-                      (cffi:mem-ref request :uint64
-                                    (+ 32 (* 8 (watched-syscall-path-argument syscall))))
-                      scratch 4096)
-                     (let ((index (watched-syscall-dirfd-argument syscall)))
-                       (when index
-                         (signed-argument
-                          (cffi:mem-ref request :uint64 (+ 32 (* 8 index)))))))
-                    (or (watched-syscall-access syscall)
-                        (let ((index (watched-syscall-flags-argument syscall)))
-                          (if index
-                              (flags-access (cffi:mem-ref request :uint64 (+ 32 (* 8 index))))
-                              :read)))
-                    (lambda () (notification-valid-p listener request))))
+                  (error () (incf (observations-skipped observations))))
+                 ;; Recording is best-effort, and failing at it must not fail the
+                 ;; syscall.  An error here used to unwind out of this loop, which
+                 ;; left that notification unanswered -- the kernel answers an
+                 ;; unanswered notification with ENOSYS -- and left every
+                 ;; notification after it unanswered too, because the watcher was
+                 ;; gone.  One unreadable path turned a working command into
+                 ;; "mkdir: function not implemented" for the rest of the run.
+                 ;;
+                 ;; What is dropped is counted, because a report that quietly saw
+                 ;; less than it claims is the other way to be wrong here.
+                 (handler-case
+                     (when (and syscall (watched-syscall-path-argument syscall)
+                                (notification-valid-p listener request))
+                       (record-observation
+                        observations from
+                        (resolve-target-path
+                         from
+                         (read-target-string
+                          from
+                          (cffi:mem-ref request :uint64
+                                        (+ 32 (* 8 (watched-syscall-path-argument syscall))))
+                          scratch 4096)
+                         (let ((index (watched-syscall-dirfd-argument syscall)))
+                           (when index
+                             (signed-argument
+                              (cffi:mem-ref request :uint64 (+ 32 (* 8 index)))))))
+                        (or (watched-syscall-access syscall)
+                            (let ((index (watched-syscall-flags-argument syscall)))
+                              (if index
+                                  (flags-access (cffi:mem-ref request :uint64 (+ 32 (* 8 index))))
+                                  :read)))
+                        (lambda () (notification-valid-p listener request))))
+                   (error () (incf (observations-skipped observations))))
                  (dotimes (index response-size)
                    (setf (cffi:mem-aref response :uint8 index) 0))
                  (setf (cffi:mem-ref response :uint64 0) (cffi:mem-ref request :uint64 0)
