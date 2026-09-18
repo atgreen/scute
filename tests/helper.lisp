@@ -75,3 +75,24 @@ names it, and cannot reach anything else because the kernel says so."
                         "the command reached a port the policy does not name")))
           (when helper (ignore-errors (call-scute 'stop-helper helper)))
           (delete-scratch script)))))
+
+(deftest test-a-helper-command-can-carry-quoted-arguments
+  "--with takes a command line, and a command line has quoting in it.  Splitting
+on spaces alone meant anything with a space in an argument needed a wrapper
+script; this understands what anyone would type, and nothing more than that."
+  (let ((cases
+          '(("keyfence" ("keyfence"))
+            ("keyfence -api-key-file /run/secrets/api-key"
+             ("keyfence" "-api-key-file" "/run/secrets/api-key"))
+            ("proxy --label 'my agent'" ("proxy" "--label" "my agent"))
+            ("proxy --label \"my agent\"" ("proxy" "--label" "my agent"))
+            ("proxy --path /a\\ b" ("proxy" "--path" "/a b"))
+            ("  spaced   out  " ("spaced" "out"))
+            ("echo ''" ("echo" ""))
+            ("say \"it's fine\"" ("say" "it's fine"))
+            ("say 'a \"quoted\" word'" ("say" "a \"quoted\" word")))))
+    (dolist (case cases)
+      (destructuring-bind (text expected) case
+        (let ((got (call-scute 'split-command text)))
+          (check (equal got expected)
+                 "~S split into ~S, expected ~S" text got expected))))))

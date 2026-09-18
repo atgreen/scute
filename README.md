@@ -432,9 +432,10 @@ scute run --policy agent.policy --with keyfence -- claude
 
 The command comes from the command line and never from a policy: a policy
 travels with the code being sandboxed, and one that could start a host process
-would be a way to run anything at all. (`--with` splits on spaces, so anything
-needing quotes belongs in a small script.) A `[credentials]` policy is the
-exception that proves the rule — it cannot name a program, only ask for the one
+would be a way to run anything at all. (`--with` takes a command line with quoting,
+so an argument with a space in it needs no wrapper script — but it is an argument
+vector written conveniently, not a shell: no expansion, no globbing, no
+operators.) A `[credentials]` policy is the exception that proves the rule — it cannot name a program, only ask for the one
 broker scute knows how to drive.
 
 ## Environment

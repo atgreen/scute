@@ -73,7 +73,13 @@
 #+sb-core-compression
 (defmethod asdf:perform ((o asdf:image-op) (c asdf:system))
   (warm-the-image)
-  (uiop:dump-image (asdf:output-file o c)
+  ;; SCUTE_IMAGE_OUTPUT lets the Makefile dump somewhere else and rename the
+  ;; result into place.  save-lisp-and-die exits the process, so the rename
+  ;; cannot happen here -- and without it, a build interrupted partway leaves no
+  ;; binary at all rather than the previous one, which is a confusing way to
+  ;; find out that ^C works.
+  (uiop:dump-image (or (uiop:getenv "SCUTE_IMAGE_OUTPUT")
+                       (asdf:output-file o c))
                    :executable t
                    :compression (let ((level (uiop:getenv "SCUTE_COMPRESSION")))
                                   (cond ((or (null level) (string= "" level)) nil)

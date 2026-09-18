@@ -7,13 +7,16 @@ SBCL ?= sbcl
 # otherwise leaves fasls compiled against the old order, and the mixture shows
 # up only at runtime -- once, as EPERM writing a child's setgroups, which looks
 # like a kernel permission problem and is not.
+# Built beside the binary and renamed into place, so an interrupted build leaves
+# the previous scute rather than none at all.
 scute: src/*.lisp *.asd
 	@if [ ! -f .system-stamp ] || [ scute.asd -nt .system-stamp ]; then \
 		echo "$(SBCL): scute.asd changed, recompiling everything"; \
-		$(SBCL) --eval "(asdf:make :scute :force t)" --quit; \
+		SCUTE_IMAGE_OUTPUT=$@.new $(SBCL) --eval "(asdf:make :scute :force t)" --quit; \
 	else \
-		$(SBCL) --eval "(asdf:make :scute)" --quit; \
+		SCUTE_IMAGE_OUTPUT=$@.new $(SBCL) --eval "(asdf:make :scute)" --quit; \
 	fi
+	@mv -f $@.new $@
 	@cp scute.asd .system-stamp
 
 completions: scute
@@ -61,6 +64,6 @@ clean-cache:
 	rm -rf $(HOME)/.cache/common-lisp/*$(CURDIR)
 
 clean: clean-cache
-	rm -rf *~ scute scute-sbom.spdx.json completions man .system-stamp .test-passed
+	rm -rf *~ scute scute.new scute-sbom.spdx.json completions man .system-stamp .test-passed
 
 .PHONY: sbom completions man demo egress test smoke check clean clean-cache

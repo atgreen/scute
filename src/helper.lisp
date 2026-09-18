@@ -26,8 +26,63 @@
   (command nil :read-only t))
 
 (defun split-command (text)
-  "TEXT split on spaces, which is as much shell as this needs to be."
-  (remove "" (uiop:split-string text :separator " ") :test #'string=))
+  "TEXT split into arguments the way a shell would, honouring quotes.
+
+Splitting on spaces alone was enough until it was not: a helper wanted an
+argument with a space in it, and the only answer was to write a wrapper script.
+This understands single quotes, double quotes and backslash escapes, which covers
+what anyone would type -- and deliberately nothing else.  There is no variable
+expansion, no globbing, no command substitution and no operators: the string is
+an argument vector written conveniently, not a shell command, and a policy cannot
+reach this at all."
+  (let ((arguments '())
+        (current (make-string-output-stream))
+        (started nil)
+        (index 0)
+        (length (length text)))
+    (flet ((finish ()
+             (let ((argument (get-output-stream-string current)))
+               (when (or started (plusp (length argument)))
+                 (push argument arguments))
+               (setf started nil))))
+      (loop while (< index length)
+            for character = (char text index)
+            do (cond ((member character '(#\Space #\Tab #\Newline))
+                      (finish)
+                      (incf index))
+                     ((char= character #\\)
+                      ;; The next character, whatever it is, taken literally.
+                      (setf started t)
+                      (incf index)
+                      (when (< index length)
+                        (write-char (char text index) current)
+                        (incf index)))
+                     ((char= character #\')
+                      ;; Single quotes are literal to the next single quote,
+                      ;; backslashes included, as in every shell.
+                      (setf started t)
+                      (incf index)
+                      (loop while (and (< index length) (char/= (char text index) #\'))
+                            do (write-char (char text index) current)
+                               (incf index))
+                      (when (< index length) (incf index)))
+                     ((char= character #\")
+                      (setf started t)
+                      (incf index)
+                      (loop while (and (< index length) (char/= (char text index) #\"))
+                            do (if (and (char= (char text index) #\\)
+                                        (< (1+ index) length))
+                                   (progn (write-char (char text (1+ index)) current)
+                                          (incf index 2))
+                                   (progn (write-char (char text index) current)
+                                          (incf index))))
+                      (when (< index length) (incf index)))
+                     (t
+                      (setf started t)
+                      (write-char character current)
+                      (incf index))))
+      (finish))
+    (nreverse arguments)))
 
 (defun start-helper (text)
   "Start TEXT as a process beside the sandbox, and answer it."
