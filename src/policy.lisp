@@ -95,6 +95,7 @@ is the only kind anyone can check.")
   (limits     nil :read-only t)
   (audit      nil :read-only t)
   (environment nil :read-only t)     ; extra variables to keep, beyond the default
+  (unix-sockets nil :read-only t)    ; may the command open an AF_UNIX socket
   (pathname   nil :read-only t))
 
 ;;── The document Scute expects ─────────────────────────────────────────────────
@@ -165,16 +166,21 @@ is the only kind anyone can check.")
                          (string-array paths key pathname)))))
 
 (defun validate-network (value pathname)
+  "The network section: the mode, and whether unix-domain sockets are allowed.
+Answers the mode and that permission."
   (let ((entries (table-entries value "network" pathname)))
-    (check-known-keys entries '("mode") "[network]" pathname)
+    (check-known-keys entries '("mode" "unix-sockets") "[network]" pathname)
     (let ((mode (scalar-string (cdr (assoc "mode" entries :test #'string=))
-                               "mode" pathname)))
+                               "mode" pathname))
+          (unix (assoc "unix-sockets" entries :test #'string=)))
       (unless (string= "none" mode)
         (policy-error (format nil "network mode ~S is not part of v0, which ~
                                    knows only \"none\""
                               mode)
                       pathname))
-      :none)))
+      (when (and unix (not (member (cdr unix) '(t nil))))
+        (policy-error "unix-sockets is true or false" pathname))
+      (values :none (and unix (eq t (cdr unix)))))))
 
 (defparameter +duration-multipliers+
   '((#\s . 1) (#\m . 60) (#\h . 3600)))
@@ -303,6 +309,8 @@ is a sandbox the operator half asked for."
          :network (if (table "network")
                       (validate-network (table "network") pathname)
                       :none)
+         :unix-sockets (when (table "network")
+                         (nth-value 1 (validate-network (table "network") pathname)))
          :limits (when (table "limits")
                    (validate-limits (table "limits") pathname))
          :audit (when (table "audit")
@@ -325,6 +333,7 @@ is a sandbox the operator half asked for."
   (environment nil :read-only t)
   (filesystem  nil :read-only t)
   (network     :none :read-only t)
+  (unix-sockets nil :read-only t)
   (limits      nil :read-only t)
   (audit       nil :read-only t))
 
@@ -422,6 +431,7 @@ nothing here touches the kernel."
                                          (sandbox-policy-pathname policy)))
                          (sandbox-policy-filesystem policy))
      :network (sandbox-policy-network policy)
+     :unix-sockets (sandbox-policy-unix-sockets policy)
      :limits (sandbox-policy-limits policy)
      :audit (sandbox-policy-audit policy))))
 
@@ -443,8 +453,9 @@ a policy's would be, so the two routes cannot diverge."
                          :directory (or directory (sb-posix:getcwd))
                          :keep keep)))
 
-(defun plan-with-wall-clock (plan seconds)
-  "PLAN with SECONDS as its wall-clock limit, whatever its policy said."
+(defun revised-launch-plan (plan &key (wall-clock :keep) (unix-sockets :keep))
+  "PLAN with what the command line overrode, whatever its policy said.
+A plan is immutable, so an override makes another one rather than changing it."
   (let ((limits (launch-plan-limits plan)))
     (%make-launch-plan
      :command (launch-plan-command plan)
@@ -452,12 +463,23 @@ a policy's would be, so the two routes cannot diverge."
      :environment (launch-plan-environment plan)
      :filesystem (launch-plan-filesystem plan)
      :network (launch-plan-network plan)
+     :unix-sockets (if (eq unix-sockets :keep)
+                       (launch-plan-unix-sockets plan)
+                       unix-sockets)
      :audit (launch-plan-audit plan)
-     :limits (make-resource-limits
-              :memory (and limits (resource-limits-memory limits))
-              :processes (and limits (resource-limits-processes limits))
-              :cpu-percent (and limits (resource-limits-cpu-percent limits))
-              :wall-clock seconds))))
+     :limits (if (and (eq wall-clock :keep) limits)
+                 limits
+                 (make-resource-limits
+                  :memory (and limits (resource-limits-memory limits))
+                  :processes (and limits (resource-limits-processes limits))
+                  :cpu-percent (and limits (resource-limits-cpu-percent limits))
+                  :wall-clock (if (eq wall-clock :keep)
+                                  (and limits (resource-limits-wall-clock limits))
+                                  wall-clock))))))
+
+(defun plan-with-wall-clock (plan seconds)
+  "PLAN with SECONDS as its wall-clock limit."
+  (revised-launch-plan plan :wall-clock seconds))
 
 (defun refuse-unimplemented-controls (plan)
   "Refuse a plan asking for a control this build cannot install.
@@ -474,7 +496,8 @@ was asked for."
   "Print PLAN as the decision it is, for review before anything runs."
   (format stream "~&command      ~{~S~^ ~}~%" (launch-plan-command plan))
   (format stream "directory    ~A~%" (launch-plan-directory plan))
-  (format stream "network      ~(~A~)~%" (launch-plan-network plan))
+  (format stream "network      ~(~A~)~:[~;, unix sockets allowed~]~%"
+          (launch-plan-network plan) (launch-plan-unix-sockets plan))
   ;; Names only.  The values are the caller's own, but a plan is the sort of
   ;; thing that ends up in a log.
   (format stream "environment  ~:[nothing~;~:*~{~A~^ ~}~]~%"

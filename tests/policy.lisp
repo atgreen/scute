@@ -263,6 +263,33 @@ every other test in this file is in service of."
 
 ;;── The environment ────────────────────────────────────────────────────────────
 
+(deftest test-unix-sockets-are-a-policy-decision
+  "A policy says whether the command may open a unix-domain socket, and says it
+as a boolean."
+  (check (not (call-scute 'sandbox-policy-unix-sockets
+                          (policy-from-string "[filesystem]
+read = [\"/etc\"]")))
+         "a policy that says nothing allowed unix sockets")
+  (check (not (call-scute 'sandbox-policy-unix-sockets
+                          (policy-from-string "[filesystem]
+read = [\"/etc\"]
+[network]
+mode = \"none\"")))
+         "a network section that says nothing allowed unix sockets")
+  (check (call-scute 'sandbox-policy-unix-sockets
+                     (policy-from-string "[filesystem]
+read = [\"/etc\"]
+[network]
+mode = \"none\"
+unix-sockets = true"))
+         "a policy allowing unix sockets was not read")
+  (check (refused-p "[filesystem]
+read = [\"/etc\"]
+[network]
+mode = \"none\"
+unix-sockets = \"yes\"")
+         "something that is not a boolean was accepted"))
+
 (deftest test-the-environment-is-filtered
   "What a command is given is the short list, not everything the caller had."
   (let ((environment '("PATH=/usr/bin" "HOME=/home/someone" "TERM=xterm"

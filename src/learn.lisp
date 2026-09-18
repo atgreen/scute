@@ -60,7 +60,10 @@
         (make-watched-syscall "execveat" 1 :dirfd-argument 0 :access :execute)
         (make-watched-syscall "mkdirat" 1 :dirfd-argument 0 :access :write)
         (make-watched-syscall "unlinkat" 1 :dirfd-argument 0 :access :write)
-        (make-watched-syscall "renameat2" 1 :dirfd-argument 0 :access :write))
+        (make-watched-syscall "renameat2" 1 :dirfd-argument 0 :access :write)
+        ;; Not a path at all: whether the command wants a unix-domain socket,
+        ;; which a policy has to allow before it can have one.
+        (make-watched-syscall "socket" nil :flags-argument 0 :access :unix-socket))
   "What a learning run listens for.
 
 Not openat2: its flags live in a struct in the target's memory rather than in a
@@ -70,8 +73,11 @@ them.")
 
 (defun learn-seccomp-filter ()
   "The v0 denylist, plus a notification for every syscall worth watching.
+
 One filter rather than two stacked ones: a command's own syscalls should meet
-the same refusals during a learning run as during a real one."
+the same refusals during a learning run as during a real one -- except for
+unix-domain sockets, which are watched rather than refused, because a learning
+run that refused them would teach nothing about a command that needs one."
   (ensure-libseccomp)
   (let ((context (cffi:foreign-funcall "seccomp_init"
                                        :uint32 +scmp-act-allow+ :pointer)))
@@ -89,7 +95,6 @@ the same refusals during a learning run as during a real one."
                                        :unsigned-int 0 :int))))
            (setf watched watched)          ; keep the binding obvious
            (deny-nested-user-namespaces context)
-           (deny-unix-domain-sockets context)
            (dolist (syscall +watched-syscalls+)
              (let ((number (cffi:foreign-funcall "seccomp_syscall_resolve_name"
                                                  :string (watched-syscall-name syscall)
@@ -122,7 +127,8 @@ about to be created counts: its directory is what governs it."
 (defstruct (observations (:constructor make-observations (watched)))
   "What a learning run saw: paths, and the access each was reached for with."
   (watched nil :read-only t)          ; syscall number -> watched-syscall
-  (paths (make-hash-table :test #'equal) :read-only t))
+  (paths (make-hash-table :test #'equal) :read-only t)
+  (unix-sockets nil))                 ; the command asked for one
 
 (defun canonical-observed-path (path)
   "PATH with its symlinks resolved, so that a policy names one place once.
@@ -268,7 +274,15 @@ blocked on a notification nobody will answer would otherwise hang for ever."
                  ;; that number.  This is how a watched shell came to report
                  ;; reading dbus's libraries.  The second check is what makes the
                  ;; answer belong to the task that asked.
-                 (when (and syscall (notification-valid-p listener request))
+                 ;; A socket is not a path: what is worth recording is that the
+                 ;; command wanted one at all.
+                 (when (and syscall (null (watched-syscall-path-argument syscall)))
+                   (when (= +af-unix+
+                            (logand #xffffffff
+                                    (cffi:mem-ref request :uint64 32)))
+                     (setf (observations-unix-sockets observations) t)))
+                 (when (and syscall (watched-syscall-path-argument syscall)
+                            (notification-valid-p listener request))
                    (record-observation
                     observations from
                     (resolve-target-path
@@ -376,6 +390,35 @@ worse outcome than a policy that is slightly too narrow."
               for named = (sort (copy-list (gethash kind kinds)) #'string<)
               when named collect (cons kind named))))))
 
+(defun kind-accesses (kind)
+  "The accesses KIND stands for: the inverse of ACCESS-KIND."
+  (ecase kind
+    (:read '(:read))
+    (:read-execute '(:read :execute))
+    (:read-write '(:read :write))
+    (:read-write-execute '(:read :write :execute))))
+
+(defun merge-learned-rules (rules policy)
+  "RULES widened by what POLICY already allows.
+Both sides are already policy-shaped -- \".\" for the working directory, an
+anchor for a system tree -- so they merge by name."
+  (if (null policy)
+      rules
+      (let ((accesses (make-hash-table :test #'equal)))
+        (flet ((absorb (kind path)
+                 (setf (gethash path accesses)
+                       (union (kind-accesses kind) (gethash path accesses)))))
+          (dolist (rule (sandbox-policy-filesystem policy))
+            (absorb (filesystem-rule-kind rule) (filesystem-rule-path rule)))
+          (loop for (kind . paths) in rules
+                do (dolist (path paths) (absorb kind path))))
+        (let ((kinds (make-hash-table :test #'eq)))
+          (maphash (lambda (path seen) (push path (gethash (access-kind seen) kinds)))
+                   accesses)
+          (loop for kind in +access-kinds+
+                for named = (sort (copy-list (gethash kind kinds)) #'string<)
+                when named collect (cons kind named))))))
+
 (defun access-kind (seen)
   "The policy permission covering every access in SEEN."
   (let ((write (member :write seen))
@@ -385,15 +428,57 @@ worse outcome than a policy that is slightly too narrow."
           (execute :read-execute)
           (t :read))))
 
-(defun write-learned-policy (rules stream &key command)
-  "Write RULES as a policy, with the caveats a learned policy deserves."
-  (format stream "# Learned by watching~@[ ~{~A~^ ~}~] run once.~%" command)
+(defvar *learned-unix-sockets* nil
+  "Whether the run being written up asked for a unix-domain socket.")
+
+(defun write-policy-section (name entries stream)
+  (when entries
+    (format stream "~%[~A]~%~{~A~%~}" name entries)))
+
+(defun write-learned-policy (rules stream &key command carry)
+  "Write RULES as a policy, with the caveats a learned policy deserves.
+CARRY, when given, is a policy whose other sections are kept: merging into an
+existing policy must not quietly drop the limits it asked for."
+  (format stream "# Learned by watching~@[ ~{~A~^ ~}~] run~:[ once~; and merged ~
+                  with what was already here~].~%"
+          command carry)
   (format stream "# A starting point, not a finished policy: one run sees one ~
                   path through~%# the program.  Narrow it, then check it with ~
                   scute check.~%~%[filesystem]~%")
   (loop for (kind . paths) in rules
         do (format stream "~(~A~) = [~{~S~^, ~}]~%" kind paths))
   (format stream "~%[network]~%mode = \"none\"~%")
+  (when (or (and carry (sandbox-policy-unix-sockets carry))
+            *learned-unix-sockets*)
+    (format stream "unix-sockets = true~%"))
+  (let ((limits (and carry (sandbox-policy-limits carry))))
+    (write-policy-section
+     "limits"
+     (when limits
+       (remove nil
+               (list (let ((memory (resource-limits-memory limits)))
+                       (and memory (format nil "memory = ~S" (format nil "~D" memory))))
+                     (let ((processes (resource-limits-processes limits)))
+                       (and processes (format nil "processes = ~D" processes)))
+                     (let ((cpu (resource-limits-cpu-percent limits)))
+                       (and cpu (format nil "cpu-percent = ~D" cpu)))
+                     (let ((clock (resource-limits-wall-clock limits)))
+                       (and clock (format nil "wall-clock = ~S"
+                                          (format nil "~Ds" clock)))))))
+     stream))
+  (let ((audit (and carry (sandbox-policy-audit carry))))
+    (write-policy-section
+     "audit"
+     (when audit
+       (list (format nil "events = [~{~S~^, ~}]"
+                     (mapcar #'string-downcase (audit-policy-events audit)))))
+     stream))
+  (let ((environment (and carry (sandbox-policy-environment carry))))
+    (write-policy-section
+     "environment"
+     (when environment
+       (list (format nil "keep = [~{~S~^, ~}]" environment)))
+     stream))
   rules)
 
 ;;── Explaining a refusal ───────────────────────────────────────────────────────

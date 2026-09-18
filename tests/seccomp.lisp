@@ -141,6 +141,88 @@ int main(void) {
                         result))))
       (delete-scratch source program))))
 
+(defun compile-unix-socket-probe ()
+  "Build a program that answers 7 when a unix socket is refused, 0 when allowed.
+Returns its path, or NIL when there is no compiler to build it with."
+  (let ((source (format nil "~A.c" (scratch-pathname "unixsock")))
+        (program (scratch-pathname "unixsock")))
+    (with-open-file (stream source :direction :output :if-exists :supersede)
+      (write-string "#include <sys/socket.h>
+#include <unistd.h>
+int main(void) {
+  int pair[2];
+  if (socket(AF_UNIX, SOCK_STREAM, 0) >= 0) return 0;   /* allowed */
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) < 0) return 2;  /* broke itself */
+  return 7;                                             /* refused, still whole */
+}
+" stream))
+    (unwind-protect
+         (when (zerop (cffi:foreign-funcall
+                       "system" :string
+                       (format nil "gcc -o ~A ~A >/dev/null 2>&1" program source)
+                       :int))
+           program)
+      (delete-scratch source))))
+
+(deftest test-unix-domain-sockets-may-be-allowed
+  "The refusal is the default, not the only option: an interactive shell wants an
+ssh-agent, and a policy that says so should get one.  Everything else about the
+sandbox is unchanged."
+  (let ((program (compile-unix-socket-probe)))
+    (if (null program)
+        (format *error-output* "~&SKIP: no working gcc, so the flag is untested~%")
+        (unwind-protect
+             (let ((policy (call-scute 'validate-sandbox-policy
+                                       (call-scute 'parse-policy-text
+                                                   "[network]
+mode = \"none\"
+unix-sockets = true
+[filesystem]
+read-execute = [\"/\"]"))))
+               (check (call-scute 'sandbox-policy-unix-sockets policy)
+                      "the policy did not record that sockets are allowed")
+               (let ((result (call-scute 'run-launch-plan
+                                         (call-scute 'compile-launch-plan policy
+                                                     (list program)))))
+                 (check (eql 0 (call-scute 'sandbox-result-exit-code result))
+                        "a policy allowing unix sockets still refused one: ~S" result))
+               ;; And the filter for that plan does not carry the refusal.
+               (check (not (member "socket(AF_UNIX)"
+                                   (call-scute 'seccomp-filter-denied
+                                               (call-scute 'v0-seccomp-filter
+                                                           :unix-sockets t))
+                                   :test #'string=))
+                      "the permissive filter still denies unix sockets"))
+          (delete-scratch program)))))
+
+(deftest test-learning-notices-a-wanted-socket
+  "Learning has to see what a command wants, so a unix socket is watched rather
+than refused during a learning run, and the policy it writes says so."
+  (let ((program (compile-unix-socket-probe)))
+    (if (null program)
+        (format *error-output* "~&SKIP: no working gcc, so learning sockets is untested~%")
+        (unwind-protect
+             (multiple-value-bind (result observations)
+                 (call-scute 'run-launch-plan
+                             (call-scute 'compile-command-launch-plan (list program) '())
+                             :observe t)
+               (check (eql 0 (call-scute 'sandbox-result-exit-code result))
+                      "a learning run refused the socket it was meant to watch: ~S"
+                      result)
+               (check (call-scute 'observations-unix-sockets observations)
+                      "learning did not notice the command wanting a unix socket")
+               (let ((text (with-output-to-string (stream)
+                             (let ((scute:*learned-unix-sockets*
+                                     (call-scute 'observations-unix-sockets observations)))
+                               (call-scute 'write-learned-policy
+                                           (call-scute 'learned-rules observations
+                                                       (sb-posix:getcwd))
+                                           stream)))))
+                 (check (search "unix-sockets = true" text)
+                        "the learned policy does not allow the socket the command ~
+                         needed:~%~A" text)))
+          (delete-scratch program)))))
+
 (deftest test-unix-domain-sockets-are-refused
   "A sandbox with no network must not be able to reach the host's daemons.
 

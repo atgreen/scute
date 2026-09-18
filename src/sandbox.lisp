@@ -108,7 +108,9 @@ the child only uses what is already in its hands."
                      (multiple-value-bind (program table) (learn-seccomp-filter)
                        (setf watched table)
                        program)
-                     (seccomp-filter-program (v0-seccomp-filter)))))
+                     (seccomp-filter-program
+                      (v0-seccomp-filter
+                       :unix-sockets (launch-plan-unix-sockets plan))))))
     (multiple-value-bind (sync-read sync-write) (make-sync-pipe)
       (multiple-value-bind (status-read status-write) (make-sync-pipe)
         (multiple-value-bind (cap-header cap-data) (make-empty-capability-request)

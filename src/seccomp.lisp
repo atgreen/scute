@@ -102,7 +102,6 @@ struct clone3 takes its flags from.  This is defence in depth, not a boundary.")
 
 (defconstant +clone-newuser+ #x10000000)
 (defconstant +scmp-cmp-masked-eq+ 7)
-(defconstant +enosys+ 38)
 
 (defun add-masked-argument-rule (context action name argument mask value)
   "Refuse NAME when (ARGUMENT & MASK) equals VALUE.
@@ -205,8 +204,9 @@ talk to itself."
             (cffi:mem-ref program :pointer 8) instructions)
       (values program (floor bytes 8)))))
 
-(defun compile-seccomp-filter ()
-  "Build the v0 filter.  Every failure here happens before the child exists."
+(defun compile-seccomp-filter (&key unix-sockets)
+  "Build the v0 filter.  Every failure here happens before the child exists.
+With UNIX-SOCKETS the AF_UNIX refusal is left out, because a policy said so."
   (ensure-libseccomp)
   (let ((context (cffi:foreign-funcall "seccomp_init"
                                        :uint32 +scmp-act-allow+ :pointer)))
@@ -235,7 +235,8 @@ talk to itself."
                             (setup-error :seccomp-rule-add
                                          :detail (format nil "~A: libseccomp answered ~D"
                                                          name result))))))))
-           (setf denied (append (deny-unix-domain-sockets context)
+           (setf denied (append (unless unix-sockets
+                                  (deny-unix-domain-sockets context))
                                 (deny-nested-user-namespaces context)
                                 denied))
            (multiple-value-bind (program instructions) (export-filter-program context)
@@ -245,12 +246,16 @@ talk to itself."
                                    :unavailable (nreverse unavailable))))
       (cffi:foreign-funcall "seccomp_release" :pointer context :void))))
 
-(defvar *seccomp-filter* nil
-  "The v0 filter, built once.  It is the same for every launch, holds no
-per-launch state, and a child only ever reads it.")
+(defvar *seccomp-filters* (make-hash-table :test #'eq)
+  "The v0 filter, built once per shape.  There are two: with and without the
+refusal of unix-domain sockets.  Neither holds per-launch state, and a child
+only ever reads one.")
 
-(defun v0-seccomp-filter ()
-  (or *seccomp-filter* (setf *seccomp-filter* (compile-seccomp-filter))))
+(defun v0-seccomp-filter (&key unix-sockets)
+  (let ((key (if unix-sockets :with-unix-sockets :without)))
+    (or (gethash key *seccomp-filters*)
+        (setf (gethash key *seccomp-filters*)
+              (compile-seccomp-filter :unix-sockets unix-sockets)))))
 
 (declaim (inline %seccomp-install))
 (defun %seccomp-install (program flags)

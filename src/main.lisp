@@ -127,8 +127,17 @@ argument gets you.")
   (let ((command (clingon:command-arguments cmd)))
     (when (null command)
       (usage-error "no command given; see scute run --help"))
-    (let ((plan (with-timeout-from (clingon:getopt cmd :timeout)
-                                   (launch-plan-for cmd command))))
+    (let ((plan (revised-launch-plan
+                 (launch-plan-for cmd command)
+                 :wall-clock (let ((duration (clingon:getopt cmd :timeout)))
+                               (if duration
+                                   (handler-case (parse-duration duration nil)
+                                     (policy-error (condition)
+                                       (usage-error (princ-to-string condition))))
+                                   :keep))
+                 :unix-sockets (if (clingon:getopt cmd :allow-unix-sockets)
+                                   t
+                                   :keep))))
       (cond ((clingon:getopt cmd :dry-run)
              ;; Print first, then refuse: the plan is what the caller asked to
              ;; see, and a refusal explains itself better beside it.
@@ -193,6 +202,9 @@ argument gets you.")
                    (clingon:make-option
                     :flag :short-name #\n :long-name "dry-run" :key :dry-run
                     :description "Print the compiled plan and run nothing")
+                   (clingon:make-option
+                    :flag :long-name "allow-unix-sockets" :key :allow-unix-sockets
+                    :description "Let the command open unix-domain sockets (an ssh-agent, D-Bus)")
                    (clingon:make-option
                     :string :long-name "timeout" :key :timeout :parameter "DURATION"
                     :description "Stop the command if it runs longer than this, e.g. 30s")
@@ -273,17 +285,25 @@ argument gets you.")
          (output (clingon:getopt cmd :output)))
      (unless command
        (usage-error "scute learn needs a command to watch: learn -- COMMAND ..."))
-     (multiple-value-bind (result observations)
-         (run-launch-plan (compile-command-launch-plan command '()) :observe t)
-       (let ((rules (learned-rules observations (sb-posix:getcwd))))
-         (if output
-             (with-open-file (stream output :direction :output
-                                            :if-exists :supersede
-                                            :if-does-not-exist :create)
-               (write-learned-policy rules stream :command command)
-               (format *error-output* "~&scute: wrote ~A~%" output))
-             (write-learned-policy rules *standard-output* :command command)))
-       (uiop:quit (command-exit-status result) t)))))
+     (when (and (clingon:getopt cmd :merge) (null output))
+       (usage-error "--merge needs --output FILE, which is what it merges into"))
+     (let ((existing (when (and (clingon:getopt cmd :merge) (probe-file output))
+                       (read-sandbox-policy output))))
+       (multiple-value-bind (result observations)
+           (run-launch-plan (compile-command-launch-plan command '()) :observe t)
+         (let ((rules (merge-learned-rules
+                       (learned-rules observations (sb-posix:getcwd))
+                       existing))
+               (*learned-unix-sockets* (observations-unix-sockets observations)))
+           (if output
+               (with-open-file (stream output :direction :output
+                                              :if-exists :supersede
+                                              :if-does-not-exist :create)
+                 (write-learned-policy rules stream :command command :carry existing)
+                 (format *error-output* "~&scute: ~:[wrote~;updated~] ~A~%"
+                         existing output))
+               (write-learned-policy rules *standard-output* :command command)))
+         (uiop:quit (command-exit-status result) t))))))
 
 (defun make-learn-command ()
   (clingon:make-command
@@ -292,12 +312,17 @@ argument gets you.")
    :usage "[--output FILE] -- COMMAND [ARGUMENT ...]"
    :options (list (clingon:make-option
                    :string :short-name #\o :long-name "output" :key :output
-                   :description "Write the policy here instead of to standard output"))
+                   :description "Write the policy here instead of to standard output")
+                  (clingon:make-option
+                   :flag :long-name "merge" :key :merge
+                   :description "Widen the policy already in --output rather than replacing it"))
    :handler #'learn-handler
    :examples '(("Find out what a build actually touches:"
                 . "scute learn -- make")
                ("Keep the answer:"
-                . "scute learn --output scute.policy -- ./run-tests"))))
+                . "scute learn --output scute.policy -- ./run-tests")
+               ("Teach it a second command:"
+                . "scute learn --output scute.policy --merge -- ./run-lint"))))
 
 ;;── doctor ─────────────────────────────────────────────────────────────────────
 

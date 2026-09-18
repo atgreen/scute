@@ -300,6 +300,13 @@ therefore refused, by the same argument test that reads clone's flags.
 `socketpair` is a different syscall and stays allowed, because a program talking
 to itself is not the network.
 
+A consequence worth stating: Scute does not nest.  Closing every route to a new
+user namespace closes the one Scute itself uses, so a sandbox cannot contain a
+sandbox.  The failure says so rather than reporting the kernel's ENOSYS, which
+reads as though the kernel were too old.  Allowing it would mean allowing what
+this paragraph exists to forbid, so it would have to become something a policy
+asks for.
+
 A nested user namespace is closed by all three of its routes, because it
 deserves more than defence in depth: a process that creates one holds a full
 capability set inside it, which is where a great many kernel exploits begin.

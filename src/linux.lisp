@@ -60,6 +60,7 @@
 (defconstant +eperm+  1)
 (defconstant +enoent+ 2)
 (defconstant +eacces+ 13)
+(defconstant +enosys+ 38)
 
 ;;; Exit codes the child reports for its own setup failures.  They are distinct
 ;;; from anything the sandboxed command is likely to produce, and the supervisor
@@ -248,6 +249,17 @@ write a gid map."
 
 ;;── clone3 ─────────────────────────────────────────────────────────────────────
 
+(defun seccomp-mode ()
+  "This process's seccomp mode, as /proc reports it: 0 when unconfined."
+  (with-open-file (stream "/proc/self/status" :direction :input
+                                              :if-does-not-exist nil)
+    (when stream
+      (loop for line = (read-line stream nil nil)
+            while line
+            when (and (> (length line) 8) (string= "Seccomp:" line :end2 8))
+              do (return (or (parse-integer line :start 8 :junk-allowed t) 0))
+            finally (return 0)))))
+
 (defun clone3 (flags)
   "Create a child process in fresh namespaces.
 Returns the child pid in the parent and 0 in the child.  The child is the
@@ -263,7 +275,22 @@ calling thread only: it must not touch Lisp runtime services before execve."
                                         :unsigned-long +clone-args-size-ver0+
                                         :long)))
       (when (minusp result)
-        (setup-error :clone3 :errno (errno)))
+        (let ((failure (errno)))
+          ;; A sandbox refuses the calls a sandbox needs, so scute inside scute
+          ;; fails here -- with ENOSYS, which reads as "this kernel is too old"
+          ;; and means nothing of the sort.
+          (if (and (member failure (list +enosys+ +eperm+))
+                   (plusp (or (seccomp-mode) 0)))
+              (setup-error
+               :clone3
+               ;; Through format, because a tilde continuation is format's and
+               ;; not the reader's: a plain string keeps the tilde and newline.
+               :detail (format nil "scute cannot start a sandbox from inside ~
+                                    one: this process is already under a seccomp ~
+                                    filter, which refuses the clone3 a new ~
+                                    sandbox needs.  Run scute from outside the ~
+                                    sandbox."))
+              (setup-error :clone3 :errno failure))))
       result)))
 
 (defun make-sync-pipe ()

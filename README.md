@@ -122,6 +122,19 @@ connecting to `systemd-resolved`, the system D-Bus or an `ssh-agent` by their
 socket paths, and Landlock does not govern `connect`. `socketpair` still works,
 so a program can talk to itself.
 
+That refusal is the default, not the only option. An interactive shell whose
+startup files start an `ssh-agent` needs one, and says so loudly:
+
+```
+unix_listener: socket: Operation not permitted
+```
+
+Allow it when you mean to — `[network] unix-sockets = true`, or
+`--allow-unix-sockets`. It is all or nothing: Landlock cannot scope a socket
+path, so there is no way to permit the agent and not the bus. `scute learn`
+notices a command asking for one and writes `unix-sockets = true` into the policy
+it produces.
+
 Don't want to write that file yourself? `scute learn` will.
 
 ## What it costs
@@ -288,6 +301,7 @@ Every table and key it may contain:
 | | `read-write` | array of paths | read, write, create, delete, rename |
 | | `read-write-execute` | array of paths | the same, and execute |
 | `[network]` | `mode` | `"none"` | the only mode v0 knows |
+| | `unix-sockets` | `true` / `false` | may the command open an AF_UNIX socket (default `false`) |
 | `[limits]` | `memory` | size, e.g. `"2G"` | and no swapping around it |
 | | `processes` | integer | `pids.max` |
 | | `cpu-percent` | integer | 100 is one processor |
@@ -375,9 +389,11 @@ particular names an agent that will sign anything asked of it.
 | `/dev/null: Permission denied` | Landlock grants nothing implicitly. Name `/dev/null`, and usually `/proc`, in the policy. |
 | A binary you just built will not run | A directory granted `read-write` can hold it; running it needs `read-write-execute`. |
 | `This build cannot enforce resource limits` | Cgroup v2 will not let a cgroup holding processes give controllers to its children. Run scute in a cgroup of its own: `systemd-run --user --scope -p Delegate=yes scute run ...` |
+| `unix_listener: socket: Operation not permitted` | Something in the command — often a shell's startup files starting an `ssh-agent` — wants a unix-domain socket, which is refused by default. `--allow-unix-sockets`, or `[network] unix-sockets = true`. |
 | A learned policy is full of your dotfiles | bash sources `~/.bashrc` non-interactively when stdin is a socket, as under CI. Run with `< /dev/null`, or use `bash --norc`. |
 | A tool cannot find its home directory or cache | The environment is filtered. Name the variable: `--keep-env JAVA_HOME`, or `[environment] keep = [...]`. |
 | `command not found` for something on your `PATH` | The command must be an absolute path: a sandbox whose command is chosen by searching `PATH` depends on the environment it inherited. |
+| `cannot start a sandbox from inside one` | Exactly that: a sandbox refuses the syscalls a sandbox needs, so scute does not nest. Run it from outside. |
 | `scute doctor` exits non-zero | It names the missing control. Landlock needs Linux 5.13 or newer, and unprivileged user namespaces must be enabled. |
 
 ## Auditing

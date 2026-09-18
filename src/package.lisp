@@ -74,6 +74,9 @@
            #:sandbox-result-timed-out
            #:resource-limits-wall-clock
            #:plan-with-wall-clock
+           #:revised-launch-plan
+           #:launch-plan-unix-sockets
+           #:sandbox-policy-unix-sockets
            #:parse-duration
            #:capability-sets
            #:verify-no-capabilities
@@ -97,6 +100,7 @@
            ;; Learning
            #:learned-rules
            #:write-learned-policy
+           #:merge-learned-rules
            #:refused-observations
            #:report-refusals
            #:refusal-rules
@@ -104,6 +108,8 @@
            #:reachable-path-p
            #:observations
            #:observations-paths
+           #:observations-unix-sockets
+           #:*learned-unix-sockets*
            #:watched-syscall
            ;; Shell completions
            #:write-completions

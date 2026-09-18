@@ -315,3 +315,33 @@ timeout(1) does, and a duration it cannot read is the caller's mistake."
   (multiple-value-bind (status said)
       (scute-run "run --namespaces-only --timeout nonsense -- /bin/true")
     (check (= 64 status) "an unreadable duration exited ~D, not 64: ~A" status said)))
+
+(deftest test-scute-inside-scute-says-so
+  "A sandbox refuses the calls a sandbox needs, so scute does not nest.  The
+failure has to say that rather than reporting ENOSYS, which reads as though the
+kernel were too old."
+  (multiple-value-bind (status said)
+      (scute-run (format nil "run --namespaces-only -- ~A run --namespaces-only -- /bin/true"
+                         +scute+))
+    (check (not (zerop status)) "scute nested inside scute, which it cannot do")
+    (check (search "inside one" said)
+           "the failure did not explain itself:~%~A" said)
+    (check (not (search "Function not implemented" said))
+           "the failure still reports ENOSYS:~%~A" said)))
+
+(deftest test-no-message-leaks-a-tilde
+  "A tilde line-continuation belongs to format, not to the reader: a plain
+string keeps the tilde and the newline, and the message reaches the user with
+\"~\" in the middle of a sentence.  Three of scute's messages have had this bug,
+so the messages are checked rather than trusted."
+  (dolist (arguments (list "run -- /bin/true"                 ; nothing declared
+                           "run --namespaces-only"            ; no command
+                           "run --namespaces-only --read /usr --namespaces-only -- /bin/true"
+                           "check /usr"                       ; no policy
+                           "completions tcsh"                 ; unknown shell
+                           (format nil "run --namespaces-only -- ~A doctor" +scute+)))
+    (multiple-value-bind (status said) (scute-run arguments)
+      (declare (ignore status))
+      (check (not (find #\~ said))
+             "the message for ~S carries a tilde, so a continuation was written ~
+              in a plain string:~%~A" arguments said))))
