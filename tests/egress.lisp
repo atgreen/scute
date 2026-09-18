@@ -294,3 +294,28 @@ of program answers at sendmsg4, where unconnected UDP does go."
   (check (= 53 (scute-value '+resolver-port+)) "the exception is not port 53")
   (check (= #x3500 (call-scute 'network-port-word 53))
          "53 in network order is ~X" (call-scute 'network-port-word 53)))
+
+(deftest test-the-redirect-leaves-name-resolution-alone
+  "The redirect refused port 53, so a client could not resolve the name it was
+about to connect to -- and nothing ever reached the proxy to be redirected.  It
+was invisible while the sandbox also had HTTPS_PROXY set, because then the proxy
+did the resolving.
+
+Checked at the level that broke: the program's own text, since the failure was a
+missing branch rather than a wrong number."
+  (let* ((endpoint (call-scute 'make-endpoint "127.0.0.1" 10210 #(127 0 0 1)))
+         (text (format nil "~S" (call-scute 'egress-redirect-forms endpoint))))
+    ;; 53 in network byte order, which is what the program compares against.
+    (check (search (format nil "~D" (call-scute 'network-port-word 53)) text)
+           "the program never mentions the resolver port: ~A" text))
+  ;; And Landlock has to permit it, since it sees the connect before the rewrite.
+  (let* ((policy (call-scute 'validate-sandbox-policy
+                             (call-scute 'parse-policy-text
+                                         (format nil "[filesystem]~%read = [\"/etc\"]~%~%~
+                                                      [network]~%mode = \"proxied\"~%~
+                                                      proxy = \"http://127.0.0.1:10210\"~%"))))
+         (plan (call-scute 'compile-launch-plan policy '("/bin/true")))
+         (connect (call-scute 'launch-plan-connect-tcp plan)))
+    (check (member 53 connect)
+           "TCP resolution is refused, so a truncated answer has no fallback: ~S"
+           connect)))

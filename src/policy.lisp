@@ -263,7 +263,12 @@ Answers the mode and that permission."
                                   ;; the web ports have to pass here, and what
                                   ;; constrains where they actually go is the BPF
                                   ;; program.
-                                  (when (string= "proxied" mode) (list 80 443))))
+                                  ;; And 53, because a client resolves a name
+                                  ;; before it connects: TCP resolution is rare
+                                  ;; but it is what a truncated answer falls back
+                                  ;; to, and a sandbox that cannot resolve never
+                                  ;; reaches the connect being redirected.
+                                  (when (string= "proxied" mode) (list 80 443 53))))
                  (bind (ports "bind-tcp")))
             (when (and (eq setting :none) (or connect bind))
               (policy-error "connect-tcp and bind-tcp name ports on a network, ~

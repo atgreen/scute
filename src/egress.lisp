@@ -113,6 +113,17 @@ therefore built from the octets rather than from any host-order number."
   "PORT as connect4 presents it: sixteen bits, byte-swapped."
   (logior (ash (logand port #xff) 8) (ash port -8)))
 
+(defparameter +resolver-port+ 53
+  "The one port a guarded sandbox may still reach besides its proxy.
+
+Refusing UDP entirely would be tidier and does not work: a client resolves a name
+before it connects, and if resolution fails it never reaches the connect the guard
+was written for.  So name resolution is permitted and everything else is not.
+
+What that leaves is narrow and worth saying out loud: a command can still talk to
+a nameserver, and a nameserver is a channel.  Narrowing this to the resolvers in
+/etc/resolv.conf would close most of it and is not done yet.")
+
 (defparameter +proxied-ports+ '(80 443)
   "The ports a proxied sandbox has redirected to its proxy.
 
@@ -140,10 +151,13 @@ compiling needs no privileges and happens once per run anyway."
        (:type :cgroup-sock-addr :section "cgroup/connect4" :license "GPL")
        (let* ((destination u32 (ctx user-ip4))
               (dport u32 (ctx user-port)))
-         ;; The web ports go to the proxy; the proxy itself is left alone, so that
-         ;; the redirected connection is not redirected again; everything else is
-         ;; refused, because a sandbox whose egress is a proxy has no other way
-         ;; out by definition.
+         ;; The web ports go to the proxy; name resolution is left alone, because a
+         ;; client resolves before it connects and connect4 sees a connected UDP
+         ;; socket too -- refusing 53 here stopped resolution, so nothing ever
+         ;; reached the proxy to be redirected; the proxy itself is left alone so
+         ;; that a redirected connection is not redirected again; and everything
+         ;; else is refused, because a sandbox whose egress is a proxy has no
+         ;; other way out by definition.
          (if (= dport ,(network-port-word 443))
              (progn (setf (ctx user-ip4) ,address)
                     (setf (ctx user-port) ,port)
@@ -152,9 +166,11 @@ compiling needs no privileges and happens once per run anyway."
                  (progn (setf (ctx user-ip4) ,address)
                         (setf (ctx user-port) ,port)
                         1)
-                 (if (= dport ,port)
-                     (if (= destination ,address) 1 0)
-                     0))))))))
+                 (if (= dport ,(network-port-word +resolver-port+))
+                     1
+                     (if (= dport ,port)
+                         (if (= destination ,address) 1 0)
+                         0)))))))))
 
 (defun compile-egress-redirect (endpoint)
   "Compile the redirect for ENDPOINT.  Touches no kernel."
@@ -267,17 +283,6 @@ reach; this says that it reaches the proxy whatever it asked for."
                           cgroup
                           (symbol-value (uiop:find-symbol* '#:+bpf-cgroup-inet4-connect+
                                                            '#:whistler/loader)))))))
-
-(defparameter +resolver-port+ 53
-  "The one UDP port a guarded sandbox may still send to.
-
-Refusing UDP entirely would be tidier and does not work: a client resolves a name
-before it connects, and if resolution fails it never reaches the connect the guard
-was written for.  So name resolution is permitted and everything else is not.
-
-What that leaves is narrow and worth saying out loud: a command can still talk to
-a nameserver, and a nameserver is a channel.  Narrowing this to the resolvers in
-/etc/resolv.conf would close most of it and is not done yet.")
 
 (defun egress-udp-forms ()
   "The program that stops UDP leaving a guarded sandbox.
