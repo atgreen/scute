@@ -96,6 +96,9 @@ is the only kind anyone can check.")
   (audit      nil :read-only t)
   (environment nil :read-only t)     ; extra variables to keep, beyond the default
   (unix-sockets nil :read-only t)    ; may the command open an AF_UNIX socket
+  (connect-tcp nil :read-only t)     ; the only ports it may connect to
+  (bind-tcp    nil :read-only t)     ; the only ports it may listen on
+  (proxy      nil :read-only t)      ; everything outbound goes through this
   (pathname   nil :read-only t))
 
 ;;── The document Scute expects ─────────────────────────────────────────────────
@@ -165,11 +168,28 @@ is the only kind anyone can check.")
           append (mapcar (lambda (path) (make-filesystem-rule kind path))
                          (string-array paths key pathname)))))
 
+(defun proxy-url-port (url pathname)
+  "The TCP port a proxy URL names, defaulting by scheme."
+  (let* ((scheme-end (search "://" url))
+         (authority (if scheme-end (subseq url (+ scheme-end 3)) url))
+         (colon (position #\: authority :from-end t))
+         (port (when colon
+                 (parse-integer authority :start (1+ colon) :junk-allowed t))))
+    (cond (port port)
+          ((and scheme-end (string= "https" (subseq url 0 scheme-end))) 443)
+          ((and scheme-end (string= "http" (subseq url 0 scheme-end))) 80)
+          (t (policy-error
+              (format nil "proxy ~S names no port, and its scheme does not imply one"
+                      url)
+              pathname)))))
+
 (defun validate-network (value pathname)
   "The network section: the mode, and whether unix-domain sockets are allowed.
 Answers the mode and that permission."
   (let ((entries (table-entries value "network" pathname)))
-    (check-known-keys entries '("mode" "unix-sockets") "[network]" pathname)
+    (check-known-keys entries '("mode" "unix-sockets" "connect-tcp" "bind-tcp"
+                                "proxy")
+                      "[network]" pathname)
     (let ((mode (scalar-string (cdr (assoc "mode" entries :test #'string=))
                                "mode" pathname))
           (unix (assoc "unix-sockets" entries :test #'string=)))
@@ -182,7 +202,34 @@ Answers the mode and that permission."
                                pathname)))))
         (when (and unix (not (member (cdr unix) '(t nil))))
           (policy-error "unix-sockets is true or false" pathname))
-        (values setting (and unix (eq t (cdr unix))))))))
+        (flet ((ports (key)
+                 (let ((named (assoc key entries :test #'string=)))
+                   (when named
+                     (let ((values (if (listp (cdr named)) (cdr named) (list (cdr named)))))
+                       (mapcar (lambda (port)
+                                 (unless (and (integerp port) (< 0 port 65536))
+                                   (policy-error
+                                    (format nil "~A takes TCP port numbers, not ~S"
+                                            key port)
+                                    pathname))
+                                 port)
+                               values))))))
+          (let* ((proxy (let ((named (assoc "proxy" entries :test #'string=)))
+                          (when named
+                            (scalar-string (cdr named) "proxy" pathname))))
+                 (proxy-port (when proxy (proxy-url-port proxy pathname)))
+                 (connect (append (ports "connect-tcp")
+                                  ;; A proxy is only a proxy if nothing can go
+                                  ;; around it, so naming one grants its port
+                                  ;; and, unless the policy says otherwise,
+                                  ;; nothing else.
+                                  (when proxy-port (list proxy-port))))
+                 (bind (ports "bind-tcp")))
+            (when (and (eq setting :none) (or connect bind))
+              (policy-error "connect-tcp and bind-tcp name ports on a network, ~
+                             and mode is \"none\", which is the absence of one"
+                            pathname))
+            (values setting (and unix (eq t (cdr unix))) connect bind proxy)))))))
 
 (defparameter +duration-multipliers+
   '((#\s . 1) (#\m . 60) (#\h . 3600)))
@@ -313,6 +360,12 @@ is a sandbox the operator half asked for."
                       :none)
          :unix-sockets (when (table "network")
                          (nth-value 1 (validate-network (table "network") pathname)))
+         :connect-tcp (when (table "network")
+                        (nth-value 2 (validate-network (table "network") pathname)))
+         :bind-tcp (when (table "network")
+                     (nth-value 3 (validate-network (table "network") pathname)))
+         :proxy (when (table "network")
+                  (nth-value 4 (validate-network (table "network") pathname)))
          :limits (when (table "limits")
                    (validate-limits (table "limits") pathname))
          :audit (when (table "audit")
@@ -336,6 +389,9 @@ is a sandbox the operator half asked for."
   (filesystem  nil :read-only t)
   (network     :none :read-only t)
   (unix-sockets nil :read-only t)
+  (connect-tcp nil :read-only t)
+  (bind-tcp    nil :read-only t)
+  (proxy       nil :read-only t)
   (limits      nil :read-only t)
   (audit       nil :read-only t))
 
@@ -426,14 +482,29 @@ nothing here touches the kernel."
      :directory directory
      ;; Deny-by-default applies to the environment too: what a command is given
      ;; is the short list plus whatever the policy and the caller named.
-     :environment (kept-environment (append (sandbox-policy-environment policy) keep)
-                                   environment)
+     :environment (let ((kept (kept-environment
+                               (append (sandbox-policy-environment policy) keep)
+                               environment))
+                        (proxy (sandbox-policy-proxy policy)))
+                    ;; A proxy the command cannot be told about is a proxy it
+                    ;; will not use, so naming one sets the variables every
+                    ;; ordinary client reads.
+                    (if proxy
+                        (append kept
+                                (list (format nil "HTTPS_PROXY=~A" proxy)
+                                      (format nil "HTTP_PROXY=~A" proxy)
+                                      (format nil "https_proxy=~A" proxy)
+                                      (format nil "http_proxy=~A" proxy)))
+                        kept))
      :filesystem (mapcar (lambda (rule)
                            (resolve-rule rule directory
                                          (sandbox-policy-pathname policy)))
                          (sandbox-policy-filesystem policy))
      :network (sandbox-policy-network policy)
      :unix-sockets (sandbox-policy-unix-sockets policy)
+     :connect-tcp (sandbox-policy-connect-tcp policy)
+     :bind-tcp (sandbox-policy-bind-tcp policy)
+     :proxy (sandbox-policy-proxy policy)
      :limits (sandbox-policy-limits policy)
      :audit (sandbox-policy-audit policy))))
 
@@ -468,6 +539,9 @@ A plan is immutable, so an override makes another one rather than changing it."
      :unix-sockets (if (eq unix-sockets :keep)
                        (launch-plan-unix-sockets plan)
                        unix-sockets)
+     :connect-tcp (launch-plan-connect-tcp plan)
+     :bind-tcp (launch-plan-bind-tcp plan)
+     :proxy (launch-plan-proxy plan)
      :audit (launch-plan-audit plan)
      :limits (if (and (eq wall-clock :keep) limits)
                  limits
@@ -503,6 +577,13 @@ was asked for."
             (:host "the host's, shared")
             (t "none"))
           (launch-plan-unix-sockets plan))
+  (let ((proxy (launch-plan-proxy plan)))
+    (when proxy (format stream "~13Tthrough ~A~%" proxy)))
+  (let ((connect (launch-plan-connect-tcp plan))
+        (bind (launch-plan-bind-tcp plan)))
+    (when (or connect bind)
+      (format stream "~13T~@[connect tcp ~{~D~^ ~}~]~@[ bind tcp ~{~D~^ ~}~]~%"
+              connect bind)))
   ;; Names only.  The values are the caller's own, but a plan is the sort of
   ;; thing that ends up in a log.
   (format stream "environment  ~:[nothing~;~:*~{~A~^ ~}~]~%"

@@ -26,6 +26,15 @@
 
 (defconstant +landlock-create-ruleset-version+ 1)
 (defconstant +landlock-rule-path-beneath+      1)
+(defconstant +landlock-rule-net-port+          2)
+
+;;; Network access rights, from ABI 4.  Landlock governs ports rather than
+;;; addresses: it can say "TCP 443 and nothing else", not "api.example.com".
+;;; That is less than a proxy offers and far more than nothing, and it needs no
+;;; proxy, no certificate authority and no second process.
+(defconstant +access-net-bind-tcp+    (ash 1 0))
+(defconstant +access-net-connect-tcp+ (ash 1 1))
+(defconstant +landlock-net-abi+ 4)
 
 (defconstant +o-path+      #o10000000)
 (defconstant +o-directory+   #o200000)
@@ -165,11 +174,13 @@ rather than as the policy decision it is."
 
 ;;── One ruleset ────────────────────────────────────────────────────────────────
 
-(defun create-ruleset (handled-rights)
-  "Create a Landlock ruleset handling HANDLED-RIGHTS.  Returns its descriptor."
+(defun create-ruleset (handled-rights &optional (handled-net 0))
+  "Create a Landlock ruleset handling HANDLED-RIGHTS and HANDLED-NET.
+One ruleset carries both, which is the whole of Cave's constraint: rights that
+are handled in separate rulesets deny each other by implication."
   (cffi:with-foreign-object (attr :uint64 2)
     (setf (cffi:mem-aref attr :uint64 0) handled-rights   ; handled_access_fs
-          (cffi:mem-aref attr :uint64 1) 0)               ; handled_access_net
+          (cffi:mem-aref attr :uint64 1) handled-net)     ; handled_access_net
     (let ((fd (cffi:foreign-funcall "syscall"
                                     :long +sys-landlock-create-ruleset+
                                     :pointer attr
@@ -202,19 +213,59 @@ rather than as the policy decision it is."
              (setup-error :landlock-add-rule :errno (errno) :detail path)))
       (%close parent))))
 
-(defun compile-filesystem-ruleset (rules executable)
-  "Build the one ruleset that RULES describe, or NIL when there are none.
-Returns the ruleset descriptor and the ABI version it was built for."
-  (when rules
-    (let ((abi (require-landlock)))
-      (ensure-executable-permitted rules executable abi)
-      (let ((ruleset (create-ruleset (supported-rights abi))))
+(defun add-port-rule (ruleset port rights)
+  "Allow RIGHTS on PORT in RULESET."
+  ;; struct landlock_net_port_attr: an access mask and a port, both 64 bits.
+  (cffi:with-foreign-object (attr :uint64 2)
+    (setf (cffi:mem-aref attr :uint64 0) rights
+          (cffi:mem-aref attr :uint64 1) port)
+    (when (minusp (cffi:foreign-funcall "syscall"
+                                        :long +sys-landlock-add-rule+
+                                        :int ruleset
+                                        :unsigned-long +landlock-rule-net-port+
+                                        :pointer attr
+                                        :unsigned-long 0
+                                        :long))
+      (setup-error :landlock-add-port-rule :errno (errno)
+                   :detail (format nil "tcp port ~D" port)))))
+
+(defun handled-network-rights (connect-ports bind-ports abi)
+  "What the ruleset must handle for the ports a policy named.
+Handling a right is what makes everything not granted a refusal, so a policy
+that names no ports handles nothing and leaves the network as it found it."
+  (when (or connect-ports bind-ports)
+    (when (< abi +landlock-net-abi+)
+      (setup-error :landlock-network
+                   :detail (format nil "this kernel's Landlock is ABI ~D, and ~
+                                        network rules arrived in ABI ~D"
+                                   abi +landlock-net-abi+)))
+    (logior (if connect-ports +access-net-connect-tcp+ 0)
+            (if bind-ports +access-net-bind-tcp+ 0))))
+
+(defun compile-filesystem-ruleset (rules executable &key connect-ports bind-ports)
+  "Build the one ruleset that RULES and the named ports describe.
+Answers NIL when a policy asked for none of them.  Returns the ruleset
+descriptor and the ABI version it was built for.
+
+Paths and ports go in the same ruleset, which is the whole of Cave's
+constraint: rights handled in separate rulesets deny each other by implication."
+  (when (or rules connect-ports bind-ports)
+    (let* ((abi (require-landlock))
+           (handled-net (or (handled-network-rights connect-ports bind-ports abi) 0)))
+      (when rules
+        (ensure-executable-permitted rules executable abi))
+      (let ((ruleset (create-ruleset (if rules (supported-rights abi) 0)
+                                     handled-net)))
         (handler-bind ((error (lambda (condition)
                                 (declare (ignore condition))
                                 (%close ruleset))))
           (dolist (rule rules)
             (add-path-rule ruleset (path-rule-path rule)
-                           (rule-rights rule abi))))
+                           (rule-rights rule abi)))
+          (dolist (port connect-ports)
+            (add-port-rule ruleset port +access-net-connect-tcp+))
+          (dolist (port bind-ports)
+            (add-port-rule ruleset port +access-net-bind-tcp+)))
         (values ruleset abi)))))
 
 (declaim (inline %landlock-restrict-self))

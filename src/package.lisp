@@ -76,6 +76,12 @@
            #:plan-with-wall-clock
            #:revised-launch-plan
            #:launch-plan-unix-sockets
+           #:launch-plan-connect-tcp
+           #:launch-plan-bind-tcp
+           #:sandbox-policy-proxy
+           #:launch-plan-proxy
+           #:sandbox-policy-connect-tcp
+           #:sandbox-policy-bind-tcp
            #:sandbox-policy-unix-sockets
            #:parse-duration
            #:capability-sets

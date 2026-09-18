@@ -99,7 +99,10 @@ the child only uses what is already in its hands."
          (path (first command))
          (environment (launch-plan-environment plan))
          (last-capability (cap-last-cap))
-         (ruleset (compile-filesystem-ruleset (launch-plan-filesystem plan) path))
+         (ruleset (compile-filesystem-ruleset
+                   (launch-plan-filesystem plan) path
+                   :connect-ports (launch-plan-connect-tcp plan)
+                   :bind-ports (launch-plan-bind-tcp plan)))
          ;; Built before the child exists, so a filter that will not build is a
          ;; launch that does not happen.  The program is shared and read-only:
          ;; these resources borrow it rather than owning it.

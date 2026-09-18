@@ -120,10 +120,27 @@ A command that needs the network — a build fetching dependencies — asks for 
 mode = "host"
 ```
 
-That is the host's network, shared, with no filtering of its own: scute has no
-proxy and no allowlist yet, so a policy saying `host` is saying "this command may
-talk to anything I can". It has to be written down for that reason. Pair it with
-something that governs egress if that matters — see below.
+That is the host's network, shared. A policy can then narrow it, because Landlock
+governs TCP ports:
+
+```toml
+[network]
+mode = "host"
+connect-tcp = [443]      # and nothing else, kernel-enforced
+```
+
+Ports are not addresses — `443` means any host on 443 — so for real egress
+control, name a proxy and let the kernel make it the only way out:
+
+```toml
+[network]
+mode = "host"
+proxy = "http://127.0.0.1:10210"
+```
+
+That sets `HTTPS_PROXY` and its friends for the command **and** permits TCP to
+the proxy's port alone. A command that ignores the variables still cannot reach
+anything else: it is a proxy rather than a suggestion.
 
 The write landed because the policy allows this directory. The key was refused
 because nothing in the policy names it. The network is gone because the sandbox
@@ -313,6 +330,9 @@ Every table and key it may contain:
 | | `read-write` | array of paths | read, write, create, delete, rename |
 | | `read-write-execute` | array of paths | the same, and execute |
 | `[network]` | `mode` | `"none"` or `"host"` | no network at all, or the host's, shared |
+| | `connect-tcp` | array of ports | the only TCP ports the command may connect to |
+| | `bind-tcp` | array of ports | the only TCP ports it may listen on |
+| | `proxy` | URL | set the proxy variables, and permit only its port |
 | | `unix-sockets` | `true` / `false` | may the command open an AF_UNIX socket (default `false`) |
 | `[limits]` | `memory` | size, e.g. `"2G"` | and no swapping around it |
 | | `processes` | integer | `pids.max` |
@@ -402,11 +422,13 @@ overhead, and a policy you can read in one screen.
 It deliberately does not do two things that matter for agent work, and there are
 better tools for both:
 
-- **Egress control.** `network mode = "host"` is all or nothing. NVIDIA's
+- **Egress policy at the HTTP layer.** Scute can make a proxy the only way out
+  and can name the TCP ports a command may use, but it cannot tell `GET` from
+  `POST`. NVIDIA's
   [OpenShell](https://github.com/NVIDIA/OpenShell) runs agent sandboxes behind a
-  proxy that enforces policy at the HTTP method and path level, in containers or
-  MicroVMs, with a gateway and a Kubernetes path. If what you need is "this agent
-  may GET the GitHub API but not POST", that is the shape of tool to reach for.
+  proxy that enforces exactly that, in containers or MicroVMs, with a gateway and
+  a Kubernetes path. If you want the platform rather than the primitive, that is
+  the shape of tool to reach for.
 - **Credentials.** Scute drops secrets from the environment, which stops a
   command reading what it was never given — but a command that legitimately needs
   a key still holds one.
@@ -423,11 +445,16 @@ read = ["/etc", "/proc"]
 read-write = [".", "/dev/null"]
 
 [network]
-mode = "host"            # to reach the proxy on localhost
+mode = "host"
+proxy = "http://127.0.0.1:10210"     # KeyFence; the only reachable port
 
 [environment]
-keep = ["ANTHROPIC_API_KEY", "HTTPS_PROXY"]   # the key here is a kf_ token
+keep = ["ANTHROPIC_API_KEY"]         # holding a kf_ token, not a key
 ```
+
+The agent cannot read your files, cannot reach the network except through the
+proxy, and holds no credential worth stealing. Each of those is enforced by
+something that does not trust the other two.
 
 ## When something will not run
 

@@ -402,3 +402,92 @@ mode = \"bridged\"")
            "a sandbox with no network had a route")
     (check (plusp (or (routes "host") 0))
            "a sandbox sharing the host's network had no route")))
+
+(defun compile-connect-probe ()
+  "Build a program that answers what happened when it tried to connect.
+7 means the kernel let it try and nothing was listening; 8 means Landlock
+refused it.  Telling those apart is the whole test, and it needs no network."
+  (let ((source (format nil "~A.c" (scratch-pathname "connect")))
+        (program (scratch-pathname "connect")))
+    (with-open-file (stream source :direction :output :if-exists :supersede)
+      (write-string "#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <unistd.h>
+int main(int argc, char **argv) {
+  struct sockaddr_in to;
+  int s = socket(AF_INET, SOCK_STREAM, 0);
+  if (s < 0) return 6;
+  to.sin_family = AF_INET;
+  to.sin_port = htons((unsigned short)atoi(argv[1]));
+  to.sin_addr.s_addr = inet_addr(\"127.0.0.1\");
+  if (connect(s, (struct sockaddr *)&to, sizeof to) == 0) return 0;
+  if (errno == ECONNREFUSED) return 7;   /* allowed to try */
+  if (errno == EACCES || errno == EPERM) return 8;  /* refused by policy */
+  return 9;
+}
+" stream))
+    (unwind-protect
+         (when (zerop (cffi:foreign-funcall
+                       "system" :string
+                       (format nil "gcc -o ~A ~A >/dev/null 2>&1" program source)
+                       :int))
+           program)
+      (delete-scratch source))))
+
+(deftest test-a-policy-may-name-the-ports-it-needs
+  "Landlock governs ports rather than addresses, which is less than a proxy
+offers and a great deal more than nothing: a policy can say TCP 443 and have the
+kernel refuse everything else."
+  (let ((program (compile-connect-probe)))
+    (if (null program)
+        (format *error-output* "~&SKIP: no working gcc, so port rules are untested~%")
+        (unwind-protect
+             (flet ((try (port)
+                      (let ((policy (policy-from-string
+                                     (format nil "[filesystem]~%~
+                                                  read-execute = [\"/\"]~%~
+                                                  [network]~%mode = \"host\"~%~
+                                                  connect-tcp = [9]~%"))))
+                        (call-scute 'sandbox-result-exit-code
+                                    (call-scute 'run-launch-plan
+                                                (call-scute 'compile-launch-plan policy
+                                                            (list program
+                                                                  (princ-to-string port))))))))
+               (check (eql 7 (try 9))
+                      "connecting to the port the policy named was refused by the ~
+                       kernel, not by the host")
+               (check (eql 8 (try 10))
+                      "connecting to a port the policy did not name was allowed"))
+          (delete-scratch program)))))
+
+(deftest test-a-proxy-is-the-only-way-out
+  "Naming a proxy sets the variables a client reads and grants its port -- and
+only its port, so a command that ignores the variables still cannot go around
+it.  That is what makes it a proxy rather than a suggestion."
+  (let* ((policy (policy-from-string "[filesystem]
+read-execute = [\"/usr\"]
+[network]
+mode = \"host\"
+proxy = \"http://127.0.0.1:10210\""))
+         (plan (call-scute 'compile-launch-plan policy '("/bin/true"))))
+    (check (equal '(10210) (call-scute 'launch-plan-connect-tcp plan))
+           "naming a proxy did not restrict connections to its port: ~S"
+           (call-scute 'launch-plan-connect-tcp plan))
+    (check (find "HTTPS_PROXY=http://127.0.0.1:10210"
+                 (call-scute 'launch-plan-environment plan) :test #'string=)
+           "the command would never be told about the proxy")
+    (check (refused-p "[filesystem]
+read = [\"/etc\"]
+[network]
+mode = \"none\"
+connect-tcp = [443]")
+           "ports were accepted on a network that is not there")
+    (check (refused-p "[filesystem]
+read = [\"/etc\"]
+[network]
+mode = \"host\"
+proxy = \"localhost\"")
+           "a proxy naming no port was accepted")))
