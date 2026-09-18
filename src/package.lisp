@@ -171,6 +171,9 @@
            #:read-secret
            #:plan-with-broker
            #:loopback-request
+           #:json-string-list
+           #:report-credentials
+           #:registered-credentials
            #:http-response-status
            #:http-response-body
            #:json-string-field

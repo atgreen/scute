@@ -308,15 +308,19 @@ there is something --explain could find.  SCUTE_NO_HINTS=1 turns it off."
          (paths (clingon:command-arguments cmd)))
      (unless policy
        (usage-error "scute check needs a policy: --policy FILE"))
-     (unless paths
-       (usage-error "scute check needs one or more paths to ask about"))
      (let* ((plan (compile-launch-plan (read-sandbox-policy policy) '("/bin/true")))
             (rules (launch-plan-filesystem plan))
             (denied 0))
+       (unless (or paths (launch-plan-credentials plan))
+         (usage-error "scute check needs one or more paths to ask about"))
        (dolist (path paths)
          (unless (report-path-access rules path *standard-output*)
            (incf denied)))
-       (uiop:quit (if (plusp denied) 1 0) t)))))
+       ;; Credentials are as much a part of whether a policy will run as paths
+       ;; are, and they fail in a place that is much harder to read: an agent
+       ;; getting a 401 from somewhere inside itself.
+       (let ((missing (or (report-credentials plan *standard-output*) 0)))
+         (uiop:quit (if (plusp (+ denied missing)) 1 0) t))))))
 
 (defun make-check-command ()
   (clingon:make-command

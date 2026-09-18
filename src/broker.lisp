@@ -335,6 +335,66 @@ their own -- and an agent that shells out crosses several of them in one task.")
             (loop for variable in +certificate-variables+
                   collect (format nil "~A=~A" variable certificate)))))
 
+(defun registered-credentials (settings)
+  "The credential names the broker knows, or NIL if it cannot be asked.
+
+Answers a second value explaining why not, so that a report can say \"the broker
+is not running\" rather than \"the credential is missing\" -- two problems that
+look identical from here and call for different fixes."
+  (let ((control (broker-settings-control-port settings)))
+    (if (not (broker-answering-p control))
+        (values nil (format nil "no broker is answering on port ~D" control))
+        (handler-case
+            (let ((response (control-request
+                             (%make-broker settings nil (broker-control-key-from-host) nil)
+                             "GET" "/credentials" :seconds 5)))
+              (case (http-response-status response)
+                ((200) (values (json-string-list (http-response-body response)
+                                                 "credentials")
+                               nil))
+                ((401 403) (values nil "the broker will not accept the control key"))
+                (t (values nil (format nil "the broker answered ~D"
+                                       (http-response-status response))))))
+          (error (condition) (values nil (princ-to-string condition)))))))
+
+(defun report-credentials (plan &optional (stream *standard-output*))
+  "Say whether each credential a policy names can be had, and answer how many
+cannot.  What a policy asks of the broker is as much a part of whether it will
+run as what it asks of the filesystem, and until now the only way to find out was
+to run it and watch an agent fail."
+  (let ((credentials (launch-plan-credentials plan)))
+    (when credentials
+      (multiple-value-bind (registered reason)
+          (registered-credentials (launch-plan-broker plan))
+        (let ((missing 0))
+          (dolist (request credentials)
+            (let* ((reference (credential-request-reference request))
+                   (state (cond ((null reference)
+                                 (if (probe-file (credential-request-secret-file request))
+                                     :readable
+                                     :absent))
+                                (reason :unknown)
+                                ((member reference registered :test #'string=) :registered)
+                                (t :absent))))
+              (unless (eq state :unknown)
+                (when (eq state :absent) (incf missing)))
+              (format stream "~(~18A~) ~A~@[ (~A)~]~%"
+                      (credential-request-name request)
+                      (ecase state
+                        (:registered "registered with the broker")
+                        (:readable "a secret file Scute can read")
+                        (:absent (if reference
+                                     "NOT registered with the broker"
+                                     "secret file missing"))
+                        (:unknown "cannot tell"))
+                      (ecase state
+                        (:registered reference)
+                        (:readable (credential-request-secret-file request))
+                        (:absent (or reference
+                                     (credential-request-secret-file request)))
+                        (:unknown reason)))))
+          missing)))))
+
 (defun plan-with-broker (plan broker tokens)
   "PLAN as the sandbox will see it once the broker is running: the tokens in its
 environment, and read access to the one certificate it has to trust.

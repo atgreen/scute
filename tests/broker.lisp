@@ -24,6 +24,8 @@
                      "        self.send_response(200); self.end_headers()"
                      "        if self.path.startswith('/tokens'):"
                      "            self.wfile.write(b'[]')"
+                     "        elif self.path.startswith('/credentials'):"
+                     "            self.wfile.write(b'{\"credentials\":[]}')"
                      "        else:"
                      "            self.wfile.write(b'{\"status\":\"ok\"}')"
                      "    def do_POST(self):"
@@ -267,3 +269,42 @@ destinations = [\"example.com\"]~%env = \"X\"~%"
            "a credential naming both a secret-file and a ref was accepted")
     (check (not (refused-p (format nil "ref = \"x\"~%")))
            "a credential naming only a ref was refused")))
+
+(deftest test-json-string-list-reads-a-flat-array
+  "The names out of the broker's answer, without a JSON reader."
+  (let ((body "{\"credentials\":[\"anthropic\",\"github\"],\"keyring\":true}"))
+    (check (equal '("anthropic" "github")
+                  (call-scute 'json-string-list body "credentials"))
+           "got ~S" (call-scute 'json-string-list body "credentials")))
+  (check (null (call-scute 'json-string-list "{\"credentials\":[]}" "credentials"))
+         "an empty array should read as no names")
+  (check (null (call-scute 'json-string-list "{\"other\":[\"x\"]}" "credentials"))
+         "a missing key should read as no names"))
+
+(deftest test-checking-a-policy-reports-credentials-it-cannot-have
+  "Whether a credential can be had is as much a part of whether a policy will run
+as whether a path can be read, and it fails in a much harder place to read: an
+agent getting a 401 from somewhere inside itself.  A name the broker does not
+know is a fault in the policy and counts; a broker that cannot be reached is a
+fact about the host and does not."
+  (if (plusp (cffi:foreign-funcall "system" :string
+                                  "command -v python3 >/dev/null 2>&1" :int))
+      (format *error-output* "~&SKIP: no python3 to stand in for a broker~%")
+      (let* ((record (format nil "~A.jsonl" (scratch-pathname "check-record")))
+             (helper nil))
+        (unwind-protect
+             (progn
+               (setf helper (start-fake-broker record))
+               (let* ((policy (call-scute 'validate-sandbox-policy
+                                          (call-scute 'parse-policy-text
+                                                      (referencing-policy-text))))
+                      (plan (call-scute 'compile-launch-plan policy '("/bin/true"))))
+                 ;; The stand-in answers /credentials with no names at all, so the
+                 ;; reference in the policy is one it does not know.
+                 (let ((said (with-output-to-string (stream)
+                               (check (plusp (call-scute 'report-credentials plan stream))
+                                      "a reference the broker does not know was not counted"))))
+                   (check (search "anthropic" said)
+                          "the report does not name the credential: ~S" said))))
+          (when helper (call-scute 'stop-helper helper))
+          (delete-scratch record)))))

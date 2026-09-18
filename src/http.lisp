@@ -137,6 +137,24 @@ JSON string after it, honouring escapes, or answers NIL."
                    (when (and quote-at (char= #\" (char body quote-at)))
                      (return (read-json-string body (1+ quote-at))))))))))
 
+(defun json-string-list (body name)
+  "The strings in the array NAME names, which is as much JSON array as is needed
+here: one flat list of names, out of an answer that has no others."
+  (let* ((key (concatenate 'string "\"" name "\""))
+         (at (search key body)))
+    (when at
+      (let ((open (position #\[ body :start (+ at (length key)))))
+        (when open
+          (let ((close (position #\] body :start open)))
+            (when close
+              (loop with index = (1+ open)
+                    while (< index close)
+                    for quote-at = (position #\" body :start index :end close)
+                    while quote-at
+                    collect (let ((value (read-json-string body (1+ quote-at))))
+                              (setf index (+ quote-at 2 (length value)))
+                              value)))))))))
+
 (defun read-json-string (body start)
   "The JSON string beginning at START, which is just past its opening quote."
   (with-output-to-string (out)

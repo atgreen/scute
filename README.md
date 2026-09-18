@@ -140,6 +140,20 @@ $ scute check --policy scute.policy . /usr/bin/gcc /etc/passwd /var/tmp/out
 /var/tmp/out                  nothing           via /var/tmp
 ```
 
+`check` also answers for credentials, which fail in a much harder place to read —
+an agent getting a 401 from somewhere inside itself:
+
+```console
+$ scute check --policy agent.policy .
+.                             read write        (read-write /home/you/project)
+anthropic          registered with the broker (anthropic)
+github             NOT registered with the broker (githbu)
+```
+
+A name the broker does not know is a fault in the policy and exits non-zero. A
+broker that cannot be reached at all says `cannot tell` and does not, because
+that is a fact about this host rather than a mistake in the policy.
+
 `check` launches nothing and exits non-zero if any path is wholly denied, so it
 belongs in CI beside the policy it guards. A path that does not exist yet is
 answered by the nearest directory that does, because that is what governs
@@ -342,8 +356,12 @@ env = "ANTHROPIC_API_KEY"              # where the sandbox finds its token
 scute run --policy agent.policy -- claude
 ```
 
-`ref` names a credential registered with the broker — a file in
-`~/.keyfence/credentials`, or one systemd handed it with `LoadCredential=`.
+`ref` names a credential registered with the broker:
+
+```sh
+gh auth token | keyfence credential add github     # into the OS keyring
+keyfence credential list                           # what the broker can see
+```
 Scute asks for a token *by name*, so the plaintext lives in one process instead
 of two, and rotating it is replacing that file.
 
