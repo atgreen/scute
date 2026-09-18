@@ -1,93 +1,56 @@
 # Scute
 
-Scute runs one local command inside a deny-by-default Linux sandbox.
+Run one command inside a deny-by-default Linux sandbox.
 
 ```sh
 scute run --policy scute.policy -- command ...
 ```
 
-It is a native sandbox, not a container or a virtual machine. There is one
-executable and no privileged daemon: a parent process establishes every
-requested control, drops all of its own capabilities, and only then releases
-the child that becomes the command. Scute shares the host kernel and does not
-claim to contain kernel exploits.
+Scute confines a single command to the files, the network, the resources and the
+system calls a policy names. It is a native sandbox — one process tree on your
+own kernel, no container, no virtual machine, no daemon, and no root. A build
+script from a repository you just cloned, a dependency's install hook, an agent
+acting on your behalf: things you have reason to run and reason to distrust.
 
-Nothing degrades quietly. A host missing Landlock, user namespaces, cgroup
-delegation, libseccomp, or any other control the policy asks for gets an error
-before the command runs, never a weaker sandbox than the one it asked for. The
-kernel is addressed directly — `clone3`, `landlock_create_ruleset`, `capset`,
-`prctl` — with no helper binary to install, trust, or keep in step.
+![scute](docs/demo.gif)
 
-## Status
+Nothing degrades quietly. A host missing anything the policy asks for —
+Landlock, user namespaces, cgroup delegation, libseccomp — gets an error before
+the command runs, never a weaker sandbox than the one it asked for.
 
-`scute learn` writes the policy for you by watching a command run; see below.
+**Contents** — [Install](#install) · [Quickstart](#quickstart) ·
+[Writing a policy](#writing-a-policy) · [Policy reference](#policy-reference) ·
+[Commands](#commands) · [Network](#network) ·
+[Credentials](#credentials-the-sandbox-cannot-read) ·
+[Environment](#environment) · [Limits](#limits-and-timeouts) ·
+[Auditing](#auditing) · [When something will not run](#when-something-will-not-run) ·
+[What it protects](#what-it-protects-and-what-it-does-not) ·
+[What it costs](#what-it-costs) · [How it compares](#how-it-compares) ·
+[Building](#building-from-source) · [Status](#status)
 
-Scute is v0 and unfinished, but it runs. Three layers are in place — the process
-layer (fresh user, mount, PID, UTS, and network namespaces; every capability set
-emptied; `no_new_privs`; the sandbox dies with its supervisor), the filesystem
-layer (one Landlock ruleset the child enforces on itself just before it execs),
-and a seccomp filter denying the system calls a confined command has no business
-making. Policy files work, and so does describing the filesystem directly on
-the command line:
+## Install
 
-```sh
-scute run --read-execute /usr --read /etc --read-write . -- /bin/sh -c 'ls; echo hi > note'
-```
-
-Nothing outside those paths can be opened — including, note, `/proc` and
-`/dev/null`, which most programs expect; grant them explicitly when a command
-needs them. The distinction between `--read-write` and `--read-write-execute`
-is real: a directory granted the first can hold a binary you just compiled, but
-running it needs the second. To run with no filesystem restriction at all, say so:
+Scute is not published yet, so build it. It needs SBCL and
+[ocicl](https://github.com/ocicl/ocicl), which `ocicl.csv` pins.
 
 ```sh
-scute run --namespaces-only -- COMMAND
+ocicl install
+make                 # builds ./scute
+sudo install -m 755 scute /usr/local/bin/      # optional
 ```
 
-`scute doctor` reports what the host can enforce and exits non-zero if something
-mandatory is absent. `scute doctor --json` says the same thing to a script.
+RPM and Debian packaging live in `releng/` for when there is somewhere to
+publish them.
 
-Exit statuses are the shell's, so scripts can read them:
+Then check the host can enforce what you will ask of it:
 
-| status | meaning |
-|---|---|
-| the command's own | the command ran and ended by itself |
-| 128 + signal | a signal ended the command (137 = killed, often a memory limit) |
-| 64 | the command line asked for something impossible |
-| 65 | the policy is not one Scute will accept |
-| 126 | the command exists but could not be executed |
-| 127 | the command does not exist |
-| 1 | a control this host could not establish |
-
-Resource limits work where the kernel will allow them:
-
-```toml
-[limits]
-memory = "2G"          # and no swapping around it
-processes = 256
-cpu-percent = 200      # two processors' worth
-wall-clock = "5m"      # or --timeout 5m
+```sh
+scute doctor
 ```
 
-A command stopped for running too long exits **124**, as `timeout(1)` has it.
-It is sent `SIGTERM` first and given five seconds to act on it — unless it has
-no handler for `SIGTERM`, in which case it would never see it at all, being PID
-1 of its namespace, and is killed immediately instead. Nothing waits for a
-signal nobody is listening for.
-
-A wall-clock limit needs nothing of the host; the rest are cgroup v2, and
-cgroup v2 will not let a cgroup hold processes and give controllers to its
-children at the same time, so those need Scute to have a cgroup of its own —
-`systemd-run --user --scope -p Delegate=yes scute run ...`, or a service with
-`Delegate=yes`. Where that is not the case, asking for limits is refused with
-the remedy in the message rather than quietly ignored. `scute doctor` says which
-you have.
-
-A policy may still ask for auditing, which is designed but not built; Scute
-refuses to launch rather than hand back a weaker sandbox than the policy asked
-for. That is the last of v0 still outstanding. `docs/design.md` is the architecture. The task graph
-lives in [beads](https://github.com/steveyegge/beads); `bd ready` shows what is
-claimable.
+It names anything missing and exits non-zero if a mandatory control is absent.
+Landlock needs Linux 5.13 or newer, and unprivileged user namespaces must be
+enabled.
 
 ## Quickstart
 
@@ -113,173 +76,30 @@ $ scute run --policy scute.policy -- curl -sS https://example.com
 curl: (6) Could not resolve host: example.com
 ```
 
-A command that needs the network — a build fetching dependencies — asks for it:
-
-```toml
-[network]
-mode = "host"
-```
-
-That is the host's network, shared. A policy can then narrow it, because Landlock
-governs TCP ports:
-
-```toml
-[network]
-mode = "host"
-connect-tcp = [443]      # and nothing else, kernel-enforced
-```
-
-Ports are not addresses — `443` means any host on 443 — so for real egress
-control, name a proxy and let the kernel make it the only way out:
-
-```toml
-[network]
-mode = "host"
-proxy = "http://127.0.0.1:10210"
-```
-
-That sets `HTTPS_PROXY` and its friends for the command **and** permits TCP to
-the proxy's port alone. A command that ignores the variables still cannot reach
-anything else: it is a proxy rather than a suggestion.
-
 The write landed because the policy allows this directory. The key was refused
 because nothing in the policy names it. The network is gone because the sandbox
-has a network namespace of its own with nothing in it — not a proxy, not a
-filter, no route at all — and because unix-domain sockets are refused as well,
-which is less obvious and mattered more: a namespace does not stop a command
-connecting to `systemd-resolved`, the system D-Bus or an `ssh-agent` by their
-socket paths, and Landlock does not govern `connect`. `socketpair` still works,
-so a program can talk to itself.
+has a network namespace of its own with nothing in it — no route, no proxy, no
+filter — and because unix-domain sockets are refused too, so a command cannot
+reach `systemd-resolved` or the system bus by their socket paths either.
 
-That refusal is the default, not the only option. An interactive shell whose
-startup files start an `ssh-agent` needs one, and says so loudly:
+Two things surprise people first:
 
-```
-unix_listener: socket: Operation not permitted
-```
+- **Nothing is implicit.** `/proc` and `/dev/null` are not granted unless you
+  name them, and most programs expect both.
+- **`read-write` does not imply execute.** A directory granted `read-write` can
+  hold a binary you just compiled; running it needs `read-write-execute`.
 
-Allow it when you mean to — `[network] unix-sockets = true`, or
-`--allow-unix-sockets`. It is all or nothing: Landlock cannot scope a socket
-path, so there is no way to permit the agent and not the bus. `scute learn`
-notices a command asking for one and writes `unix-sockets = true` into the policy
-it produces.
-
-Don't want to write that file yourself? `scute learn` will.
-
-## Granting the one privilege
-
-Everything above works as an ordinary user. One thing does not: an
-**address-level** egress allowlist, which loads a BPF program (`CAP_BPF`) and
-attaches it to the sandbox's cgroup (`CAP_NET_ADMIN`).
-
-```toml
-[network]
-mode = "host"
-allow = ["api.github.com:443", "proxy.internal:3128"]
-```
-
-`scute doctor` says whether the host can do it, and a policy that asks for it
-without the privilege is refused rather than quietly downgraded to port-level.
-
-To grant it:
+You can skip the policy file and say it on the command line:
 
 ```sh
-make egress        # builds, then grants -- one sudo setcap
+scute run --read-execute /usr --read /etc --read-write . -- ./build.sh
+scute run --namespaces-only -- ./build.sh          # no filesystem restriction
 ```
 
-Capabilities live on the inode, so **every rebuild loses them** — re-run that
-after `make`. Two consequences worth knowing, because both look like other
-problems: running scute under `strace` suppresses file capabilities (ptrace
-prevents privilege elevation), so a policy that needs them fails only when
-traced; and a binary that holds them is non-dumpable, which scute undoes for
-itself after dropping them, because otherwise its children's `/proc` files
-belong to root and it cannot write its own child's uid map.
+## Writing a policy
 
-or, for a package, `setcap cap_bpf,cap_net_admin+ep /usr/bin/scute` in `%post`,
-or a systemd unit with `AmbientCapabilities=CAP_BPF CAP_NET_ADMIN`.
-
-Three things worth knowing before you do:
-
-- **A setuid shell script does nothing.** Linux has ignored the setuid bit on
-  anything with a shebang for decades, because re-opening the interpreted file
-  is racy. It will not fail loudly; it will simply not grant anything.
-- **A setuid wrapper is the wrong shape.** It would hand scute root, where file
-  capabilities hand it exactly two. If you want a helper, have it call `setcap`
-  on a root-owned binary — a helper that caps whatever path it is given is a
-  privilege escalation, not a convenience.
-- **`CAP_BPF` is close to root.** On a machine with users who should not have
-  it, a cap-bearing binary that everyone may execute gives it to all of them.
-  `chmod 750` and a group, or keep it to CI and development hosts.
-
-Scute installs the guard **before** it drops its capabilities, and drops them
-all the same way it always did: the sandboxed command still runs with every
-capability set empty, and the tests check it.
-
-## What it costs
-
-Best of three passes of 25 runs each, on one developer machine, so read them as
-proportions rather than promises:
-
-| | |
-|---|---|
-| `/bin/true`, no sandbox | 0.9 ms |
-| `scute --version` — starting up, sandboxing nothing | 21.3 ms |
-| `scute run --namespaces-only -- /bin/true` | 22.2 ms |
-| `scute run --policy scute.policy -- /bin/true` | 24.3 ms |
-| the same with `--explain` | 32.2 ms |
-
-The sandbox itself is the cheap part: about a millisecond for the process layer,
-two or three more to read a policy and install a Landlock ruleset, and eight for
-watching. What you are paying for is scute starting up at all, which is one
-Lisp image loading.
-
-Getting there took two measurements worth repeating if this ever regresses.
-Saving an SBCL image discards its CLOS dispatch caches, so the first call to
-each generic function recomputes them: building the command tree and parsing one
-command line cost about 35 ms cold. And a PEG parser compiles its rules on first
-use, which put another 29 ms into reading a small policy. Both are paid at build
-time now — `scute.asd` exercises them before dumping the image — and a policy run
-went from 79 ms to 24 ms without a line of the sandbox changing.
-
-## What this protects against, and what it does not
-
-Scute confines a command to the filesystem, the resources, and the system calls
-a policy names. It is a **native sandbox**: one process tree on your own kernel,
-not a container and not a virtual machine.
-
-Scute needs no privileges of its own: it is not setuid, carries no file
-capabilities, and expects no root. Everything it installs, an ordinary user may
-install for their own processes.
-
-It is meant for code you have reason to distrust but still want to run — a build
-script from a repository you just cloned, a dependency's install hook, an agent
-acting on your behalf. Within a sandbox, a command cannot read files the policy
-does not name, cannot write outside what it was given, cannot reach the network,
-cannot regain a capability, cannot put itself in a fresh user namespace, and
-cannot exceed the memory, process, or CPU limits it was given.
-
-It does **not** contain an attack on the kernel itself. Every layer here —
-Landlock, seccomp, namespaces, cgroups — is enforced by the kernel you are
-already running, so a kernel bug reachable from the calls the policy still
-permits is outside what Scute can promise. If your threat model includes kernel
-exploits, you want a virtual machine, and you want it as well as this rather
-than instead of it.
-
-Three more limits worth knowing. A sandboxed command shares your kernel's
-clocks, load and other side channels, so it can observe more than it can touch.
-A consequence of refusing unix-domain sockets is that a command which wants to
-create its own — a language server, a test harness talking to a helper — cannot;
-say so if that bites and it can become something a policy asks for.
-`scute learn` sees one run, not every path a program might take. And a policy is
-only as good as its narrowest rule: `read-write = ["/"]` is a policy, and it
-protects nothing.
-
-## Learning a policy
-
-Writing a least-privilege policy by hand is the main cost of using any sandbox:
-you guess, the command fails somewhere deep inside a library, you guess again.
-Scute will do the guessing by running the command once and writing down what it
-actually reached for.
+Don't write it by hand. Run the command once and let scute write down what it
+actually reached for:
 
 ```sh
 $ scute learn -- /bin/sh -c 'cat /etc/hostname > copy; ls > listing'
@@ -296,38 +116,43 @@ read-write = [".", "/dev/tty"]
 mode = "none"
 ```
 
-`scute learn --output scute.policy -- make` keeps the answer. The command then
-runs under it:
-
 ```sh
-scute run --policy scute.policy -- make
+scute learn --output scute.policy -- make     # keep it
+scute learn --network -- ./deploy.sh          # also record what it connects to
+scute run --policy scute.policy -- make       # then run under it
 ```
 
-It works by seccomp user notification: the kernel parks the command on each
-path-taking syscall and hands a description to scute, which reads the path,
-records it, and lets the call continue. No privilege, no ptrace, no cooperation
-from the command. Nothing is restricted during a learning run — that is the
-point — but the rest of the sandbox still applies, because the notifications and
-the denylist live in the same filter.
+Nothing is restricted during a learning run — that is the point. It needs no
+privileges and no cooperation from the command.
 
-One surprise worth knowing before you learn a policy for a shell script: bash
-sources `~/.bashrc` even non-interactively when its standard input is a socket,
-because it concludes it was started by a remote shell daemon. Under CI or an
-agent harness, that means your dotfiles — and everything they source — become
-part of what the sandbox needs. `scute learn < /dev/null`, or invoking the shell
-as `bash --norc`, keeps the answer about your program rather than your prompt.
+Two caveats. One run sees one path through a program: a build that downloads on
+a cold cache and not on a warm one teaches you the warm case. And learning
+writes a draft for you to read, not a policy to trust unread — narrow it, then
+check it.
 
-Two honest caveats. One run sees one path through a program: a build that
-downloads on a cold cache and not on a warm one will teach you the warm case.
-And the mechanism is sound for *watching* but not for *deciding* — a path can
-change between the notification and the syscall — which is exactly why learning
-writes a draft for you to read rather than enforcing what it saw.
+### Check it before you rely on it
 
-## When a policy is wrong
+```sh
+$ scute check --policy scute.policy . /usr/bin/gcc /etc/passwd /var/tmp/out
+.                             read write        (read-write /home/you/project)
+/usr/bin/gcc                  read execute      (read-execute /usr)
+/etc/passwd                   read              (read /etc)
+/var/tmp/out                  nothing           via /var/tmp
+```
 
-A sandboxed command that is refused something reports its own confusion —
-`Permission denied`, from somewhere deep inside a library — and leaves you
-guessing which line a policy is missing. Ask instead:
+`check` launches nothing and exits non-zero if any path is wholly denied, so it
+belongs in CI beside the policy it guards. A path that does not exist yet is
+answered by the nearest directory that does, because that is what governs
+creating it.
+
+`scute run --dry-run` prints the compiled plan instead of running it: canonical
+paths, the command that will actually run, the directory it runs in, and the
+names of the environment variables it will carry.
+
+### When a policy is wrong
+
+A refused command reports its own confusion — `Permission denied`, from
+somewhere deep inside a library. Ask scute instead:
 
 ```sh
 $ scute run --policy scute.policy --explain -- ./build.sh
@@ -344,33 +169,15 @@ read = ["/etc"]
 read-write = [".", "/dev/tty"]
 ```
 
-A seccomp filter runs at syscall entry, before the security modules decide
-anything, so scute sees the attempt Landlock went on to refuse. `--explain`
-enforces the policy exactly as usual — it only watches as well, at the cost of
-a round trip per path, which is why it is a flag rather than the default.
+`--explain` enforces the policy exactly as usual; it only watches as well, at
+the cost of a round trip per path, which is why it is a flag and not the
+default.
 
-## Policy
+## Policy reference
 
-A policy is a TOML document, validated whole before anything privileged
-happens. Anything the schema does not name -- an unknown table, an unknown key,
-a value of the wrong shape -- is an error rather than a line quietly ignored.
-
-```toml
-[filesystem]
-read-execute = ["/usr"]
-read = ["/etc"]
-read-write = ["."]
-
-[network]
-mode = "none"
-```
-
-```sh
-scute run --policy scute.policy -- /bin/sh -i
-scute run --policy scute.policy --dry-run -- /bin/sh -i   # show, run nothing
-```
-
-Every table and key it may contain:
+A policy is a TOML document, validated whole before anything happens. An unknown
+table, an unknown key, a value of the wrong shape or a duplicate key is an error
+— the policy is refused entire, never enforced in part.
 
 | Table | Key | Value | Meaning |
 |---|---|---|---|
@@ -382,131 +189,127 @@ Every table and key it may contain:
 | | `connect-tcp` | array of ports | the only TCP ports the command may connect to |
 | | `bind-tcp` | array of ports | the only TCP ports it may listen on |
 | | `proxy` | URL | set the proxy variables, and permit only its port |
+| | `allow` | array of `host:port` | the only addresses it may reach ([needs a privilege](#an-address-allowlist)) |
 | | `unix-sockets` | `true` / `false` | may the command open an AF_UNIX socket (default `false`) |
+| `[credentials.NAME]` | `secret-file` | path | a secret scute reads and the sandbox never sees |
+| | `destinations` | array of hosts | where the token it is swapped for is worth anything |
+| | `env` | variable name | where the sandbox finds its token |
+| | `ttl` | duration | how long the token lives (default: the run) |
 | `[limits]` | `memory` | size, e.g. `"2G"` | and no swapping around it |
 | | `processes` | integer | `pids.max` |
 | | `cpu-percent` | integer | 100 is one processor |
 | | `wall-clock` | duration, e.g. `"30s"` | stop the command if it runs longer |
-| `[audit]` | `events` | `["exec", "open"]` | what to record; `"connect"` waits for networking |
-| `[environment]` | `keep` | array of names | variables to pass, beyond the short default list |
+| `[audit]` | `events` | `["exec", "open"]` | what to record |
+| `[environment]` | `keep` | array of names | variables to pass, beyond the default list |
 
-A relative path means what it says from where scute was invoked and may not
-climb out of it. Anything the schema does not name — an unknown table, an
-unknown key, a value of the wrong shape, a duplicate key — is an error, and the
-policy is refused whole rather than enforced in part.
+A relative path means what it says from where scute was invoked, and may not
+climb out of it.
 
-`--dry-run` prints the compiled plan: canonical paths, the command that will
-actually run, and the directory it runs in. Reviewing that is cheaper than
-reasoning about what a policy implies.
+## Commands
 
-And when the question is "will my build be able to write there?", ask:
+| | |
+|---|---|
+| `scute run --policy FILE -- COMMAND` | run COMMAND under a policy |
+| `scute learn -- COMMAND` | run it unrestricted and write the policy it needed |
+| `scute check --policy FILE PATH ...` | what the policy permits at each path |
+| `scute doctor` | what this host can enforce (`--json` for scripts) |
+| `scute completions bash` | shell completions (`zsh`, `fish`) |
+| `scute man` | the manual page |
 
-```sh
-$ scute check --policy scute.policy . /usr/bin/gcc /etc/passwd /var/tmp/out
-.                             read write        (read-write /home/you/project)
-/usr/bin/gcc                  read execute      (read-execute /usr)
-/etc/passwd                   read              (read /etc)
-/var/tmp/out                  nothing           via /var/tmp
-```
+Useful flags to `run`:
 
-`check` is pure arithmetic over the policy — it launches nothing — and exits
-non-zero if any path is wholly denied, so it belongs in CI next to the policy
-it guards. A path that does not exist yet is answered by the nearest directory
-that does, because that is what governs creating it.
+| | |
+|---|---|
+| `--dry-run` | print the plan, run nothing |
+| `--explain` | also report every path the policy refused |
+| `--timeout 5m` | wall-clock limit, whatever the policy said |
+| `--keep-env NAME` | pass one more environment variable |
+| `--audit FILE` | write the audit trail here rather than to stderr |
+| `--allow-unix-sockets` | permit AF_UNIX sockets |
+| `--namespaces-only` | no filesystem restriction at all |
+| `--with COMMAND` | run COMMAND beside the sandbox while it runs |
+| `--broker-path PATH` | use this credential broker, not the one on `PATH` |
 
-## Building
+Exit statuses are the shell's, so scripts can read them:
 
-Scute needs SBCL and [ocicl](https://github.com/ocicl/ocicl) for its
-dependencies, which `ocicl.csv` pins.
+| status | meaning |
+|---|---|
+| the command's own | the command ran and ended by itself |
+| 128 + signal | a signal ended the command (137 = killed, often a memory limit) |
+| 124 | stopped for running past its time limit, as `timeout(1)` has it |
+| 64 | the command line asked for something impossible |
+| 65 | the policy is not one scute will accept |
+| 126 | the command exists but could not be executed |
+| 127 | the command does not exist |
+| 1 | a control this host could not establish |
 
-```sh
-ocicl install
-make          # builds ./scute
-make test     # builds it, then runs the suite against it
-```
+## Network
 
-`make` leaves the core uncompressed, which starts in around 20 ms rather than
-around 160 ms, at the cost of a larger file on disk. A tool you wrap around
-every command should not make you wait for it. Build with
-`SCUTE_COMPRESSION=9 make` for roughly a quarter of the size and the slower
-start.
-
-Some tests exercise the kernel directly, so they need a Linux host with
-unprivileged user namespaces and Landlock enabled.
-
-## The environment
-
-A sandbox that confines the filesystem and hands over `AWS_SECRET_ACCESS_KEY`
-has not confined much. Scute passes a short list and drops the rest:
-
-```
-HOME  LANG  LC_ALL  LC_CTYPE  LC_MESSAGES  LOGNAME  PATH  TERM  TZ  USER
-```
-
-Anything else is named, by the policy or on the command line:
+`mode = "none"` is the default and gives the command no network at all. When it
+needs one — a build fetching dependencies — there are four widths, narrowest
+last:
 
 ```toml
-[environment]
-keep = ["CARGO_HOME", "RUSTUP_HOME"]
+[network]
+mode = "host"                        # the host's network, shared
 ```
+
+```toml
+[network]
+mode = "host"
+connect-tcp = [443]                  # these ports only, kernel-enforced
+```
+
+```toml
+[network]
+mode = "host"
+proxy = "http://127.0.0.1:10210"     # this proxy, and nothing else
+```
+
+```toml
+[network]
+mode = "host"
+allow = ["api.github.com:443"]       # these addresses only
+```
+
+A port is not an address: `connect-tcp = [443]` means any host on 443. Naming a
+`proxy` sets `HTTPS_PROXY` and its friends for the command **and** permits TCP
+to that port alone, so a command that ignores the variables still cannot reach
+anything else. It is a proxy rather than a suggestion.
+
+`unix-sockets` is separate from all of this, because a network namespace does
+not stop a command reaching `systemd-resolved`, the system bus or an
+`ssh-agent` by socket path. It is refused by default and it is all or nothing:
+Landlock cannot scope a socket path, so there is no way to permit the agent and
+not the bus.
+
+### An address allowlist
+
+Everything else here works as an ordinary user. `allow` does not: it loads a BPF
+program (`CAP_BPF`) and attaches it to the sandbox's cgroup (`CAP_NET_ADMIN`).
 
 ```sh
-scute run --policy scute.policy --keep-env CARGO_HOME -- cargo build
+make egress        # builds, then grants -- one sudo setcap
 ```
 
-`--dry-run` lists the variable names a command will be given — names only,
-because a plan is the sort of thing that ends up in a log.
+For a package, `setcap cap_bpf,cap_net_admin+ep /usr/bin/scute` in `%post`, or a
+systemd unit with `AmbientCapabilities=CAP_BPF CAP_NET_ADMIN`. A policy asking
+for `allow` without the privilege is refused, not quietly downgraded to
+port-level; `scute doctor` says which you have.
 
-This is the one place where a sandbox that is stricter than you expect will bite
-first: a tool that needs `JAVA_HOME` or `SSH_AUTH_SOCK` will not find it until
-you say so. That is the trade, and it is deliberate — `SSH_AUTH_SOCK` in
-particular names an agent that will sign anything asked of it.
+Three things to know:
 
-## Where this sits
+- **Every rebuild loses it.** Capabilities live on the inode. Re-run `make
+  egress` after `make`.
+- **`strace` suppresses it.** ptrace prevents privilege elevation, so a policy
+  needing `allow` fails only when traced — which looks like a scute bug and is
+  not.
+- **`CAP_BPF` is close to root.** A cap-bearing binary everyone may execute
+  gives it to all of them. `chmod 750` and a group, or keep it to development
+  and CI hosts.
 
-Scute confines one command on your own kernel. That is the whole of it: a single
-unprivileged binary, no daemon, no container, no image to build, about 20 ms of
-overhead, and a policy you can read in one screen.
-
-The other way to sandbox an agent is a platform: run it in a container or a
-MicroVM, put a proxy in front of it, and manage the arrangement. NVIDIA's
-[OpenShell](https://github.com/NVIDIA/OpenShell) is that shape of tool, with a
-gateway and a Kubernetes path. Scute is the other bet, and the interesting
-difference is not size — it is where the boundary sits.
-
-|                           | Scute                                 | Container or MicroVM platform             |
-| ------------------------- | ------------------------------------- | ----------------------------------------- |
-| What is confined          | the process, by the kernel            | an image, by the runtime                  |
-| Filesystem the agent sees | yours, minus what the policy withheld | one you assembled, entirely               |
-| To start                  | `scute run --policy p -- cmd`         | build an image, start a daemon            |
-| Startup cost              | about 20 ms                           | image build, then seconds                 |
-| Needs root or a daemon    | no                                    | usually both                              |
-| Egress control            | port and address, unbypassable        | HTTP verbs and hosts, via a proxy         |
-| Writing the policy        | `scute learn` watches a real run      | by hand, then rebuild to test             |
-| If it is misconfigured    | the command fails at the syscall      | the agent quietly has more than you meant |
-
-A container boundary confines an *image*. The agent gets a filesystem you
-assembled, so "can it read `~/.ssh`" is answered by what you copied in, and
-everything you did copy in is fair game to whatever runs inside. Scute's
-boundary is the *process*, on the files you already have. Nothing is copied and
-nothing is built: the command runs against your real working tree while the
-kernel refuses every path the policy did not name. You can narrow a container
-the same way with bind mounts, but then the question becomes what you remembered
-to leave out, and you find out after an image build rather than at the first
-syscall.
-
-That difference is also why `learn` can work the way it does. It watches the
-same process, on the same paths, that you will afterwards run under the policy
-it writes — no image to keep in step, nothing to reproduce twice.
-
-What a proxy platform has that scute does not is HTTP-layer egress policy: it
-can tell `GET` from `POST` and allow one but not the other. Scute stops at the
-port. It stops there *unbypassably*, though, which is the part worth having —
-`mode = "host"` with a `proxy` makes that one address the only reachable thing
-in the kernel's opinion, not the library's. So you can put any proxy you like in
-front of a sandboxed agent, including one that does understand verbs, and know
-the agent cannot route around it. What the platform gives you in exchange is a
-daemon, an image, and a cluster.
+The sandboxed command still runs with every capability set empty. Scute installs
+the guard before dropping its own, and the tests check the result.
 
 ## Credentials the sandbox cannot read
 
@@ -517,16 +320,16 @@ calls an API holds that API's key, and so does everything it runs.
 [KeyFence](https://github.com/atgreen/keyfence) is a credential broker — an
 HTTPS proxy that holds the real secret and swaps it in on each request, so the
 agent holds only an opaque `kf_` token locked to one destination. Scute drives
-it. Say so in the policy:
+it:
 
 ```toml
 [network]
 mode = "host"
-proxy = "http://127.0.0.1:10210"    # the broker, and the only reachable address
+proxy = "http://127.0.0.1:10210"       # the broker: the only reachable address
 
 [credentials.anthropic]
 secret-file = "~/.secrets/anthropic"   # read by scute, never by the sandbox
-destinations = ["api.anthropic.com"]   # what the token is worth anything at
+destinations = ["api.anthropic.com"]   # where the token is worth anything
 env = "ANTHROPIC_API_KEY"              # where the sandbox finds its token
 ```
 
@@ -534,17 +337,16 @@ env = "ANTHROPIC_API_KEY"              # where the sandbox finds its token
 scute run --policy agent.policy -- claude
 ```
 
-Scute reads the secret in the supervisor, mints a destination-locked token,
-hands the sandbox that token and the CA certificate its runtimes must trust,
-runs the command, and revokes the token afterwards. The sandboxed command's
-environment holds `ANTHROPIC_API_KEY=kf_dc8b83…` and nothing else of yours.
+Scute reads the secret, mints a destination-locked token, hands the sandbox that
+token and the CA certificate its runtimes must trust, runs the command, and
+revokes the token afterwards. The command's environment holds
+`ANTHROPIC_API_KEY=kf_dc8b83…` and nothing else of yours.
 
-The part no proxy can do for itself is the reason to run it under scute.
-`HTTPS_PROXY` is a convention: an agent that ignores it, a subprocess that never
-read it, or a prompt-injected one told to avoid it connects straight out and the
-broker never sees the request. Here the kernel permits the proxy's port and
-refuses every other address, so going around the swap is not something the
-command can choose. Nor can it mint tokens of its own — the broker's control
+The reason to run the broker under scute is that `HTTPS_PROXY` is only a
+convention. An agent that ignores it, a subprocess that never read it, or a
+prompt-injected one told to avoid it connects straight out, and a proxy never
+sees the request. Here the kernel permits the proxy's port and refuses every
+other address. Nor can the command mint tokens of its own — the broker's control
 port is not the proxy port, so it is refused like anything else:
 
 ```console
@@ -553,28 +355,18 @@ bash: /dev/tcp/127.0.0.1/10212: Permission denied
 ```
 
 `scute run --dry-run` prints which file a policy would read before it reads it,
-and `scute doctor` says whether a broker is there to attach to.
-
-Attaching to a broker means handing it your plaintext credential, so scute
-checks what is on the port before it does: a broker is recognised by answering
-its own control API, not by returning 200 to a health check, which plenty of
-things would. Something else on that port is an error, and the secret stays
-unread.
-
-```console
-$ scute run --policy agent.policy -- claude
-scute: Sandbox setup failed at start-broker: something is listening on port
-10212, but it does not answer a credential broker's control API.  Scute will
-not hand a credential to it
-```
+and `scute doctor` says whether a broker is there to attach to. Attaching means
+handing a broker your plaintext credential, so scute checks what is on the port
+first: a broker is recognised by answering its own control API, not by returning
+200 to a health check, which plenty of things would. Anything else there is an
+error and the secret stays unread.
 
 ### Run the broker as a service
 
-Scute attaches to a broker that is already running, and starts one per run only
-when there is none. A service is the better arrangement: no broker startup on
-each run, one certificate authority that stays put between runs, and the process
-holding your secrets confined by systemd rather than inheriting whatever scute
-was started with.
+Scute attaches to a broker already running, and starts one per run only when
+there is none. A service is better: no startup per run, one certificate
+authority that stays put, and systemd confining the process that holds your
+secrets.
 
 ```sh
 cp releng/keyfence.service ~/.config/systemd/user/
@@ -583,72 +375,77 @@ systemctl --user enable --now keyfence
 
 The shipped unit listens on loopback only, generates a control API key on first
 start where scute looks for it, and runs the broker with `NoNewPrivileges`,
-`ProtectSystem=strict`, an empty capability bounding set, and a system call
+`ProtectSystem=strict`, an empty capability bounding set and a system call
 filter — the process holding the real credentials should be able to do less than
 the agent it protects, not more.
 
-Two properties fall out, each enforced by something that does not trust the
-other: the real credential was never in the sandbox, because scute never put it
-there; and the token is worthless anywhere but its destination, because that is
-what the broker does with it.
+### Anything else beside the sandbox
 
-## Anything else beside the sandbox
-
-`--with` starts any command beside the sandbox and stops it afterwards — the
-broker arrangement above, done by hand, or anything else the sandboxed command
-needs to talk to:
+`--with` starts any command beside the sandbox, waits for the port the policy's
+proxy names to answer, and stops it when the sandbox is done:
 
 ```sh
-scute run --policy agent.policy --with 'keyfence serve' -- claude
+scute run --policy agent.policy --with keyfence -- claude
 ```
 
-It waits until the port the policy's proxy names answers before running the
-sandboxed command, so nothing races the thing it depends on.
-
-The command comes from the command line and **never from a policy**. A policy
-travels with the code being sandboxed; one that could start a process on the host
+The command comes from the command line and never from a policy: a policy
+travels with the code being sandboxed, and one that could start a host process
 would be a way to run anything at all. (`--with` splits on spaces, so anything
-with quoting belongs in a small script.) A `[credentials]` policy is the
-exception that proves the rule: it cannot name a program, only ask for the one
+needing quotes belongs in a small script.) A `[credentials]` policy is the
+exception that proves the rule — it cannot name a program, only ask for the one
 broker scute knows how to drive.
 
-```toml
-[filesystem]
-read-execute = ["/usr"]
-read = ["/etc", "/proc"]
-read-write = [".", "/dev/null"]
+## Environment
 
-[network]
-mode = "host"
-proxy = "http://127.0.0.1:10210"     # KeyFence; the only reachable port
+A sandbox that confines the filesystem and hands over `AWS_SECRET_ACCESS_KEY`
+has not confined much. Scute passes a short list and drops the rest:
 
-[environment]
-keep = ["ANTHROPIC_API_KEY"]         # holding a kf_ token, not a key
+```
+HOME  LANG  LC_ALL  LC_CTYPE  LC_MESSAGES  LOGNAME  PATH  TERM  TZ  USER
 ```
 
-The agent cannot read your files, cannot reach the network except through the
-proxy, and holds no credential worth stealing. Each of those is enforced by
-something that does not trust the other two.
+Anything else is named:
 
-## When something will not run
+```toml
+[environment]
+keep = ["CARGO_HOME", "RUSTUP_HOME"]
+```
 
-| What you see | What it usually means |
-|---|---|
-| `Permission denied` from the command | The policy is missing a path. Re-run with `--explain` and it will tell you which, and the lines to add. |
-| `/dev/null: Permission denied` | Landlock grants nothing implicitly. Name `/dev/null`, and usually `/proc`, in the policy. |
-| A binary you just built will not run | A directory granted `read-write` can hold it; running it needs `read-write-execute`. |
-| `This build cannot enforce resource limits` | Cgroup v2 will not let a cgroup holding processes give controllers to its children. Run scute in a cgroup of its own: `systemd-run --user --scope -p Delegate=yes scute run ...` |
-| `unix_listener: socket: Operation not permitted` | Something in the command — often a shell's startup files starting an `ssh-agent` — wants a unix-domain socket, which is refused by default. `--allow-unix-sockets`, or `[network] unix-sockets = true`. |
-| A learned policy is full of your dotfiles | bash sources `~/.bashrc` non-interactively when stdin is a socket, as under CI. Run with `< /dev/null`, or use `bash --norc`. |
-| A tool cannot find its home directory or cache | The environment is filtered. Name the variable: `--keep-env JAVA_HOME`, or `[environment] keep = [...]`. |
-| `command not found` for something on your `PATH` | The command must be an absolute path: a sandbox whose command is chosen by searching `PATH` depends on the environment it inherited. |
-| Strange runtime failures after editing `scute.asd` | Fasls compiled against the previous component order. `make` recompiles everything when the system definition changes, but `make clean-cache` is the hammer if one slips through. |
-| `cannot start a sandbox from inside one` | Exactly that: a sandbox refuses the syscalls a sandbox needs, so scute does not nest. Run it from outside. |
-| `scute doctor` exits non-zero | It names the missing control. Landlock needs Linux 5.13 or newer, and unprivileged user namespaces must be enabled. |
+```sh
+scute run --policy scute.policy --keep-env CARGO_HOME -- cargo build
+```
+
+This is where a sandbox stricter than you expect bites first: a tool wanting
+`JAVA_HOME` or `SSH_AUTH_SOCK` will not find it until you say so. That is the
+trade, and `SSH_AUTH_SOCK` in particular names an agent that will sign anything
+asked of it.
+
+## Limits and timeouts
+
+```toml
+[limits]
+memory = "2G"          # and no swapping around it
+processes = 256
+cpu-percent = 200      # two processors' worth
+wall-clock = "5m"      # or --timeout 5m
+```
+
+A command stopped for running too long exits **124**. It is sent `SIGTERM` and
+given five seconds, unless it has no handler for `SIGTERM` — being PID 1 of its
+namespace it would never see it — in which case it is killed immediately.
+
+A wall-clock limit needs nothing of the host. The rest are cgroup v2, which will
+not let a cgroup hold processes and give controllers to its children at the same
+time, so they need scute to have a cgroup of its own:
+
+```sh
+systemd-run --user --scope -p Delegate=yes scute run --policy scute.policy -- make
+```
+
+Where that is not the case, asking for limits is refused with the remedy in the
+message rather than quietly ignored.
 
 ## Auditing
-
-A policy can ask for a record of what the sandbox did:
 
 ```toml
 [audit]
@@ -663,25 +460,135 @@ $ head -3 trail.jsonl
 {"event": "open", "access": "read", "path": "/etc/ld.so.cache"}
 ```
 
-One JSON object per line, so reading it needs nothing but the tools you have.
-Without `--audit` it goes to stderr. It is the same watching `learn` and
-`--explain` use, so it needs no privileges — and costs a round trip per event,
-which is why a policy has to ask.
+One JSON object per line. Without `--audit` it goes to stderr. It costs a round
+trip per event, which is why a policy has to ask for it.
 
-`"connect"` is in the design and refused here: v0 gives a sandbox no network, so
-there would be nothing to record.
+## When something will not run
 
-## Completions and the manual
+| What you see | What it usually means |
+|---|---|
+| `Permission denied` from the command | The policy is missing a path. Re-run with `--explain` and it names them, with the lines to add. |
+| `/dev/null: Permission denied` | Nothing is granted implicitly. Name `/dev/null`, and usually `/proc`. |
+| A binary you just built will not run | `read-write` can hold it; running it needs `read-write-execute`. |
+| `This build cannot enforce resource limits` | Scute needs a cgroup of its own: `systemd-run --user --scope -p Delegate=yes scute run ...` |
+| `unix_listener: socket: Operation not permitted` | Something wants a unix-domain socket — often a shell's startup files starting an `ssh-agent`. `--allow-unix-sockets`, or `[network] unix-sockets = true`. |
+| A learned policy is full of your dotfiles | bash sources `~/.bashrc` non-interactively when stdin is a socket, as under CI. Learn with `< /dev/null`, or `bash --norc`. |
+| A tool cannot find its home or cache | The environment is filtered. `--keep-env JAVA_HOME`, or `[environment] keep = [...]`. |
+| `command not found` for something on your `PATH` | The command must be an absolute path: a sandbox whose command is found by searching `PATH` depends on the environment it inherited. |
+| A policy needing `allow` fails only under `strace` | ptrace suppresses file capabilities. Not a scute bug. |
+| `cannot start a sandbox from inside one` | Exactly that: a sandbox refuses the syscalls a sandbox needs. Run it from outside. |
+| `scute doctor` exits non-zero | It names the missing control. Landlock needs Linux 5.13 or newer, and unprivileged user namespaces must be enabled. |
+
+## What it protects, and what it does not
+
+Within a sandbox, a command cannot read files the policy does not name, cannot
+write outside what it was given, cannot reach the network beyond what it was
+allowed, cannot regain a capability, cannot put itself in a fresh user
+namespace, and cannot exceed the memory, process or CPU limits it was given.
+
+Scute needs no privileges of its own for any of that: it is not setuid, carries
+no file capabilities, and expects no root. Everything it installs, an ordinary
+user may install for their own processes.
+
+It does **not** contain an attack on the kernel itself. Every layer here —
+Landlock, seccomp, namespaces, cgroups — is enforced by the kernel you are
+already running, so a kernel bug reachable from the calls a policy still permits
+is outside what scute can promise. If your threat model includes kernel
+exploits, you want a virtual machine, and you want it as well as this rather
+than instead of it.
+
+Three more limits worth knowing. A sandboxed command shares your kernel's
+clocks and load, so it can observe more than it can touch. A command that wants
+to create its own unix-domain socket — a language server, a test harness talking
+to a helper — cannot, unless you allow sockets wholesale. And a policy is only
+as good as its narrowest rule: `read-write = ["/"]` is a policy, and it protects
+nothing.
+
+## What it costs
+
+Best of three passes of 25 runs each on one developer machine, so read them as
+proportions rather than promises:
+
+| | |
+|---|---|
+| `/bin/true`, no sandbox | 0.9 ms |
+| `scute --version` — starting up, sandboxing nothing | 21.3 ms |
+| `scute run --namespaces-only -- /bin/true` | 22.2 ms |
+| `scute run --policy scute.policy -- /bin/true` | 24.3 ms |
+| the same with `--explain` | 32.2 ms |
+
+The sandbox is the cheap part: about a millisecond for the process layer, two or
+three more to read a policy and install a Landlock ruleset. What you pay for is
+scute starting at all, which is one Lisp image loading.
+
+## How it compares
+
+The other way to sandbox an agent is a platform: a container or a MicroVM, a
+proxy in front of it, and the arrangement to manage. NVIDIA's
+[OpenShell](https://github.com/NVIDIA/OpenShell) is that shape of tool, with a
+gateway and a Kubernetes path. Scute is the other bet, and the difference is not
+size — it is where the boundary sits.
+
+|                           | Scute                                 | Container or MicroVM platform             |
+| ------------------------- | ------------------------------------- | ----------------------------------------- |
+| What is confined          | the process, by the kernel            | an image, by the runtime                  |
+| Filesystem the agent sees | yours, minus what the policy withheld | one you assembled, entirely               |
+| To start                  | `scute run --policy p -- cmd`         | build an image, start a daemon            |
+| Startup cost              | about 20 ms                           | image build, then seconds                 |
+| Needs root or a daemon    | no                                    | usually both                              |
+| Egress control            | port and address, unbypassable        | HTTP verbs and hosts, via a proxy         |
+| Writing the policy        | `scute learn` watches a real run      | by hand, then rebuild to test             |
+| If it is misconfigured    | the command fails at the syscall      | the agent quietly has more than you meant |
+
+A container boundary confines an *image*: whether the agent can read `~/.ssh` is
+answered by what you copied in, and everything you did copy in is available to
+whatever runs inside. Scute's boundary is the *process*, on the files you already
+have — nothing copied, nothing built, the command running against your real
+working tree while the kernel refuses every path the policy did not name. You
+can narrow a container with bind mounts, but then the question is what you
+remembered to leave out, and you find out after an image build rather than at the
+first syscall. It is also why `learn` works: it watches the same process, on the
+same paths, that will later run under the policy it writes.
+
+What a proxy platform has that scute does not is HTTP-layer egress policy — it
+can tell `GET` from `POST`. Scute stops at the port, but it stops there
+unbypassably, so you can put any proxy you like in front of a sandboxed agent,
+including one that does understand verbs, and know the agent cannot route around
+it.
+
+## Building from source
+
+```sh
+ocicl install
+make          # builds ./scute
+make test     # builds it, then runs the suite
+make check    # the suite, then the smoke test
+```
+
+`make` leaves the image uncompressed, which starts in around 20 ms rather than
+around 160 ms at the cost of a larger file; `SCUTE_COMPRESSION=9 make` trades
+back. Some tests exercise the kernel directly, so they need a Linux host with
+unprivileged user namespaces and Landlock.
+
+Shell completions and the manual page are generated from scute's own command
+tree, so a new option appears in both the moment it exists:
 
 ```sh
 source <(scute completions bash)     # or zsh, or fish
 scute man | man -l -
+make completions man                 # write them out; the packages install them
 ```
 
-Both are generated from scute's own command tree rather than maintained beside
-it, so a new option is completable and documented the moment it exists.
-`make completions` and `make man` write them out, and the packages install
-them.
+## Status
+
+Scute is v0 and runs. The process, filesystem, seccomp, limit, network,
+credential and audit-trail machinery described above all work. One piece of the
+design is not built: `[audit]` cannot yet record `"connect"` events, and a policy
+asking for one is refused rather than handed a weaker sandbox than it asked for.
+
+`docs/design.md` is the architecture and the reasoning behind it. The task graph
+lives in [beads](https://github.com/steveyegge/beads); `bd ready` shows what is
+claimable.
 
 ## Author and License
 

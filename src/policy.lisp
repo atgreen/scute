@@ -728,8 +728,9 @@ was asked for."
     (when (and audit (member :connect (audit-policy-events audit)))
       (error 'control-not-implemented
              :control "auditing connections"
-             :detail "v0 gives a sandbox no network, so there are no ~
-                      connections to record; the rest of [audit] works"))))
+             :detail "the audit trail records paths, and a connection is not ~
+                      one; the rest of [audit] works.  Meanwhile `scute learn ~
+                      --network` reports what a command connects to"))))
 
 (defun print-launch-plan (plan &optional (stream *standard-output*))
   "Print PLAN as the decision it is, for review before anything runs."

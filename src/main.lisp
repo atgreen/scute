@@ -244,7 +244,7 @@ argument gets you.")
                ("Run a shell that can read the system and write only here:"
                 . "scute run --read-execute /usr --read /etc --read-write . -- sh -i")
                ("Sandbox an agent whose credentials a proxy holds:"
-                . "scute run --policy agent.policy --with 'keyfence serve' -- claude")
+                . "scute run --policy agent.policy --with keyfence -- claude")
                ("Find out what a policy is refusing:"
                 . "scute run --policy scute.policy --explain -- ./build.sh")
                ("Run with the process layer alone, filesystem unrestricted:"

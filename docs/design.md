@@ -291,6 +291,17 @@ with every capability set empty. A policy asking for it on a host without those
 capabilities is refused, with the `setcap` line in the message, rather than
 falling back to port-level and calling it enforcement.
 
+How that privilege is granted was a real decision. File capabilities on the
+binary, granted once by `setcap`, are the shape that fits: they hand Scute
+exactly two capabilities, and no more. The alternatives were considered and
+rejected. A setuid shell script grants nothing at all -- Linux has ignored the
+setuid bit on anything with a shebang for decades, because re-opening the
+interpreted file is racy, and it fails silently rather than loudly. A setuid C
+wrapper is worse than the problem: it hands Scute root where file capabilities
+hand it two, and a wrapper that runs `setcap` on whatever path it is given is a
+privilege escalation with a helpful name. Capabilities living on the inode has
+one consequence worth remembering: every rebuild loses them.
+
 The program is written in Whistler, which compiles Lisp to BPF bytecode with no
 C toolchain in the path. Compiling it needs nothing of the kernel, so the tests
 can check that it compiles, that it references its map, and that the key Scute
@@ -392,6 +403,26 @@ The arrangement:
 `scute run --dry-run` prints which files a policy would read before any of them
 is opened, because a policy asking Scute to read something the sandbox itself
 could not reach is the one place a policy widens what the operator is trusting.
+
+## Startup latency
+
+Scute is meant to wrap every command, so its own startup is the overhead a user
+actually feels: the sandbox is about a millisecond for the process layer and two
+or three more to read a policy and install a Landlock ruleset, against some 20 ms
+to start the image at all. Two measurements got it there, recorded here because
+they are the ones to repeat if this regresses.
+
+Saving an SBCL image discards its CLOS dispatch caches, so the first call to each
+generic function recomputes them: building the command tree and parsing one
+command line cost about 35 ms cold, and about 6 ms once warmed. And a PEG parser
+compiles its rules on first use, which put another 29 ms into reading a small
+policy. Both are paid at build time now -- `scute.asd` exercises the command line
+and parses a policy before dumping the image -- and a policy run went from 79 ms
+to 24 ms without a line of the sandbox changing.
+
+The image is left uncompressed by default for the same reason: around 20 ms to
+start rather than around 160 ms, at the cost of a larger file. Compression level
+barely moves either number, because the cost is decompressing the core at all.
 
 ## Module map
 
