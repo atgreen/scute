@@ -41,8 +41,8 @@ killed from outside; the cgroup is what tells them apart."
 ;;; child cannot afford.
 
 (defstruct (launch-resources (:constructor %make-launch-resources))
-  command path argv envp envp-count landlock-ruleset seccomp-program
-  errno-location
+  command path directory argv envp envp-count landlock-ruleset seccomp-program
+  errno-location learn-up-read learn-up-write learn-go-read learn-go-write
   sync-read sync-write status-read status-write
   sync-buffer status-buffer
   cap-header cap-data cap-last)
@@ -55,6 +55,8 @@ killed from outside; the cgroup is what tells them apart."
 (defconstant +stage-capset+        4)
 (defconstant +stage-no-new-privs+  5)
 (defconstant +stage-seccomp+       7)
+(defconstant +stage-learn-handshake+ 9)
+(defconstant +stage-chdir+        10)
 (defconstant +stage-landlock+      8)
 (defconstant +stage-execve+        6)
 
@@ -67,6 +69,8 @@ killed from outside; the cgroup is what tells them apart."
     (#.+stage-capset+        :child-clear-capabilities)
     (#.+stage-no-new-privs+  :child-set-no-new-privs)
     (#.+stage-seccomp+       :child-install-seccomp-filter)
+    (#.+stage-learn-handshake+ :child-hand-over-listener)
+    (#.+stage-chdir+         :child-enter-directory)
     (#.+stage-landlock+      :child-restrict-self)
     (#.+stage-execve+        :child-execve)
     (t                       :child-unknown)))
@@ -86,7 +90,7 @@ killed from outside; the cgroup is what tells them apart."
     (cffi:foreign-free (cffi:mem-aref vector :pointer index)))
   (cffi:foreign-free vector))
 
-(defun acquire-launch-resources (plan)
+(defun acquire-launch-resources (plan &key learn)
   "Preallocate everything the child will need to enact PLAN.
 The Landlock ruleset is built here too: the parent owns every resource, and
 the child only uses what is already in its hands."
@@ -98,27 +102,41 @@ the child only uses what is already in its hands."
          ;; Built before the child exists, so a filter that will not build is a
          ;; launch that does not happen.  The program is shared and read-only:
          ;; these resources borrow it rather than owning it.
-         (filter (v0-seccomp-filter)))
+         (watched nil)
+         (filter (if learn
+                     (multiple-value-bind (program table) (learn-seccomp-filter)
+                       (setf watched table)
+                       program)
+                     (seccomp-filter-program (v0-seccomp-filter)))))
     (multiple-value-bind (sync-read sync-write) (make-sync-pipe)
       (multiple-value-bind (status-read status-write) (make-sync-pipe)
         (multiple-value-bind (cap-header cap-data) (make-empty-capability-request)
-          (%make-launch-resources
+         (multiple-value-bind (learn-up-read learn-up-write)
+             (if learn (make-sync-pipe) (values nil nil))
+          (multiple-value-bind (learn-go-read learn-go-write)
+              (if learn (make-sync-pipe) (values nil nil))
+          (values
+           (%make-launch-resources
            :command command
            :path (cffi:foreign-string-alloc path)
+           :directory (cffi:foreign-string-alloc (launch-plan-directory plan))
            :argv (foreign-string-vector command)
            :envp (foreign-string-vector environment)
            :envp-count (length environment)
            :sync-read sync-read :sync-write sync-write
            :status-read status-read :status-write status-write
            :sync-buffer (cffi:foreign-alloc :uint8 :count 1 :initial-element 0)
-           :status-buffer (cffi:foreign-alloc :uint8 :count 2 :initial-element 0)
+           :status-buffer (cffi:foreign-alloc :uint8 :count 8 :initial-element 0)
            ;; Where errno lives for this thread, resolved now: reading it in the
            ;; child must not allocate, and the child is this same thread.
            :errno-location (cffi:foreign-funcall "__errno_location" :pointer)
            :cap-header cap-header :cap-data cap-data
            :cap-last last-capability
            :landlock-ruleset ruleset
-           :seccomp-program (seccomp-filter-program filter)))))))
+           :seccomp-program filter
+            :learn-up-read learn-up-read :learn-up-write learn-up-write
+            :learn-go-read learn-go-read :learn-go-write learn-go-write)
+           watched))))))))
 
 (defun release-launch-resources (resources)
   "Release every parent-side resource RESOURCES holds."
@@ -126,9 +144,14 @@ the child only uses what is already in its hands."
                     (launch-resources-sync-write resources)
                     (launch-resources-status-read resources)
                     (launch-resources-status-write resources)
-                    (launch-resources-landlock-ruleset resources)))
+                    (launch-resources-landlock-ruleset resources)
+                    (launch-resources-learn-up-read resources)
+                    (launch-resources-learn-up-write resources)
+                    (launch-resources-learn-go-read resources)
+                    (launch-resources-learn-go-write resources)))
     (when (and fd (<= 0 fd)) (%close fd)))
   (cffi:foreign-string-free (launch-resources-path resources))
+  (cffi:foreign-string-free (launch-resources-directory resources))
   (free-foreign-string-vector (launch-resources-argv resources)
                               (length (launch-resources-command resources)))
   (free-foreign-string-vector (launch-resources-envp resources)
@@ -184,8 +207,29 @@ collector."
         (die +stage-no-new-privs+ +child-exit-setup-failed+))
       ;; Seccomp before Landlock, and both after no_new_privs, which each
       ;; requires.  The filter allows landlock_restrict_self and execve.
-      (when (minusp (%seccomp-install (launch-resources-seccomp-program resources)))
-        (die +stage-seccomp+ +child-exit-setup-failed+))
+      (let ((listener (%seccomp-install (launch-resources-seccomp-program resources)
+                                        (if (launch-resources-learn-up-write resources)
+                                            +seccomp-filter-flag-new-listener+
+                                            0))))
+        (when (minusp listener)
+          (die +stage-seccomp+ +child-exit-setup-failed+))
+        ;; Learning: hand the listener to the supervisor, wait for it to have
+        ;; it, and let go.  A command that kept the listener could answer its
+        ;; own notifications.
+        (when (launch-resources-learn-up-write resources)
+          (setf (cffi:mem-ref status-buffer :int32 0) listener)
+          (unless (= 4 (%write (launch-resources-learn-up-write resources)
+                               status-buffer 4))
+            (die +stage-learn-handshake+ +child-exit-setup-failed+))
+          (unless (= 1 (%read (launch-resources-learn-go-read resources)
+                              status-buffer 1))
+            (die +stage-learn-handshake+ +child-exit-setup-failed+))
+          (%close listener)))
+      ;; The plan names the directory the command runs in, and --dry-run says
+      ;; so; entering it here is what makes that true.  Before Landlock, so that
+      ;; a policy need not grant anything merely to arrive.
+      (when (minusp (%chdir (launch-resources-directory resources)))
+        (die +stage-chdir+ +child-exit-setup-failed+))
       ;; Landlock last, and only after no_new_privs: restrict_self requires it.
       (let ((ruleset (launch-resources-landlock-ruleset resources)))
         (when ruleset
@@ -202,6 +246,21 @@ collector."
   "How long a sandboxed command is given to act on a stop signal before it is
 killed.  A command is free to trap a signal and exit as it likes; it is not
 free to ignore one forever.")
+
+(defun observe-child (resources pid observations)
+  "Take the listener the child made, let it go, and watch it until it ends.
+
+The child is parked waiting for this: it will not exec until the supervisor
+holds the listener, because a command that kept it could answer its own
+notifications and wave anything through."
+  (cffi:with-foreign-object (buffer :uint8 4)
+    (unless (= 4 (%read (launch-resources-learn-up-read resources) buffer 4))
+      (setup-error :learn-handshake
+                   :detail "the child did not hand over its listener"))
+    (let ((listener (steal-listener pid (cffi:mem-ref buffer :int32 0))))
+      (setf (cffi:mem-ref buffer :uint8 0) 1)
+      (%write (launch-resources-learn-go-write resources) buffer 1)
+      (watch-child listener pid observations))))
 
 (defun call-with-forwarded-signals (pid function)
   "Run FUNCTION with terminating signals forwarded to PID, then enforced.
@@ -274,7 +333,7 @@ the child failed at and the errno it failed with."
       (make-sandbox-result pid (exit-status status) nil events)
       (make-sandbox-result pid nil (termination-signal status) events)))
 
-(defun supervise-child (resources pid)
+(defun supervise-child (resources pid &optional observe)
   "Release PID into the sandbox and supervise it until it ends.
 Returns its raw wait status, and the stage it failed at if it never reached
 the command.  Reaping PID is this function's job alone: nothing above it may
@@ -289,6 +348,7 @@ signal a pid that has already been collected."
     (setf (launch-resources-sync-write resources) nil)
     (%close (launch-resources-status-write resources))
     (setf (launch-resources-status-write resources) nil)
+    (when observe (funcall observe pid))
     (multiple-value-bind (stage child-errno) (read-child-stage resources)
       (values (wait-for-child pid) stage child-errno))))
 
@@ -343,20 +403,27 @@ copy of it and would write it a second time."
       (run-child resources))                ; never returns
     pid))
 
-(defun run-launch-plan (plan)
+(defun run-launch-plan (plan &key learn)
   "Enact PLAN: launch its command in the sandbox it describes and supervise it.
 
 Everything PLAN asks for is established before the command exists.  A control
-PLAN requests that this build cannot install is an error, not an omission."
+PLAN requests that this build cannot install is an error, not an omission.
+
+With LEARN, the command runs under a filter that reports every path it reaches
+for, and what it reached for comes back as a second value."
   (preflight plan)
   ;; Acquisition order follows the design's startup sequence, and every step is
   ;; unwound in reverse by the unwind-protects below.
   (let ((cgroup (let ((limits (launch-plan-limits plan)))
                   (and limits (create-sandbox-cgroup limits))))
-        (resources nil))
+        (resources nil)
+        (observations nil))
     (unwind-protect
          (progn
-           (setf resources (acquire-launch-resources plan))
+           (multiple-value-bind (acquired watched)
+               (acquire-launch-resources plan :learn learn)
+             (setf resources acquired
+                   observations (and learn (make-observations watched))))
            (let ((pid (spawn-sandbox-child resources))
                  (reaped nil))
              (unwind-protect
@@ -367,14 +434,19 @@ PLAN requests that this build cannot install is an error, not an omission."
                     (drop-all-capabilities)
                     (verify-no-capabilities)
                     (multiple-value-bind (status stage child-errno)
-                        (supervise-child resources pid)
+                        (supervise-child resources pid
+                                         (when learn
+                                           (lambda (child)
+                                             (observe-child resources child observations))))
                       (setf reaped t)
                       (when stage
                         (error 'child-failure :operation (child-stage-name stage)
                                               :status status
                                               :errno child-errno))
-                      (classify-wait-status pid status
-                                            (and cgroup (read-cgroup-events cgroup)))))
+                      (values (classify-wait-status
+                               pid status
+                               (and cgroup (read-cgroup-events cgroup)))
+                              observations)))
                ;; Setup failed with the child still parked on the pipe, or the
                ;; wait was abandoned: it must not be left behind.  Once PID has
                ;; been reaped it is no longer ours to signal.

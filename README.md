@@ -20,6 +20,8 @@ kernel is addressed directly — `clone3`, `landlock_create_ruleset`, `capset`,
 
 ## Status
 
+`scute learn` writes the policy for you by watching a command run; see below.
+
 Scute is v0 and unfinished, but it runs. Three layers are in place — the process
 layer (fresh user, mount, PID, UTS, and network namespaces; every capability set
 emptied; `no_new_privs`; the sandbox dies with its supervisor), the filesystem
@@ -78,6 +80,48 @@ refuses to launch rather than hand back a weaker sandbox than the policy asked
 for. That is the last of v0 still outstanding. `docs/design.md` is the architecture. The task graph
 lives in [beads](https://github.com/steveyegge/beads); `bd ready` shows what is
 claimable.
+
+## Learning a policy
+
+Writing a least-privilege policy by hand is the main cost of using any sandbox:
+you guess, the command fails somewhere deep inside a library, you guess again.
+Scute will do the guessing by running the command once and writing down what it
+actually reached for.
+
+```sh
+$ scute learn -- /bin/sh -c 'cat /etc/hostname > copy; ls > listing'
+# Learned by watching /bin/sh -c cat /etc/hostname > copy; ls > listing run once.
+# A starting point, not a finished policy: one run sees one path through
+# the program.  Narrow it, then check it with scute check.
+
+[filesystem]
+read = ["/etc"]
+read-execute = ["/usr"]
+read-write = [".", "/dev/tty"]
+
+[network]
+mode = "none"
+```
+
+`scute learn --output scute.policy -- make` keeps the answer. The command then
+runs under it:
+
+```sh
+scute run --policy scute.policy -- make
+```
+
+It works by seccomp user notification: the kernel parks the command on each
+path-taking syscall and hands a description to scute, which reads the path,
+records it, and lets the call continue. No privilege, no ptrace, no cooperation
+from the command. Nothing is restricted during a learning run — that is the
+point — but the rest of the sandbox still applies, because the notifications and
+the denylist live in the same filter.
+
+Two honest caveats. One run sees one path through a program: a build that
+downloads on a cold cache and not on a warm one will teach you the warm case.
+And the mechanism is sound for *watching* but not for *deciding* — a path can
+change between the notification and the syscall — which is exactly why learning
+writes a draft for you to read rather than enforcing what it saw.
 
 ## Policy
 

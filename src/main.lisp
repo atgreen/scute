@@ -201,6 +201,38 @@ argument gets you.")
    :examples '(("Will the build be able to write here?"
                 . "scute check --policy scute.policy . /usr/bin/gcc /etc/passwd"))))
 
+(defun learn-handler (cmd)
+  (reporting-failures
+   (let ((command (clingon:command-arguments cmd))
+         (output (clingon:getopt cmd :output)))
+     (unless command
+       (usage-error "scute learn needs a command to watch: learn -- COMMAND ..."))
+     (multiple-value-bind (result observations)
+         (run-launch-plan (compile-command-launch-plan command '()) :learn t)
+       (let ((rules (learned-rules observations (sb-posix:getcwd))))
+         (if output
+             (with-open-file (stream output :direction :output
+                                            :if-exists :supersede
+                                            :if-does-not-exist :create)
+               (write-learned-policy rules stream :command command)
+               (format *error-output* "~&scute: wrote ~A~%" output))
+             (write-learned-policy rules *standard-output* :command command)))
+       (uiop:quit (command-exit-status result) t)))))
+
+(defun make-learn-command ()
+  (clingon:make-command
+   :name "learn"
+   :description "Watch a command and write the policy it would have needed"
+   :usage "[--output FILE] -- COMMAND [ARGUMENT ...]"
+   :options (list (clingon:make-option
+                   :string :short-name #\o :long-name "output" :key :output
+                   :description "Write the policy here instead of to standard output"))
+   :handler #'learn-handler
+   :examples '(("Find out what a build actually touches:"
+                . "scute learn -- make")
+               ("Keep the answer:"
+                . "scute learn --output scute.policy -- ./run-tests"))))
+
 ;;── doctor ─────────────────────────────────────────────────────────────────────
 
 (defun doctor-handler (cmd)
@@ -234,8 +266,8 @@ argument gets you.")
    :authors (list "Anthony Green <green@moxielogic.com>")
    :license "MIT"
    :usage "[GLOBAL-OPTIONS] COMMAND [OPTIONS] [ARGUMENTS ...]"
-   :sub-commands (list (make-run-command) (make-check-command)
-                       (make-doctor-command))
+   :sub-commands (list (make-run-command) (make-learn-command)
+                       (make-check-command) (make-doctor-command))
    :handler (lambda (cmd)
               (clingon:print-usage-and-exit cmd *standard-output*))))
 

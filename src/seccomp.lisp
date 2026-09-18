@@ -171,11 +171,13 @@ per-launch state, and a child only ever reads it.")
   (or *seccomp-filter* (setf *seccomp-filter* (compile-seccomp-filter))))
 
 (declaim (inline %seccomp-install))
-(defun %seccomp-install (program)
-  "Install PROGRAM on the calling thread.  Needs no_new_privs already set."
+(defun %seccomp-install (program flags)
+  "Install PROGRAM on the calling thread.  Needs no_new_privs already set.
+With SECCOMP_FILTER_FLAG_NEW_LISTENER among FLAGS the answer is a descriptor
+for the notifications the filter will raise, rather than zero."
   (cffi:foreign-funcall "syscall"
                         :long +sys-seccomp+
                         :unsigned-long +seccomp-set-mode-filter+
-                        :unsigned-long 0
+                        :unsigned-long flags
                         :pointer program
                         :long))

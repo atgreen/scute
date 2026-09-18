@@ -86,6 +86,12 @@
            #:read-cgroup-events
            #:delete-sandbox-cgroup
            #:limits-installable-p
+           ;; Learning
+           #:learned-rules
+           #:write-learned-policy
+           #:observations
+           #:observations-paths
+           #:watched-syscall
            ;; Host diagnostics
            #:doctor-report
            #:print-doctor-report

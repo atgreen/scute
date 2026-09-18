@@ -81,7 +81,8 @@
 ;;; inline so that the child path makes foreign calls and nothing else: no
 ;;; allocation, no streams, no condition system, no GC.
 
-(declaim (inline %close %read %write %prctl %capset %execve %exit %kill %access %open))
+(declaim (inline %close %read %write %prctl %capset %execve %exit %kill %access %open
+                 %chdir))
 
 (defun %close (fd)
   (cffi:foreign-funcall "close" :int fd :int))
@@ -107,6 +108,9 @@
 
 (defun %kill (pid signal)
   (cffi:foreign-funcall "kill" :int pid :int signal :int))
+
+(defun %chdir (path)
+  (cffi:foreign-funcall "chdir" :pointer path :int))
 
 (defun %open (path flags)
   (cffi:foreign-funcall "open" :string path :int flags :int))

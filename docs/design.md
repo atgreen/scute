@@ -188,6 +188,38 @@ killed from outside. `memory.events` and `pids.events` are read before the
 cgroup is removed, so `scute run` can say that a memory limit is what ended a
 command.
 
+### Learning a policy
+
+Beyond v0's scope as first written, and the feature that makes the rest usable:
+`scute learn` runs a command once and writes the policy that would have allowed
+what it did.
+
+The mechanism is seccomp user notification. A filter whose action for the
+path-taking syscalls is `SCMP_ACT_NOTIFY` makes the kernel park the child and
+offer a description of the call to whoever holds the listener descriptor. The
+listener is created by the child, because `seccomp(2)` returns it to the caller
+that installs the filter, and it must not stay there: a command able to answer
+its own notifications could wave anything through. So the child hands the
+descriptor up and waits; the supervisor takes it with `pidfd_getfd`, releases
+the child, reads each path out of the child's memory with `process_vm_readv`,
+records it, and answers `SECCOMP_USER_NOTIF_FLAG_CONTINUE`. Closing the listener
+on the way out matters: a process parked on a notification nobody will answer
+waits for ever.
+
+This observes; it does not enforce. `CONTINUE` is unsound as a security decision
+because a path can change between the notification and the syscall. For learning
+-- where the product is a draft a person reads -- that is the right trade, and it
+is why learning writes a policy rather than enforcing what it saw.
+
+What is recorded is canonicalized, so `/lib64/libc.so.6` and its `/usr/lib64`
+target are one entry rather than two. Rules are then folded: paths under one of
+a handful of anchors -- `/usr`, `/etc`, `/proc` and their like -- become the
+anchor, because nobody reads a rule per file under `/usr`; paths under the
+working directory become `"."`, so a learned policy travels with its project;
+and anything else is named exactly, a directory as itself and a file as itself.
+`/proc` must be an anchor rather than exact: `/proc/self/status` canonicalizes to
+a pid that will not exist next time.
+
 ### Stopping a sandbox
 
 `pid_namespaces(7)` delivers a signal from an ancestor namespace to PID 1 only
@@ -246,6 +278,8 @@ therefore out of v0's scope, stated here rather than discovered later.
 - `src/seccomp.lisp` binds the minimal libseccomp API, builds the v0 filter in
   the parent, and exports it as the BPF program the child installs.
 - `src/audit.lisp` defines fixed Whistler programs and decodes their events.
+- `src/learn.lisp` builds the notifying filter, watches a child through the
+  listener, and folds what it saw into a policy.
 - `src/sandbox.lisp` holds the preflight check and then orders acquisition, fork
   synchronization, supervision, signal forwarding and enforcement, result
   classification, and cleanup.
