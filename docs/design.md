@@ -281,9 +281,13 @@ host and port pairs, resolved in the supervisor so that what a sandbox may reach
 is decided, and printed by `--dry-run`, before it is running.
 
 This is the one thing Scute does that wants a privilege -- `CAP_BPF` to load the
-program, `CAP_NET_ADMIN` to attach it -- and the ordering matters: the guard is
-installed before the parent drops its capabilities, so the child still begins
-with every set empty. A policy asking for it on a host without those
+program, `CAP_NET_ADMIN` to attach it -- and the ordering matters. The guard is
+installed first, then the parent drops every capability, verifies they are gone,
+and only then restores its dumpability: a process that gains file capabilities is
+marked non-dumpable, whose children have root-owned `/proc` files, and the uid
+map is written through `/proc`. Doing it in that order means Scute is never both
+privileged and traceable by anything sharing its uid, and the child still begins
+with every capability set empty. A policy asking for it on a host without those
 capabilities is refused, with the `setcap` line in the message, rather than
 falling back to port-level and calling it enforcement.
 

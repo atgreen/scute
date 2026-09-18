@@ -234,3 +234,22 @@ searches PATH, so what runs cannot depend on an environment it inherited."
     (check (eql 5 (call-scute 'sandbox-result-exit-code
                               (call-scute 'run-launch-plan plan)))
            "the resolved command did not run")))
+
+(deftest test-a-non-dumpable-supervisor-still-works
+  "A binary that gains file capabilities is marked non-dumpable, and a
+non-dumpable process's children have root-owned /proc files -- including the uid
+map the supervisor must write.  Granting scute CAP_BPF therefore broke every
+launch, with EPERM on a file the caller appeared to own.
+
+The state is reproducible without any capability, which is what this test does:
+PR_SET_DUMPABLE(0) puts the process in exactly the same position."
+  (let ((result nil))
+    (unwind-protect
+         (progn
+           (scute::%prctl scute::+pr-set-dumpable+ 0 0 0 0)
+           (setf result (call-scute 'run-namespaced-command '("/bin/sh" "-c" "exit 11"))))
+      ;; The fix restores this anyway; doing it here keeps the rest of the suite
+      ;; independent of whether it worked.
+      (scute::%prctl scute::+pr-set-dumpable+ 1 0 0 0))
+    (check (eql 11 (call-scute 'sandbox-result-exit-code result))
+           "a non-dumpable supervisor could not launch a sandbox: ~S" result)))

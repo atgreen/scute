@@ -17,7 +17,11 @@ set -eu
 scute=$(readlink -f "${1:-./scute}")
 [ -x "$scute" ] || { echo "grant: $scute is not executable" >&2; exit 1; }
 
+# Capabilities live on the inode, so every rebuild drops them.  Say so, because
+# the symptom of forgetting is a policy that suddenly cannot be enforced.
 echo "grant: $scute"
+echo "grant: note: rebuilding scute replaces this file and loses these"
+echo "grant: capabilities.  Re-run this script after make."
 sudo setcap cap_bpf,cap_net_admin+ep "$scute"
 getcap "$scute"
 

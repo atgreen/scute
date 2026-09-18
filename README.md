@@ -184,8 +184,16 @@ without the privilege is refused rather than quietly downgraded to port-level.
 To grant it:
 
 ```sh
-releng/grant-capabilities.sh ./scute      # one sudo setcap, once
+releng/grant-capabilities.sh ./scute      # one sudo setcap
 ```
+
+Capabilities live on the inode, so **every rebuild loses them** — re-run that
+after `make`. Two consequences worth knowing, because both look like other
+problems: running scute under `strace` suppresses file capabilities (ptrace
+prevents privilege elevation), so a policy that needs them fails only when
+traced; and a binary that holds them is non-dumpable, which scute undoes for
+itself after dropping them, because otherwise its children's `/proc` files
+belong to root and it cannot write its own child's uid map.
 
 or, for a package, `setcap cap_bpf,cap_net_admin+ep /usr/bin/scute` in `%post`,
 or a systemd unit with `AmbientCapabilities=CAP_BPF CAP_NET_ADMIN`.

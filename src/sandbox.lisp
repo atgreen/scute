@@ -461,6 +461,14 @@ rules to enforce, while an explaining run has the caller's."
          (progn
            (when (launch-plan-allow plan)
              (setf guard (install-egress-guard cgroup (launch-plan-allow plan))))
+           ;; Nothing above needs a capability again, so let them go now rather
+           ;; than after the child exists: the shorter that window, the better.
+           ;; Dumpability has to come back with them, because a non-dumpable
+           ;; parent's children have root-owned /proc files and the uid map
+           ;; below is written through /proc.
+           (drop-all-capabilities)
+           (verify-no-capabilities)
+           (make-dumpable)
            (multiple-value-bind (acquired watched)
                (acquire-launch-resources plan :observe observe)
              (setf resources acquired
@@ -472,8 +480,6 @@ rules to enforce, while an explaining run has the caller's."
                     (write-identity-maps pid)
                     (when cgroup
                       (move-process-to-cgroup pid cgroup))
-                    (drop-all-capabilities)
-                    (verify-no-capabilities)
                     (multiple-value-bind (status stage child-errno)
                         (supervise-child resources pid
                                          (when observe

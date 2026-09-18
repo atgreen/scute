@@ -95,6 +95,7 @@
            #:parse-duration
            #:capability-sets
            #:verify-no-capabilities
+           #:make-dumpable
            #:catches-signal-p
            #:namespace-id
            ;; The system-call filter

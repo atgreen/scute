@@ -57,6 +57,7 @@ which the policy therefore has to say out loud."
 
 
 (defconstant +pr-set-pdeathsig+           1)
+(defconstant +pr-set-dumpable+            4)
 (defconstant +pr-capbset-drop+           24)
 (defconstant +pr-set-no-new-privs+       38)
 (defconstant +pr-cap-ambient+            47)
@@ -209,6 +210,20 @@ nothing five seconds to tidy up means five seconds of nothing happening."
               do (let ((mask (ignore-errors
                               (parse-integer line :start 7 :radix 16 :junk-allowed t))))
                    (return (and mask (logbitp (1- signal) mask))))))))
+
+(defun make-dumpable ()
+  "Undo the non-dumpable state a credential-changing exec leaves behind.
+
+A binary that gains file capabilities is marked non-dumpable, and a
+non-dumpable process's /proc files belong to root rather than to the user
+running it -- including those of the children it forks.  The supervisor has to
+write its child's uid map through /proc, so with a capability granted and this
+left alone, every launch fails with EPERM on a file the caller appears to own.
+
+Called only after the parent has dropped its capabilities, so that scute is
+never both privileged and open to being traced by anything sharing its uid."
+  (when (minusp (%prctl +pr-set-dumpable+ 1 0 0 0))
+    (setup-error :set-dumpable :errno (errno))))
 
 (defun verify-no-capabilities ()
   "Check that this process holds no capability it could pass to a child.
