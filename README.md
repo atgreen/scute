@@ -202,6 +202,7 @@ table, an unknown key, a value of the wrong shape or a duplicate key is an error
 | | `wall-clock` | duration, e.g. `"30s"` | stop the command if it runs longer |
 | `[audit]` | `events` | `["exec", "open", "connect"]` | what to record |
 | `[environment]` | `keep` | array of names | variables to pass, beyond the default list |
+| `[environment.set]` | any name | string | give the sandbox this value, whatever the caller had |
 
 A relative path means what it says from where scute was invoked, and may not
 climb out of it.
@@ -461,6 +462,22 @@ Anything else is named:
 [environment]
 keep = ["CARGO_HOME", "RUSTUP_HOME"]
 ```
+
+A policy can also **set** a variable, which is different from keeping one: keep
+passes a value the caller already had, set gives the sandbox one the caller need
+not have at all.
+
+```toml
+[environment.set]
+GH_CONFIG_DIR = ".gh"                # not ~/.config/gh, which holds a token
+CLAUDE_CONFIG_DIR = ".claude"
+```
+
+Setting wins over both the caller's value and `keep`, so what the command sees
+does not depend on the shell it was started from. That matters more than it
+sounds: a policy that works only when you remember to export something is not
+really a policy, and the first time you forget, the tool reads the configuration
+the sandbox was meant to keep it away from.
 
 ```sh
 scute run --policy scute.policy --keep-env CARGO_HOME -- cargo build

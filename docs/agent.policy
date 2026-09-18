@@ -1,31 +1,47 @@
-# An agent that may call one API, and cannot hold the key to it.
+# An agent with two credentials it cannot read.
 #
-#     scute run --policy docs/agent.policy -- claude
+#     mkdir -p ~/work/project && cd ~/work/project
+#     scute run --policy ~/policies/agent.policy -- claude
 #
-# What the sandboxed command gets is an opaque kf_ token that works at
-# api.anthropic.com and nowhere else, through a broker it cannot go around,
-# with the real key read by scute and never placed inside the sandbox.
+# The real Anthropic and GitHub credentials stay in KeyFence. The sandbox gets
+# opaque kf_ tokens, each worth nothing anywhere but the one host it was issued
+# for, and reaches the network only through the broker that swaps them.
 #
-# Wants a credential broker.  Run one as a service:
-#
-#     cp releng/keyfence.service ~/.config/systemd/user/
-#     systemctl --user enable --now keyfence
-#
-# Check with: scute doctor
+# The config directories are scratch ones on purpose: ~/.claude holds a real
+# credential and ~/.config/gh can too, and neither is granted.
 
 [filesystem]
-read-execute = ["/usr"]
-read = ["/etc", "/proc"]
-read-write = [".", "/dev/null"]
+read-execute = ["/usr", "/home/linuxbrew/.linuxbrew"]
+read = [
+  "/etc", "/proc",
+  "/dev/urandom",                      # anything with a random number in it
+  "/sys/devices/system/cpu/online",    # how many processors there are
+  "/sys/fs/cgroup",                    # and how much of them this may use
+  "/sys/kernel/mm/transparent_hugepage/enabled",
+]
+read-write = [".", "/dev/null", "/tmp"]
 
 [network]
 mode = "host"
-proxy = "http://127.0.0.1:10210"       # the broker: the one reachable address
+proxy = "http://127.0.0.1:10210"
 
+# Hosts Claude Code checks on startup, which carry no credential. The broker
+# passes these through without a token; scute still permits nothing but the
+# broker's port, so they are not a way around it.
 [credentials.anthropic]
-secret-file = "~/.secrets/anthropic"   # read by scute, never by the sandbox
-destinations = ["api.anthropic.com"]   # where the token is worth anything
-env = "ANTHROPIC_API_KEY"              # where the sandbox finds its token
+ref = "anthropic"
+destinations = ["api.anthropic.com"]
+env = "ANTHROPIC_API_KEY"
 
-[environment]
-keep = ["ANTHROPIC_MODEL"]
+[credentials.github]
+ref = "github"
+destinations = ["api.github.com"]
+env = "GH_TOKEN"
+
+# Set by the policy rather than expected from your shell: ~/.claude holds a real
+# credential and ~/.config/gh can too, and neither is granted. Pointing the tools
+# at scratch directories here means the policy works on its own -- forgetting to
+# export something cannot quietly send them back to the real ones.
+[environment.set]
+CLAUDE_CONFIG_DIR = ".claude"
+GH_CONFIG_DIR = ".gh"

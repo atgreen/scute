@@ -36,6 +36,8 @@
            #:sandbox-policy-audit
            #:sandbox-policy-environment
            #:kept-environment
+           #:environment-with-settings
+           #:sandbox-policy-environment-set
            #:launch-plan-environment
            #:filesystem-rule
            #:filesystem-rule-kind

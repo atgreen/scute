@@ -493,3 +493,55 @@ read = [\"/etc\"]
 mode = \"host\"
 proxy = \"localhost\"")
            "a proxy naming no port was accepted")))
+
+(deftest test-a-policy-can-set-a-variable-not-only-keep-one
+  "Keeping passes a variable the caller had; setting gives the sandbox one the
+caller need not have.  A policy that only works when the operator remembers to
+export something first is not really a policy -- the first time they forget, the
+command reads the configuration the sandbox was meant to keep it away from."
+  (let* ((policy (policy-from-string "[filesystem]
+read = [\"/etc\"]
+
+[environment]
+keep = [\"KEPT_ONE\"]
+
+[environment.set]
+GH_CONFIG_DIR = \".gh\"
+CLAUDE_CONFIG_DIR = \".claude\""))
+         (plan (call-scute 'compile-launch-plan policy '("/bin/true")
+                           :environment '("KEPT_ONE=from-the-caller"
+                                          "GH_CONFIG_DIR=/home/you/.config/gh"
+                                          "DROPPED=yes")))
+         (environment (call-scute 'launch-plan-environment plan)))
+    (check (member "GH_CONFIG_DIR=.gh" environment :test #'string=)
+           "the policy's value was not set: ~S" environment)
+    (check (member "CLAUDE_CONFIG_DIR=.claude" environment :test #'string=)
+           "the second setting is missing")
+    ;; Setting wins over what the caller had, or the value would depend on the
+    ;; shell the command was started from.
+    (check (not (member "GH_CONFIG_DIR=/home/you/.config/gh" environment :test #'string=))
+           "the caller's value survived beside the policy's")
+    (check (member "KEPT_ONE=from-the-caller" environment :test #'string=)
+           "a kept variable was lost")
+    (check (not (member "DROPPED=yes" environment :test #'string=))
+           "a variable the policy never named was passed")))
+
+(deftest test-a-setting-has-to-be-a-name-and-a-string
+  "[environment.set] is a table of NAME = \"value\", and nothing else."
+  (flet ((refused-p (text)
+           (nth-value 1 (ignore-errors (policy-from-string text)))))
+    (check (refused-p "[filesystem]
+read = [\"/etc\"]
+[environment.set]
+\"NOT=A=NAME\" = \"x\"")
+           "a name with an equals sign in it was accepted")
+    (check (refused-p "[filesystem]
+read = [\"/etc\"]
+[environment.set]
+NUMBER = 7")
+           "a non-string value was accepted")
+    (check (not (refused-p "[filesystem]
+read = [\"/etc\"]
+[environment.set]
+FINE = \"yes\""))
+           "a perfectly good setting was refused")))

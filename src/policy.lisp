@@ -112,6 +112,7 @@ is the only kind anyone can check.")
   (limits     nil :read-only t)
   (audit      nil :read-only t)
   (environment nil :read-only t)     ; extra variables to keep, beyond the default
+  (environment-set nil :read-only t) ; variables the policy gives the sandbox
   (unix-sockets nil :read-only t)    ; may the command open an AF_UNIX socket
   (connect-tcp nil :read-only t)     ; the only ports it may connect to
   (bind-tcp    nil :read-only t)     ; the only ports it may listen on
@@ -457,17 +458,60 @@ silently.")
              (string-array (cdr (assoc "events" entries :test #'string=))
                            "events" pathname)))))
 
+(defun validate-variable-name (name pathname)
+  (unless (and (stringp name) (plusp (length name)))
+    (policy-error "an environment variable needs a name" pathname))
+  (when (find #\= name)
+    (policy-error (format nil "~S is not a variable name" name) pathname))
+  name)
+
 (defun validate-environment (value pathname)
-  "The variables a policy asks to keep, beyond the ones kept anyway."
+  "The [environment] table: variables to keep, and variables to set.
+
+Answers the names to keep and an alist of NAME . VALUE to set.
+
+Keeping and setting are different things, and a policy needs both.  Keep passes a
+variable the caller already had; set gives the sandbox one the caller need not
+have at all -- which is what a tool's configuration directory is.  Without it, a
+policy that only works when the operator remembers to export something first is
+not really a policy: the first time they forget, the command reads the
+configuration the sandbox was meant to keep it away from, and fails in a way that
+looks like a filesystem problem."
   (let ((entries (table-entries value "environment" pathname)))
-    (check-known-keys entries '("keep") "[environment]" pathname)
-    (let ((keep (cdr (assoc "keep" entries :test #'string=))))
-      (mapcar (lambda (name)
-                (when (find #\= name)
-                  (policy-error
-                   (format nil "~S is not a variable name" name) pathname))
-                name)
-              (string-array keep "keep" pathname)))))
+    (check-known-keys (remove-if #'consp entries :key #'cdr)
+                      '("keep") "[environment]" pathname)
+    (let ((keep (cdr (assoc "keep" entries :test #'string=)))
+          (set (cdr (assoc "set" entries :test #'string=))))
+      (values
+       (when keep
+         (mapcar (lambda (name) (validate-variable-name name pathname))
+                 (string-array keep "keep" pathname)))
+       (when set
+         (mapcar (lambda (entry)
+                   (unless (consp entry)
+                     (policy-error "[environment.set] is a table of NAME = \"value\""
+                                   pathname))
+                   (cons (validate-variable-name (car entry) pathname)
+                         (scalar-string (cdr entry)
+                                        (format nil "[environment.set] ~A" (car entry))
+                                        pathname)))
+                 (table-entries set "environment.set" pathname)))))))
+
+(defun environment-with-settings (environment settings)
+  "ENVIRONMENT with SETTINGS applied, replacing any variable of the same name.
+
+A policy that sets a variable means it, so setting wins over both what the caller
+had and what the policy kept.  Anything else would make the value depend on the
+shell the command was started from, which is the thing a policy is for avoiding."
+  (let ((result (remove-if (lambda (entry)
+                             (let ((equals (position #\= entry)))
+                               (and equals
+                                    (assoc (subseq entry 0 equals) settings
+                                           :test #'string=))))
+                           environment)))
+    (append result
+            (loop for (name . value) in settings
+                  collect (format nil "~A=~A" name value)))))
 
 (defun kept-environment (extra &optional (environment (sb-ext:posix-environ)))
   "ENVIRONMENT with only the variables scute keeps and EXTRA names."
@@ -542,6 +586,9 @@ is a sandbox the operator half asked for."
                                       pathname)))
          :environment (when (table "environment")
                         (validate-environment (table "environment") pathname))
+         :environment-set (when (table "environment")
+                            (nth-value 1 (validate-environment (table "environment")
+                                                               pathname)))
          :pathname pathname)))))
 
 ;;── The launch plan ────────────────────────────────────────────────────────────
@@ -655,9 +702,11 @@ nothing here touches the kernel."
      :directory directory
      ;; Deny-by-default applies to the environment too: what a command is given
      ;; is the short list plus whatever the policy and the caller named.
-     :environment (let ((kept (kept-environment
-                               (append (sandbox-policy-environment policy) keep)
-                               environment))
+     :environment (let ((kept (environment-with-settings
+                               (kept-environment
+                                (append (sandbox-policy-environment policy) keep)
+                                environment)
+                               (sandbox-policy-environment-set policy)))
                         (proxy (sandbox-policy-proxy policy)))
                     ;; A proxy the command cannot be told about is a proxy it
                     ;; will not use, so naming one sets the variables every
