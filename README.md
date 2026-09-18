@@ -553,6 +553,29 @@ $ head -3 trail.jsonl
 One JSON object per line. Without `--audit` it goes to stderr. It costs a round
 trip per event, which is why a policy has to ask for it.
 
+With a credential broker, its half of the same run lands in the same trail:
+
+```json
+{"event": "connect", "address": "127.0.0.1", "port": 10210}
+{"event": "issue", "token_id": "e30756…", "task_id": "scute-2368978-1D8E2F", "label": "scute github"}
+{"event": "allow", "token_id": "e30756…", "task_id": "scute-2368978-1D8E2F", "destination": "api.github.com", "method": "GET", "path": "/user"}
+```
+
+Scute knows which command ran and which paths it was refused; the broker knows
+which credential went where. Every token minted for a run carries the same task
+id, so the two halves join: one trail says which run used which credential
+capability at which destination, with no token or secret value in it.
+
+And when a command fails, what the broker refused is reported beside it — the
+half of a failure the sandbox cannot see:
+
+```console
+$ scute run --policy agent.policy -- ./deploy.sh
+curl: (22) The requested URL returned error: 401
+scute: the broker refused 1 request:
+  api.anthropic.com           token not allowed for destination api.anthropic.com
+```
+
 ## When something will not run
 
 | What you see | What it usually means |

@@ -137,6 +137,45 @@ JSON string after it, honouring escapes, or answers NIL."
                    (when (and quote-at (char= #\" (char body quote-at)))
                      (return (read-json-string body (1+ quote-at))))))))))
 
+(defun json-object-list (body name)
+  "The objects in the array NAME names, each as its own JSON text.
+
+Splitting rather than parsing: what the caller wants from each object is one or
+two string fields, which json-string-field already answers, and a reader for the
+whole of JSON is a bigger thing than this needs.  Depth is tracked so that a
+nested object does not end its parent early."
+  (let* ((key (concatenate 'string "\"" name "\""))
+         (at (search key body)))
+    (when at
+      (let ((open (position #\[ body :start (+ at (length key)))))
+        (when open
+          (loop with index = (1+ open)
+                with objects = '()
+                while (< index (length body))
+                for character = (char body index)
+                do (cond ((char= character #\{)
+                          (let ((end (matching-brace body index)))
+                            (unless end (return (nreverse objects)))
+                            (push (subseq body index (1+ end)) objects)
+                            (setf index (1+ end))))
+                         ((char= character #\]) (return (nreverse objects)))
+                         (t (incf index)))
+                finally (return (nreverse objects))))))))
+
+(defun matching-brace (body start)
+  "The index of the brace closing the object that opens at START."
+  (loop with depth = 0
+        with in-string = nil
+        for index from start below (length body)
+        for character = (char body index)
+        do (cond (in-string
+                  (cond ((char= character #\\) (incf index))
+                        ((char= character #\") (setf in-string nil))))
+                 ((char= character #\") (setf in-string t))
+                 ((char= character #\{) (incf depth))
+                 ((char= character #\}) (decf depth)
+                                        (when (zerop depth) (return index))))))
+
 (defun json-string-list (body name)
   "The strings in the array NAME names, which is as much JSON array as is needed
 here: one flat list of names, out of an answer that has no others."

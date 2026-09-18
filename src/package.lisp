@@ -173,6 +173,12 @@
            #:loopback-request
            #:json-string-list
            #:report-credentials
+           #:broker-events
+           #:report-broker-refusals
+           #:refusals-among
+           #:json-object-list
+           #:*run-identity*
+           #:*broker*
            #:registered-credentials
            #:http-response-status
            #:http-response-body

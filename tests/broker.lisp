@@ -308,3 +308,40 @@ fact about the host and does not."
                           "the report does not name the credential: ~S" said))))
           (when helper (call-scute 'stop-helper helper))
           (delete-scratch record)))))
+
+(deftest test-json-object-list-splits-without-parsing
+  "The broker's events come back as an array of objects, and what is wanted from
+each is a field or two.  Splitting has to survive a nested object and a brace
+inside a string, which is why it is not a search for the next closing brace."
+  (let ((body "{\"entries\":[{\"event\":\"deny\",\"why\":{\"rule\":\"dest\"}},{\"event\":\"allow\",\"note\":\"a } brace\"}]}"))
+    (let ((objects (call-scute 'json-object-list body "entries")))
+      (check (= 2 (length objects)) "split into ~D objects, expected 2: ~S"
+             (length objects) objects)
+      (when (= 2 (length objects))
+        (check (equal "deny" (call-scute 'json-string-field (first objects) "event"))
+               "the first object is not the deny: ~S" (first objects))
+        (check (equal "allow" (call-scute 'json-string-field (second objects) "event"))
+               "a brace inside a string ended the object early: ~S" (second objects)))))
+  (check (null (call-scute 'json-object-list "{\"entries\":[]}" "entries"))
+         "an empty array should read as no objects"))
+
+(deftest test-refusals-are-picked-out-of-what-the-broker-recorded
+  "A failing command's reason often lives in the broker's log, which the operator
+may not think to read.  These are the entries worth repeating back."
+  (let* ((events (list "{\"event\":\"issue\",\"token_id\":\"a\"}"
+                       "{\"event\":\"allow\",\"destination\":\"api.github.com\"}"
+                       "{\"event\":\"deny\",\"destination\":\"api.anthropic.com\",\"deny_reason\":\"token not allowed for destination api.anthropic.com\"}"
+                       "{\"event\":\"deny\",\"destination\":\"evil.example\",\"deny_rule\":\"no_token\"}"))
+         (refusals (call-scute 'refusals-among events)))
+    (check (= 2 (length refusals)) "found ~D refusals, expected 2" (length refusals))
+    (check (equal "api.anthropic.com" (car (first refusals)))
+           "the first refusal names ~S" (car (first refusals)))
+    (check (search "not allowed" (cdr (first refusals)))
+           "the reason was lost: ~S" (cdr (first refusals)))
+    ;; A deny with only a rule still says something, rather than nothing.
+    (check (equal "no_token" (cdr (second refusals)))
+           "a deny with no reason fell back to ~S" (cdr (second refusals)))
+    (let ((said (with-output-to-string (stream)
+                  (call-scute 'report-broker-refusals events stream))))
+      (check (search "refused 2 requests" said) "the report says: ~S" said)
+      (check (search "api.anthropic.com" said) "the report omits the destination"))))

@@ -189,14 +189,21 @@ there is something --explain could find.  SCUTE_NO_HINTS=1 turns it off."
                  (run-launch-plan plan :observe t)
                (let ((events (audit-policy-events (launch-plan-audit plan)))
                      (destination (clingon:getopt cmd :audit)))
-                 (if destination
-                     (with-open-file (stream destination :direction :output
-                                                         :if-exists :supersede
-                                                         :if-does-not-exist :create)
-                       (write-audit-trail observations events stream
-                                          :command (launch-plan-command plan)))
-                     (write-audit-trail observations events *error-output*
-                                        :command (launch-plan-command plan))))
+                 (flet ((trail (stream)
+                          (write-audit-trail observations events stream
+                                             :command (launch-plan-command plan))
+                          ;; The broker's half of the same run, on the same
+                          ;; terms: one JSON object per line, already carrying
+                          ;; the task id that ties them together.
+                          (when *broker*
+                            (dolist (event (broker-events *broker*))
+                              (write-line event stream)))))
+                   (if destination
+                       (with-open-file (stream destination :direction :output
+                                                           :if-exists :supersede
+                                                           :if-does-not-exist :create)
+                         (trail stream))
+                       (trail *error-output*))))
                (uiop:quit (command-exit-status result) t)))
             ((clingon:getopt cmd :explain)
              (multiple-value-bind (result observations)
@@ -218,6 +225,10 @@ there is something --explain could find.  SCUTE_NO_HINTS=1 turns it off."
                (when (sandbox-result-timed-out result)
                  (format *error-output*
                          "~&scute: the command ran past its time limit and was stopped~%"))
+               ;; Asked here, while the broker is still on the stack: the next
+               ;; form exits the process.
+               (when *broker*
+                 (report-broker-refusals (broker-events *broker*)))
                (offer-explanation plan result)
                (uiop:quit (command-exit-status result) t)))))
          :program (clingon:getopt cmd :broker-path)))))))

@@ -39,6 +39,24 @@
 ;;; see releng/keyfence.service.  Scute starts one itself only when there is
 ;;; none to attach to, which keeps a machine without the service working.
 
+(defparameter *broker* nil
+  "The broker serving the run in progress, for a caller that wants to ask it
+what happened.
+
+Answered through a special rather than returned, because the caller ends the run
+by exiting the process -- so anything to be learned from the broker has to be
+asked for while the run is still on the stack, not afterwards.")
+
+(defparameter *run-identity* nil
+  "What the broker calls this run, so its events can be told from another's.
+
+A supervisor and a broker each know half of what happened: Scute knows which
+command ran and which paths it was refused, the broker knows which credential went
+to which destination.  Neither half answers \"what did this run do\" on its own,
+and the broker cannot know they belong together unless it is told -- so every
+token minted for a run carries the same task id, and every event about those
+tokens carries it back.")
+
 (defstruct (broker (:constructor %make-broker
                        (settings helper control-key certificate)))
   (settings nil :read-only t)
@@ -273,6 +291,10 @@ its tokens are still ours to revoke."
                                  (list (cons "Authorization"
                                              (format nil "Bearer ~A" key)))))))
 
+(defun new-run-identity ()
+  "An identity for this run, unique and meaning nothing outside it."
+  (format nil "scute-~D-~A" (sb-posix:getpid) (random-hex 6)))
+
 (defun mint-token (broker request seconds)
   "Swap the credential REQUEST names for a token locked to its destinations.
 
@@ -282,7 +304,7 @@ Scute says which one, and the plaintext is in one process rather than two."
          (secret (unless reference
                    (read-secret (credential-request-secret-file request)
                                 (credential-request-name request))))
-         (body (format nil "{~A:~A,~A:[~{~A~^,~}],~A:~D,~A:~A}"
+         (body (format nil "{~A:~A,~A:[~{~A~^,~}],~A:~D,~A:~A~@[,~A:~A~]}"
                        (json-escape (if reference "credential_ref" "credential"))
                        (json-escape (or reference secret))
                        (json-escape "destinations")
@@ -290,7 +312,9 @@ Scute says which one, and the plaintext is in one process rather than two."
                        (json-escape "ttl_seconds") seconds
                        (json-escape "label")
                        (json-escape (format nil "scute ~A"
-                                            (credential-request-name request)))))
+                                            (credential-request-name request)))
+                       (and *run-identity* (json-escape "task_id"))
+                       (and *run-identity* (json-escape *run-identity*))))
          (response (control-request broker "POST" "/tokens" :body body)))
     (unless (member (http-response-status response) '(200 201))
       (broker-error "the broker refused to issue a token for ~A: ~D ~A"
@@ -334,6 +358,49 @@ their own -- and an agent that shells out crosses several of them in one task.")
           (let ((certificate (namestring (broker-certificate broker))))
             (loop for variable in +certificate-variables+
                   collect (format nil "~A=~A" variable certificate)))))
+
+(defun broker-events (broker &optional (identity *run-identity*))
+  "What the broker recorded about this run, as raw JSON lines.
+
+Asked for once the command is over rather than subscribed to while it runs: the
+supervisor has a child to watch and a broker that outlives it, and a question
+answered afterwards needs neither a thread nor a held connection."
+  (when identity
+    (handler-case
+        (let ((response (control-request broker "GET"
+                                        (format nil "/audit?task_id=~A" identity)
+                                        :seconds 5)))
+          (when (= 200 (http-response-status response))
+            (json-object-list (http-response-body response) "entries")))
+      (error () nil))))
+
+(defun refusals-among (events)
+  "The broker's denials, as (DESTINATION . REASON), in the order they happened."
+  (loop for event in events
+        for what = (json-string-field event "event")
+        when (equal what "deny")
+          collect (cons (or (json-string-field event "destination") "somewhere")
+                        (or (json-string-field event "deny_reason")
+                            (json-string-field event "deny_rule")
+                            "refused"))))
+
+(defun report-broker-refusals (events &optional (stream *error-output*))
+  "Say what the broker refused, which is the half of a failure Scute cannot see.
+
+A command that cannot reach the network fails somewhere inside itself, with a 401
+or a timeout, and the reason lives in a service's log the operator may not think
+to read.  This is --explain for the part of the sandbox that is not the
+filesystem."
+  (let ((refusals (refusals-among events)))
+    (when refusals
+      (format stream "~&scute: the broker refused ~D request~:P:~%" (length refusals))
+      (let ((seen '()))
+        (loop for (destination . reason) in refusals
+              for key = (cons destination reason)
+              unless (member key seen :test #'equal)
+                do (push key seen)
+                   (format stream "~&  ~A~30T~A~%" destination reason))))
+    (length refusals)))
 
 (defun registered-credentials (settings)
   "The credential names the broker knows, or NIL if it cannot be asked.
@@ -435,7 +502,9 @@ tokens are revoked."
   (let ((credentials (launch-plan-credentials plan)))
     (if (null credentials)
         (funcall function plan)
-        (let ((broker (start-broker (launch-plan-broker plan) :program program)))
+        (let* ((broker (start-broker (launch-plan-broker plan) :program program))
+               (*broker* broker)
+               (*run-identity* (new-run-identity)))
           (unwind-protect
                (let ((tokens (mapcar
                               (lambda (request)
