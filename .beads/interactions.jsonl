@@ -15,3 +15,4 @@
 {"id":"int-468ee083633e3b6901592ef1e1ef7737","kind":"field_change","created_at":"2026-09-18T10:28:37.118575014Z","actor":"Anthony Green","issue_id":"scute-do3.8","extra":{"field":"status","new_value":"deferred","old_value":"open"}}
 {"id":"int-91efbffd83a959923d19e7ebf07b07e6","kind":"field_change","created_at":"2026-09-18T10:30:48.551869673Z","actor":"Anthony Green","issue_id":"scute-7qr","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
 {"id":"int-fc6988f78fff38b79592ad4a5c7722e4","kind":"field_change","created_at":"2026-09-18T10:31:03.538132248Z","actor":"Anthony Green","issue_id":"scute-do3.10","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
+{"id":"int-2dce879adfb6ab0505e85f8c012a9df3","kind":"field_change","created_at":"2026-09-18T10:33:32.715290606Z","actor":"Anthony Green","issue_id":"scute-83u","extra":{"field":"priority","new_value":"3","old_value":"2"}}

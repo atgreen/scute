@@ -35,8 +35,37 @@
 ;;; decompressing the core at all.  So: fast by default, small on request with
 ;;; SCUTE_COMPRESSION=9 (or any zstd level) for anyone who would rather have
 ;;; the disk back.
+;;; Exercise the command line before saving the image.  SBCL discards its CLOS
+;;; dispatch caches on save, and recomputing them costs more than everything
+;;; else scute does at startup put together: building the command tree and
+;;; parsing one line took some 35 ms cold and about 6 ms once warmed.  None of
+;;; this runs a handler, so nothing happens except that the caches exist.
+(defun warm-the-image ()
+  ;; Parsing a policy is the other cold path, and the largest: a PEG parser
+  ;; compiles its rules on first use, which cost some 29 ms of the 45 ms a
+  ;; sandboxed command used to take.  Parse one here and it is paid at build
+  ;; time instead.
+  (ignore-errors
+   (let ((document (uiop:symbol-call
+                    '#:scute '#:parse-policy-text
+                    (format nil "[filesystem]~%read = [\"/usr\"]~%~
+                                 [network]~%mode = \"none\"~%~
+                                 [limits]~%memory = \"1G\"~%processes = 4~%~
+                                 [audit]~%events = [\"exec\"]~%"))))
+     (uiop:symbol-call '#:scute '#:validate-sandbox-policy document)))
+  (let ((application (uiop:symbol-call '#:scute '#:make-app)))
+    (dolist (line '(("run" "--namespaces-only") ("learn") ("check") ("doctor")
+                    ("completions") ("man")))
+      (ignore-errors
+       (uiop:symbol-call '#:clingon '#:parse-command-line application line)))
+    (ignore-errors
+     (uiop:symbol-call '#:clingon '#:print-usage application
+                       (make-broadcast-stream)))
+    (values)))
+
 #+sb-core-compression
 (defmethod asdf:perform ((o asdf:image-op) (c asdf:system))
+  (warm-the-image)
   (uiop:dump-image (asdf:output-file o c)
                    :executable t
                    :compression (let ((level (uiop:getenv "SCUTE_COMPRESSION")))

@@ -116,6 +116,32 @@ so a program can talk to itself.
 
 Don't want to write that file yourself? `scute learn` will.
 
+## What it costs
+
+Best of three passes of 25 runs each, on one developer machine, so read them as
+proportions rather than promises:
+
+| | |
+|---|---|
+| `/bin/true`, no sandbox | 0.9 ms |
+| `scute --version` — starting up, sandboxing nothing | 21.3 ms |
+| `scute run --namespaces-only -- /bin/true` | 22.2 ms |
+| `scute run --policy scute.policy -- /bin/true` | 24.3 ms |
+| the same with `--explain` | 32.2 ms |
+
+The sandbox itself is the cheap part: about a millisecond for the process layer,
+two or three more to read a policy and install a Landlock ruleset, and eight for
+watching. What you are paying for is scute starting up at all, which is one
+Lisp image loading.
+
+Getting there took two measurements worth repeating if this ever regresses.
+Saving an SBCL image discards its CLOS dispatch caches, so the first call to
+each generic function recomputes them: building the command tree and parsing one
+command line cost about 35 ms cold. And a PEG parser compiles its rules on first
+use, which put another 29 ms into reading a small policy. Both are paid at build
+time now — `scute.asd` exercises them before dumping the image — and a policy run
+went from 79 ms to 24 ms without a line of the sandbox changing.
+
 ## What this protects against, and what it does not
 
 Scute confines a command to the filesystem, the resources, and the system calls
@@ -287,8 +313,8 @@ make          # builds ./scute
 make test     # builds it, then runs the suite against it
 ```
 
-`make` leaves the core uncompressed, which starts in around 75 ms rather than
-around 215 ms, at the cost of a larger file on disk. A tool you wrap around
+`make` leaves the core uncompressed, which starts in around 20 ms rather than
+around 160 ms, at the cost of a larger file on disk. A tool you wrap around
 every command should not make you wait for it. Build with
 `SCUTE_COMPRESSION=9 make` for roughly a quarter of the size and the slower
 start.
