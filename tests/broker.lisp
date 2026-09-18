@@ -345,3 +345,28 @@ may not think to read.  These are the entries worth repeating back."
                   (call-scute 'report-broker-refusals events stream))))
       (check (search "refused 2 requests" said) "the report says: ~S" said)
       (check (search "api.anthropic.com" said) "the report omits the destination"))))
+
+(deftest test-a-refusal-with-no-token-is-still-reported
+  "The refusal a misconfigured sandbox actually produces is 'no keyfence token
+found', and that one carries no run id -- there is no token to take one from.
+Attributed entries alone would have said nothing about the very case worth
+explaining, so unattributed refusals are found by time instead."
+  (let ((*trace-output* *trace-output*))
+    (check (call-scute 'rfc3339-now) "there is no timestamp to compare against")
+    ;; The shape the broker stamps: UTC, to the second, sortable as text.
+    (let ((now (call-scute 'rfc3339-now)))
+      (check (= 20 (length now)) "~S is not the shape the broker writes" now)
+      (check (char= #\Z (char now 19)) "~S is not in UTC" now)
+      (check (string<= "2026-01-01T00:00:00Z" now) "~S sorts before 2026" now))))
+
+(deftest test-refusals-are-reported-with-the-run-they-happened-during
+  "Both kinds go into one list: what the broker tied to this run, and what it
+refused during the run without being able to tie it to anything."
+  (let ((events (list "{\"ts\":\"2026-09-18T21:52:51Z\",\"event\":\"deny\",\"destination\":\"api.github.com\",\"deny_reason\":\"no keyfence token found in request headers\"}"
+                      "{\"ts\":\"2026-09-18T21:52:52Z\",\"event\":\"allow\",\"destination\":\"api.github.com\",\"task_id\":\"scute-1-A\"}")))
+    (let ((said (with-output-to-string (stream)
+                  (call-scute 'report-broker-refusals events stream))))
+      (check (search "during this run" said)
+             "the report claims more than it knows: ~S" said)
+      (check (search "no keyfence token found" said)
+             "the reason a sandbox most often fails was not reported: ~S" said))))

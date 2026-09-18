@@ -291,6 +291,25 @@ its tokens are still ours to revoke."
                                  (list (cons "Authorization"
                                              (format nil "Bearer ~A" key)))))))
 
+(defparameter *run-started* nil
+  "When this run began, in the form the broker stamps its entries with.
+
+Needed because not every entry can be attributed.  A refusal for a request that
+carried no token has no token to take a run id from -- and that is exactly the
+refusal a misconfigured sandbox produces, so it is the one most worth reporting.
+Time is what is left to go on.")
+
+(defun rfc3339-now ()
+  "The current time as the broker writes it: UTC, to the second.
+
+Compared as text, which works because both sides write the same shape and the
+same zone, and which avoids parsing a timestamp to answer a question about
+ordering."
+  (multiple-value-bind (second minute hour day month year)
+      (decode-universal-time (get-universal-time) 0)
+    (format nil "~4,'0D-~2,'0D-~2,'0DT~2,'0D:~2,'0D:~2,'0DZ"
+            year month day hour minute second)))
+
 (defun new-run-identity ()
   "An identity for this run, unique and meaning nothing outside it."
   (format nil "scute-~D-~A" (sb-posix:getpid) (random-hex 6)))
@@ -367,11 +386,35 @@ supervisor has a child to watch and a broker that outlives it, and a question
 answered afterwards needs neither a thread nor a held connection."
   (when identity
     (handler-case
-        (let ((response (control-request broker "GET"
-                                        (format nil "/audit?task_id=~A" identity)
-                                        :seconds 5)))
+        (let ((ours (let ((response (control-request
+                                     broker "GET"
+                                     (format nil "/audit?task_id=~A" identity)
+                                     :seconds 5)))
+                      (when (= 200 (http-response-status response))
+                        (json-object-list (http-response-body response) "entries"))))
+              (orphans (unattributed-refusals broker)))
+          (append ours orphans))
+      (error () nil))))
+
+(defun unattributed-refusals (broker)
+  "Refusals during this run that carry no run id.
+
+A request the broker turns away for having no token has no token to take a run id
+from, which is precisely the refusal a sandbox misconfigured for credentials
+produces.  Those are found by time instead: entries stamped at or after this run
+began, with no task of their own.  It is a weaker claim than attribution, and the
+report says so."
+  (when *run-started*
+    (handler-case
+        (let ((response (control-request broker "GET" "/audit" :seconds 5)))
           (when (= 200 (http-response-status response))
-            (json-object-list (http-response-body response) "entries")))
+            (remove-if-not
+             (lambda (event)
+               (and (null (json-string-field event "task_id"))
+                    (equal "deny" (json-string-field event "event"))
+                    (let ((stamp (json-string-field event "ts")))
+                      (and stamp (string<= *run-started* stamp)))))
+             (json-object-list (http-response-body response) "entries"))))
       (error () nil))))
 
 (defun refusals-among (events)
@@ -393,7 +436,8 @@ to read.  This is --explain for the part of the sandbox that is not the
 filesystem."
   (let ((refusals (refusals-among events)))
     (when refusals
-      (format stream "~&scute: the broker refused ~D request~:P:~%" (length refusals))
+      (format stream "~&scute: the broker refused ~D request~:P during this run:~%"
+              (length refusals))
       (let ((seen '()))
         (loop for (destination . reason) in refusals
               for key = (cons destination reason)
@@ -504,7 +548,8 @@ tokens are revoked."
         (funcall function plan)
         (let* ((broker (start-broker (launch-plan-broker plan) :program program))
                (*broker* broker)
-               (*run-identity* (new-run-identity)))
+               (*run-identity* (new-run-identity))
+               (*run-started* (rfc3339-now)))
           (unwind-protect
                (let ((tokens (mapcar
                               (lambda (request)

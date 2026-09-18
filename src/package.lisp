@@ -186,6 +186,9 @@
            #:json-object-list
            #:*run-identity*
            #:*broker*
+           #:*run-started*
+           #:rfc3339-now
+           #:unattributed-refusals
            #:registered-credentials
            #:http-response-status
            #:http-response-body
