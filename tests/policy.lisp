@@ -216,11 +216,12 @@ read-write = [\"../..\"]")
 (deftest test-unimplemented-controls-refuse-to-run
   "A plan asking for a control this build lacks is refused before it launches.
 Enacting it quietly would hand back a weaker sandbox than the one asked for.
-Auditing is the one left: limits arrived with the cgroup layer."
+Recording connections is the one left: limits arrived with the cgroup layer and
+recording exec and open arrived with the watcher."
   (let* ((policy (policy-from-string "[filesystem]
 read-execute = [\"/usr\"]
 [audit]
-events = [\"exec\"]"))
+events = [\"connect\"]"))
          (plan (call-scute 'compile-launch-plan policy '("/bin/true")))
          (condition (nth-value 1 (ignore-errors (call-scute 'run-launch-plan plan)))))
     (check (typep condition 'scute:control-not-implemented)

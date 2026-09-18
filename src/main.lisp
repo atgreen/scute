@@ -112,6 +112,20 @@ argument gets you.")
              (print-launch-plan plan)
              (refuse-unimplemented-controls plan)
              (uiop:quit 0 t))
+            ((launch-plan-audit plan)
+             (multiple-value-bind (result observations)
+                 (run-launch-plan plan :observe t)
+               (let ((events (audit-policy-events (launch-plan-audit plan)))
+                     (destination (clingon:getopt cmd :audit)))
+                 (if destination
+                     (with-open-file (stream destination :direction :output
+                                                         :if-exists :supersede
+                                                         :if-does-not-exist :create)
+                       (write-audit-trail observations events stream
+                                          :command (launch-plan-command plan)))
+                     (write-audit-trail observations events *error-output*
+                                        :command (launch-plan-command plan))))
+               (uiop:quit (command-exit-status result) t)))
             ((clingon:getopt cmd :explain)
              (multiple-value-bind (result observations)
                  (run-launch-plan plan :observe t)
@@ -153,6 +167,9 @@ argument gets you.")
                    (clingon:make-option
                     :flag :short-name #\n :long-name "dry-run" :key :dry-run
                     :description "Print the compiled plan and run nothing")
+                   (clingon:make-option
+                    :string :long-name "audit" :key :audit :parameter "FILE"
+                    :description "Write the audit trail a policy asks for here, not to stderr")
                    (clingon:make-option
                     :flag :long-name "explain" :key :explain
                     :description "Say which paths the policy refused, and what would allow them")))

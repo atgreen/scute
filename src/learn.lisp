@@ -416,3 +416,35 @@ Answers an alist of path to the accesses that were not permitted."
           do (format stream "~(~A~) = [~{~S~^, ~}]~%" kind paths))
     (terpri stream))
   refused)
+
+;;── An audit trail ─────────────────────────────────────────────────────────────
+;;
+;;; The same watching, kept rather than folded into a policy.  A record per
+;;; event, one JSON object to a line, so that reading it needs nothing but the
+;;; usual tools.
+
+(defparameter +audit-event-syscalls+
+  '((:exec . (:execute))
+    (:open . (:read :write)))
+  "Which accesses each auditable event covers.")
+
+(defun audited-access-p (events access)
+  (loop for (event . accesses) in +audit-event-syscalls+
+        thereis (and (member event events) (member access accesses))))
+
+(defun write-audit-trail (observations events stream &key command)
+  "Write what OBSERVATIONS saw, keeping the EVENTS a policy asked for."
+  (let ((written 0))
+    (format stream "{\"event\": \"start\", \"command\": [~{~S~^, ~}]}~%"
+            (or command '()))
+    (maphash (lambda (path accesses)
+               (dolist (access accesses)
+                 (when (audited-access-p events access)
+                   (incf written)
+                   (format stream "{\"event\": ~S, \"access\": ~S, \"path\": "
+                           (if (eq access :execute) "exec" "open")
+                           (string-downcase access))
+                   (write-json-string path stream)
+                   (format stream "}~%"))))
+             (observations-paths observations))
+    written))

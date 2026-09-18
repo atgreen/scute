@@ -12,3 +12,4 @@
 {"id":"int-7ef32532075cddc6fe2cabf329de74f7","kind":"field_change","created_at":"2026-09-18T10:11:24.000319399Z","actor":"Anthony Green","issue_id":"scute-c74","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
 {"id":"int-d17c78fcbf34de2704f2bd494453756f","kind":"field_change","created_at":"2026-09-18T10:18:56.371567297Z","actor":"Anthony Green","issue_id":"scute-cxk","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
 {"id":"int-aa779ebaab3d6c63f6682d30f0b6821b","kind":"field_change","created_at":"2026-09-18T10:18:57.508777224Z","actor":"Anthony Green","issue_id":"scute-u84","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
+{"id":"int-468ee083633e3b6901592ef1e1ef7737","kind":"field_change","created_at":"2026-09-18T10:28:37.118575014Z","actor":"Anthony Green","issue_id":"scute-do3.8","extra":{"field":"status","new_value":"deferred","old_value":"open"}}

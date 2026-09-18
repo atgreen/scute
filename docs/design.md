@@ -157,9 +157,11 @@ access includes it.
   refusal of unix-domain sockets, which no namespace confines.
 - **Resources:** `memory.max`, `pids.max`, `cpu.max`, and `memory.swap.max`
   beneath a delegated cgroup-v2 subtree.
-- **Audit:** optional, fixed Whistler programs attached to the sandbox cgroup at
-  startup. Policies cannot inject BPF. Existing map and ring-buffer descriptors
-  remain readable after capability removal.
+- **Audit:** optional, and unprivileged: the same seccomp notification that
+  `learn` uses, writing a record per event. Fixed Whistler programs attached to
+  the sandbox cgroup remain the design for auditing connections, which needs
+  CAP_BPF and waits for there to be a network to observe. Policies cannot inject
+  BPF either way.
 
 Scute never silently weakens a requested control. A host without Landlock,
 user namespaces, cgroup delegation for requested limits, libseccomp, required

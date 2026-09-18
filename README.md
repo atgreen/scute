@@ -250,7 +250,7 @@ Every table and key it may contain:
 | `[limits]` | `memory` | size, e.g. `"2G"` | and no swapping around it |
 | | `processes` | integer | `pids.max` |
 | | `cpu-percent` | integer | 100 is one processor |
-| `[audit]` | `events` | `["exec", "connect"]` | designed; this build refuses rather than pretends |
+| `[audit]` | `events` | `["exec", "open"]` | what to record; `"connect"` waits for networking |
 
 A relative path means what it says from where scute was invoked and may not
 climb out of it. Anything the schema does not name — an unknown table, an
@@ -306,6 +306,31 @@ unprivileged user namespaces and Landlock enabled.
 | `This build cannot enforce resource limits` | Cgroup v2 will not let a cgroup holding processes give controllers to its children. Run scute in a cgroup of its own: `systemd-run --user --scope -p Delegate=yes scute run ...` |
 | `command not found` for something on your `PATH` | The command must be an absolute path: a sandbox whose command is chosen by searching `PATH` depends on the environment it inherited. |
 | `scute doctor` exits non-zero | It names the missing control. Landlock needs Linux 5.13 or newer, and unprivileged user namespaces must be enabled. |
+
+## Auditing
+
+A policy can ask for a record of what the sandbox did:
+
+```toml
+[audit]
+events = ["exec", "open"]
+```
+
+```sh
+$ scute run --policy scute.policy --audit trail.jsonl -- ./build.sh
+$ head -3 trail.jsonl
+{"event": "start", "command": ["/usr/bin/bash", "-c", "./build.sh"]}
+{"event": "exec", "access": "execute", "path": "/usr/bin/bash"}
+{"event": "open", "access": "read", "path": "/etc/ld.so.cache"}
+```
+
+One JSON object per line, so reading it needs nothing but the tools you have.
+Without `--audit` it goes to stderr. It is the same watching `learn` and
+`--explain` use, so it needs no privileges — and costs a round trip per event,
+which is why a policy has to ask.
+
+`"connect"` is in the design and refused here: v0 gives a sandbox no network, so
+there would be nothing to record.
 
 ## Completions
 

@@ -197,8 +197,14 @@ T suffix."
                       (when cpu
                         (positive-integer (cdr cpu) "cpu-percent" pathname)))))))
 
-(defparameter +audit-event-names+ '(("exec" . :exec) ("connect" . :connect))
-  "The events v0's fixed audit programs can report.")
+(defparameter +audit-event-names+
+  '(("exec" . :exec) ("open" . :open) ("connect" . :connect))
+  "What a policy may ask to have recorded.
+
+exec and open are answered by watching the command through a seccomp
+notification, which needs no privileges.  connect is designed but has nothing
+to observe while v0 has no network, and is refused rather than accepted
+silently.")
 
 (defun validate-audit (value pathname)
   (let ((entries (table-entries value "audit" pathname)))
@@ -367,11 +373,14 @@ a policy's would be, so the two routes cannot diverge."
 
 (defun refuse-unimplemented-controls (plan)
   "Refuse a plan asking for a control this build cannot install.
-The design has auditing; the code does not have it yet.  Enacting such a plan
-quietly would hand back a weaker sandbox than the one that was asked for."
-  (when (launch-plan-audit plan)
-    (error 'control-not-implemented :control "auditing"
-                                    :detail "the audit programs are not attached by this build")))
+Enacting such a plan quietly would hand back a weaker sandbox than the one that
+was asked for."
+  (let ((audit (launch-plan-audit plan)))
+    (when (and audit (member :connect (audit-policy-events audit)))
+      (error 'control-not-implemented
+             :control "auditing connections"
+             :detail "v0 gives a sandbox no network, so there are no ~
+                      connections to record; the rest of [audit] works"))))
 
 (defun print-launch-plan (plan &optional (stream *standard-output*))
   "Print PLAN as the decision it is, for review before anything runs."

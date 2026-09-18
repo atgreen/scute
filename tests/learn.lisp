@@ -223,3 +223,88 @@ read-execute = [\"/usr\"]"
                        suggested:~%~A~%result ~S" text result))))
       (ignore-errors (delete-file (format nil "~A/copy" workspace)))
       (ignore-errors (sb-posix:rmdir workspace)))))
+
+;;── The audit trail ────────────────────────────────────────────────────────────
+
+(defun audit-run (policy-text command directory)
+  "Run COMMAND under POLICY-TEXT and answer the audit trail it produced."
+  (let* ((policy (call-scute 'validate-sandbox-policy
+                             (call-scute 'parse-policy-text policy-text)))
+         (plan (call-scute 'compile-launch-plan policy command :directory directory)))
+    (multiple-value-bind (result observations)
+        (call-scute 'run-launch-plan plan :observe t)
+      (values (with-output-to-string (stream)
+                (call-scute 'write-audit-trail observations
+                            (call-scute 'audit-policy-events
+                                        (call-scute 'launch-plan-audit plan))
+                            stream :command (call-scute 'launch-plan-command plan)))
+              result))))
+
+(deftest test-auditing-records-what-happened
+  "A policy asking to be audited gets a record per event, one JSON object to a
+line, so that reading it needs nothing but the usual tools."
+  (let ((workspace (scratch-pathname "audit")))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist (format nil "~A/" workspace))
+           (multiple-value-bind (trail result)
+               (audit-run (format nil "[filesystem]~%~
+                                       read-execute = [\"/usr\"]~%~
+                                       read = [\"/etc\"]~%~
+                                       read-write = [\"~A\", \"/dev/null\"]~%~
+                                       [audit]~%events = [\"exec\", \"open\"]~%"
+                                  workspace)
+                          '("/bin/sh" "-c" "cat /etc/hostname > copy")
+                          workspace)
+             (check (eql 0 (call-scute 'sandbox-result-exit-code result))
+                    "the audited command did not finish: ~S" result)
+             (check (search "\"event\": \"start\"" trail)
+                    "the trail does not say what was run:~%~A" trail)
+             (check (search "\"event\": \"exec\"" trail)
+                    "no exec was recorded:~%~A" trail)
+             (check (search "/etc/hostname" trail)
+                    "the file the command read was not recorded:~%~A" trail)
+             ;; Every line is a JSON object on its own, which is the whole point
+             ;; of the format: check the shape without a JSON parser to hand.
+             (with-input-from-string (stream trail)
+               (loop for line = (read-line stream nil nil)
+                     while line
+                     do (check (and (char= #\{ (char line 0))
+                                    (char= #\} (char line (1- (length line)))))
+                               "a trail line is not one object: ~S" line)))))
+      (ignore-errors (delete-file (format nil "~A/copy" workspace)))
+      (ignore-errors (sb-posix:rmdir workspace)))))
+
+(deftest test-auditing-records-only-what-was-asked
+  "A policy asking for exec alone does not get a record of every file opened."
+  (let ((workspace (scratch-pathname "audit-narrow")))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist (format nil "~A/" workspace))
+           (multiple-value-bind (trail)
+               (audit-run (format nil "[filesystem]~%~
+                                       read-execute = [\"/usr\"]~%~
+                                       read = [\"/etc\"]~%~
+                                       read-write = [\"~A\", \"/dev/null\"]~%~
+                                       [audit]~%events = [\"exec\"]~%"
+                                  workspace)
+                          '("/bin/sh" "-c" "cat /etc/hostname > /dev/null")
+                          workspace)
+             (check (search "\"event\": \"exec\"" trail)
+                    "no exec was recorded:~%~A" trail)
+             (check (not (search "\"event\": \"open\"" trail))
+                    "opens were recorded by a policy that asked only for exec:~%~A"
+                    trail)))
+      (ignore-errors (sb-posix:rmdir workspace)))))
+
+(deftest test-auditing-connections-is-refused
+  "v0 gives a sandbox no network, so a policy asking for connections to be
+recorded is refused rather than quietly given a trail with nothing in it."
+  (let* ((policy (policy-from-string "[filesystem]
+read-execute = [\"/usr\"]
+[audit]
+events = [\"connect\"]"))
+         (plan (call-scute 'compile-launch-plan policy '("/bin/true")))
+         (condition (nth-value 1 (ignore-errors (call-scute 'run-launch-plan plan)))))
+    (check (typep condition 'scute:control-not-implemented)
+           "auditing connections was accepted, got ~S" condition)))

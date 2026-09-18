@@ -92,6 +92,7 @@
            #:refused-observations
            #:report-refusals
            #:refusal-rules
+           #:write-audit-trail
            #:reachable-path-p
            #:observations
            #:observations-paths
