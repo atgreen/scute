@@ -42,8 +42,20 @@ running it needs the second. To run with no filesystem restriction at all, say s
 scute run --namespaces-only -- COMMAND
 ```
 
-`scute doctor` reports what the host can enforce and exits non-zero if
-something mandatory is absent.
+`scute doctor` reports what the host can enforce and exits non-zero if something
+mandatory is absent. `scute doctor --json` says the same thing to a script.
+
+Exit statuses are the shell's, so scripts can read them:
+
+| status | meaning |
+|---|---|
+| the command's own | the command ran and ended by itself |
+| 128 + signal | a signal ended the command (137 = killed, often a memory limit) |
+| 64 | the command line asked for something impossible |
+| 65 | the policy is not one Scute will accept |
+| 126 | the command exists but could not be executed |
+| 127 | the command does not exist |
+| 1 | a control this host could not establish |
 
 Resource limits work where the kernel will allow them:
 

@@ -21,8 +21,11 @@
            #:policy-error-pathname
            #:control-not-implemented
            #:control-not-implemented-control
+           #:command-not-found
+           #:command-not-found-pathname
            #:child-failure
            #:child-failure-operation
+           #:child-failure-errno
            ;; Policies and plans
            #:read-sandbox-policy
            #:validate-sandbox-policy
@@ -85,6 +88,7 @@
            ;; Host diagnostics
            #:doctor-report
            #:print-doctor-report
+           #:print-doctor-json
            #:probe
            #:probe-name
            #:probe-status

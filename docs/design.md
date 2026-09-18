@@ -249,7 +249,11 @@ therefore out of v0's scope, stated here rather than discovered later.
 - `src/sandbox.lisp` holds the preflight check and then orders acquisition, fork
   synchronization, supervision, signal forwarding and enforcement, result
   classification, and cleanup.
-- `src/main.lisp` exposes only the `run` and read-only `doctor` CLI commands.
+- `src/main.lisp` exposes only the `run` and read-only `doctor` CLI commands,
+  reports failures on stderr with the shell's exit statuses -- 64 for a caller's
+  mistake, 65 for a policy Scute will not accept, 126 and 127 as a shell uses
+  them, 128 plus the signal that ended a command -- and answers `doctor --json`
+  for anything that is not a person.
 - `tests/` contains unit fixtures plus opt-in kernel and capability integration
   tests; `make check` runs the applicable matrix and reports explicit skips for
   optional audit privileges only.

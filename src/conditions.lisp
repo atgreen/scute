@@ -70,15 +70,28 @@ policy it understood."))
 not yet in this build.  Silently skipping it would hand back a sandbox weaker
 than the one asked for."))
 
-(define-condition child-failure (scute-error)
-  ((operation :initarg :operation :reader child-failure-operation)
-   (status    :initarg :status    :reader child-failure-status :initform nil))
+(define-condition command-not-found (scute-error)
+  ((pathname :initarg :pathname :reader command-not-found-pathname))
   (:report
    (lambda (condition stream)
-     (format stream "Sandboxed child failed during ~(~A~)~@[ (wait status ~D)~]"
+     (format stream "command not found: ~A"
+             (command-not-found-pathname condition))))
+  (:documentation "The command named does not exist, found before anything was
+created rather than as a failed exec."))
+
+(define-condition child-failure (scute-error)
+  ((operation :initarg :operation :reader child-failure-operation)
+   (status    :initarg :status    :reader child-failure-status :initform nil)
+   (errno     :initarg :errno     :reader child-failure-errno :initform nil))
+  (:report
+   (lambda (condition stream)
+     (format stream "the sandboxed child failed during ~(~A~)~@[: ~A~]"
              (child-failure-operation condition)
-             (child-failure-status condition))))
-  (:documentation "The child died before it could become the requested command."))
+             (let ((errno (child-failure-errno condition)))
+               (and errno (plusp errno) (strerror errno))))))
+  (:documentation "The child died before it could become the requested command.
+It reports the stage it failed at and its errno over its status pipe, so the
+supervisor can say why rather than only that."))
 
 (defun usage-error (detail)
   "Signal a USAGE-ERROR carrying DETAIL."

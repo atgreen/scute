@@ -42,6 +42,7 @@ killed from outside; the cgroup is what tells them apart."
 
 (defstruct (launch-resources (:constructor %make-launch-resources))
   command path argv envp envp-count landlock-ruleset seccomp-program
+  errno-location
   sync-read sync-write status-read status-write
   sync-buffer status-buffer
   cap-header cap-data cap-last)
@@ -110,7 +111,10 @@ the child only uses what is already in its hands."
            :sync-read sync-read :sync-write sync-write
            :status-read status-read :status-write status-write
            :sync-buffer (cffi:foreign-alloc :uint8 :count 1 :initial-element 0)
-           :status-buffer (cffi:foreign-alloc :uint8 :count 1 :initial-element 0)
+           :status-buffer (cffi:foreign-alloc :uint8 :count 2 :initial-element 0)
+           ;; Where errno lives for this thread, resolved now: reading it in the
+           ;; child must not allocate, and the child is this same thread.
+           :errno-location (cffi:foreign-funcall "__errno_location" :pointer)
            :cap-header cap-header :cap-data cap-data
            :cap-last last-capability
            :landlock-ruleset ruleset
@@ -146,11 +150,15 @@ allocation, no streams, no conditions, and nothing that could wake the garbage
 collector."
   (declare (optimize (speed 3) (safety 0) (debug 0)))
   (let ((status-fd (launch-resources-status-write resources))
-        (status-buffer (launch-resources-status-buffer resources)))
+        (status-buffer (launch-resources-status-buffer resources))
+        (errno-location (launch-resources-errno-location resources)))
     (macrolet ((die (stage exit-code)
+                 ;; errno first: %write would overwrite it.
                  `(progn
-                    (setf (cffi:mem-ref status-buffer :uint8 0) ,stage)
-                    (%write status-fd status-buffer 1)
+                    (setf (cffi:mem-ref status-buffer :uint8 1)
+                          (logand 255 (cffi:mem-ref errno-location :int))
+                          (cffi:mem-ref status-buffer :uint8 0) ,stage)
+                    (%write status-fd status-buffer 2)
                     (%exit ,exit-code))))
       (%close (launch-resources-sync-write resources))
       ;; Ask the kernel to kill this process if the supervisor dies.  Set
@@ -240,13 +248,16 @@ embedding Scute in a larger image must reinstate its own handlers."
 
 (defun read-child-stage (resources)
   "Wait for the child to reach execve.
-Returns NIL once the close-on-exec status pipe reports the exec, or the stage
-byte the child wrote just before giving up."
+Answers NIL once the close-on-exec status pipe reports the exec, or the stage
+the child failed at and the errno it failed with."
   (let ((fd (launch-resources-status-read resources))
         (buffer (launch-resources-status-buffer resources)))
-    (loop for count = (%read fd buffer 1)
+    (loop for count = (%read fd buffer 2)
           do (cond ((zerop count) (return nil))
-                   ((= count 1) (return (cffi:mem-ref buffer :uint8 0)))
+                   ((plusp count)
+                    (return (values (cffi:mem-ref buffer :uint8 0)
+                                    (and (= count 2)
+                                         (cffi:mem-ref buffer :uint8 1)))))
                    ((= (errno) +eintr+))
                    (t (setup-error :read-child-status :errno (errno)))))))
 
@@ -278,8 +289,8 @@ signal a pid that has already been collected."
     (setf (launch-resources-sync-write resources) nil)
     (%close (launch-resources-status-write resources))
     (setf (launch-resources-status-write resources) nil)
-    (let ((stage (read-child-stage resources)))
-      (values (wait-for-child pid) stage))))
+    (multiple-value-bind (stage child-errno) (read-child-stage resources)
+      (values (wait-for-child pid) stage child-errno))))
 
 (defun user-namespaces-available-p ()
   "Whether this kernel will let an unprivileged process create a user namespace."
@@ -355,11 +366,13 @@ PLAN requests that this build cannot install is an error, not an omission."
                       (move-process-to-cgroup pid cgroup))
                     (drop-all-capabilities)
                     (verify-no-capabilities)
-                    (multiple-value-bind (status stage) (supervise-child resources pid)
+                    (multiple-value-bind (status stage child-errno)
+                        (supervise-child resources pid)
                       (setf reaped t)
                       (when stage
                         (error 'child-failure :operation (child-stage-name stage)
-                                              :status status))
+                                              :status status
+                                              :errno child-errno))
                       (classify-wait-status pid status
                                             (and cgroup (read-cgroup-events cgroup)))))
                ;; Setup failed with the child still parked on the pipe, or the

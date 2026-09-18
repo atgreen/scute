@@ -58,6 +58,8 @@
 
 (defconstant +eintr+  4)
 (defconstant +eperm+  1)
+(defconstant +enoent+ 2)
+(defconstant +eacces+ 13)
 
 ;;; Exit codes the child reports for its own setup failures.  They are distinct
 ;;; from anything the sandboxed command is likely to produce, and the supervisor

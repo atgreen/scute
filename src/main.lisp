@@ -31,8 +31,16 @@ the exit status can say what kind of failure it was."
       (die 64 "~A" condition))                    ; EX_USAGE, as clingon uses
     (policy-error (condition)
       (die 65 "~A" condition))                    ; EX_DATAERR: the policy is bad
+    (command-not-found (condition)
+      (die 127 "~A" condition))                   ; as a shell reports one
     (child-failure (condition)
-      (die (if (eq :child-execve (child-failure-operation condition)) 127 1)
+      ;; A command that exists but could not be run is 126, as in a shell; one
+      ;; that vanished between the plan and the exec is 127.
+      (die (if (eq :child-execve (child-failure-operation condition))
+               (case (child-failure-errno condition)
+                 (#.+enoent+ 127)
+                 (t 126))
+               1)
            "~A" condition))
     (scute-error (condition)
       (die 1 "~A" condition))))
@@ -146,16 +154,24 @@ argument gets you.")
 ;;── doctor ─────────────────────────────────────────────────────────────────────
 
 (defun doctor-handler (cmd)
-  (declare (ignore cmd))
   (reporting-failures
-   (uiop:quit (if (print-doctor-report (doctor-report)) 0 1) t)))
+   (let* ((report (doctor-report))
+          (ready (if (clingon:getopt cmd :json)
+                     (print-doctor-json report)
+                     (print-doctor-report report))))
+     (uiop:quit (if ready 0 1) t))))
 
 (defun make-doctor-command ()
   (clingon:make-command
    :name "doctor"
    :description "Report which sandbox controls this host can enforce"
-   :usage ""
-   :handler #'doctor-handler))
+   :usage "[--json]"
+   :options (list (clingon:make-option
+                   :flag :long-name "json" :key :json
+                   :description "Report as JSON instead of for a person"))
+   :handler #'doctor-handler
+   :examples '(("Check whether this host can sandbox at all:" . "scute doctor")
+               ("The same, for a script:" . "scute doctor --json"))))
 
 ;;── CLI ────────────────────────────────────────────────────────────────────────
 

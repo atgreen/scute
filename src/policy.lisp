@@ -271,8 +271,7 @@ PATH is a sandbox whose command depends on the environment it inherited."
     (usage-error (format nil "~S is not an absolute path" name)))
   (let ((truename (probe-file name)))
     (unless truename
-      (setup-error :resolve-executable
-                   :detail (format nil "~A does not exist" name)))
+      (error 'command-not-found :pathname name))
     (namestring truename)))
 
 (defun beneath-directory-p (path directory)

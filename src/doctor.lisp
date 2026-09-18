@@ -19,7 +19,10 @@
   (detail nil :read-only t))
 
 (defun probe-mandatory-p (probe)
-  "Whether a missing PROBE stops Scute from running anything at all."
+  "Whether a missing PROBE stops Scute from running anything at all.
+Resource limits and auditing are not here on purpose: Scute sandboxes perfectly
+well without either, and a host that cannot provide them should be told what it
+would need rather than failed."
   (member (probe-name probe)
           '("user namespaces" "landlock" "cgroup v2" "libseccomp")
           :test #'string=))
@@ -106,6 +109,63 @@ a filter that will not compile here is a launch that will not happen."
     (scute-error (condition)
       (make-probe "libseccomp" :missing (princ-to-string condition)))))
 
+(defun probe-audit ()
+  "What the host would offer an audit program, without loading one.
+Auditing is optional in the design and absent from this build, so this reports
+the kernel side only, and never as a failure."
+  (let* ((btf (and (probe-file "/sys/kernel/btf/vmlinux") t))
+         (unprivileged (read-first-line "/proc/sys/kernel/unprivileged_bpf_disabled"))
+         (held (remove-if (lambda (entry)
+                            (or (zerop (cdr entry)) (string= "CapBnd" (car entry))))
+                          (capability-sets))))
+    (make-probe "audit" :info
+                (format nil "not installed by this build; kernel offers ~
+                             BTF ~:[absent~;present~], unprivileged BPF ~A, ~
+                             and this process holds ~:[no capabilities~;capabilities~]"
+                        btf
+                        (cond ((null unprivileged) "unreported")
+                              ((string= "0" (string-trim " " unprivileged)) "allowed")
+                              (t (format nil "disabled (~A)" (string-trim " " unprivileged))))
+                        held))))
+
+;;── Machine-readable ───────────────────────────────────────────────────────────
+
+(defun write-json-string (text stream)
+  "Write TEXT as a JSON string literal."
+  (write-char #\" stream)
+  (loop for character across text
+        do (case character
+             (#\" (write-string "\\\"" stream))
+             (#\\ (write-string "\\\\" stream))
+             (#\Newline (write-string "\\n" stream))
+             (#\Tab (write-string "\\t" stream))
+             (#\Return (write-string "\\r" stream))
+             (t (if (< (char-code character) 32)
+                    (format stream "\\u~4,'0X" (char-code character))
+                    (write-char character stream)))))
+  (write-char #\" stream))
+
+(defun print-doctor-json (report &optional (stream *standard-output*))
+  "Print REPORT as JSON, for something other than a person to read."
+  (let ((missing (remove-if-not (lambda (probe)
+                                  (and (eq :missing (probe-status probe))
+                                       (probe-mandatory-p probe)))
+                                report)))
+    (format stream "{~%  \"ready\": ~:[false~;true~],~%  \"probes\": [~%"
+            (null missing))
+    (loop for probe in report
+          for remaining = (rest (member probe report))
+          do (format stream "    {\"name\": ")
+             (write-json-string (probe-name probe) stream)
+             (format stream ", \"status\": ")
+             (write-json-string (string-downcase (probe-status probe)) stream)
+             (format stream ", \"mandatory\": ~:[false~;true~], \"detail\": "
+                     (probe-mandatory-p probe))
+             (write-json-string (or (probe-detail probe) "") stream)
+             (format stream "}~:[~;,~]~%" remaining))
+    (format stream "  ]~%}~%")
+    (null missing)))
+
 ;;── Report ─────────────────────────────────────────────────────────────────────
 
 (defun doctor-report ()
@@ -116,6 +176,7 @@ a filter that will not compile here is a launch that will not happen."
         (probe-cgroup-v2)
         (probe-resource-limits)
         (probe-seccomp)
+        (probe-audit)
         (probe-capabilities)))
 
 (defun print-doctor-report (report &optional (stream *standard-output*))

@@ -6,7 +6,7 @@ sbom: scute-sbom.spdx.json
 scute-sbom.spdx.json: ocicl.csv
 	ocicl create-sbom spdx $@
 
-test:
+test: scute
 	sbcl --noinform --non-interactive \
 		--eval '(asdf:test-system :scute)'
 
