@@ -11,6 +11,7 @@ systems/
 # Build artifacts
 /scute
 /scute-sbom.spdx.json
+/completions/
 
 # Beads / Dolt files (added by bd init)
 .dolt/

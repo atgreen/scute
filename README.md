@@ -209,6 +209,16 @@ start.
 Some tests exercise the kernel directly, so they need a Linux host with
 unprivileged user namespaces and Landlock enabled.
 
+## Completions
+
+```sh
+source <(scute completions bash)     # or zsh, or fish
+```
+
+They are generated from scute's own command tree rather than maintained beside
+it, so an option is completable the moment it exists. `make completions` writes
+all three into `completions/`, and the packages install them.
+
 ## Author and License
 
 `scute` was written by Anthony Green and is distributed under the terms of the

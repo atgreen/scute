@@ -21,6 +21,7 @@
                (:file "src/policy")
                (:file "src/sandbox")
                (:file "src/doctor")
+               (:file "src/completions")
                (:file "src/main"))
   :in-order-to ((test-op (test-op "scute/test")))
   :build-operation "program-op"

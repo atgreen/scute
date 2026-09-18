@@ -227,3 +227,52 @@ they permit at a path, launches nothing, and fails if anything is wholly denied.
              (check (= 64 status) "check with no policy exited ~D" status)))
       (when policy (delete-scratch policy))
       (ignore-errors (sb-posix:rmdir workspace)))))
+
+(deftest test-completions-follow-the-commands
+  "Completions are generated from the command tree, so a new command or option
+is completable the moment it exists.  This test is what keeps that true."
+  (dolist (shell '("bash" "zsh" "fish"))
+    (multiple-value-bind (status said) (scute-run (format nil "completions ~A" shell))
+      (check (zerop status) "completions ~A exited ~D" shell status)
+      (dolist (command '("run" "learn" "check" "doctor"))
+        (check (search command said) "~A completions omit ~A" shell command))
+      ;; fish spells an option "-l policy", not "--policy", so ask for the
+      ;; name and let each shell spell it its own way.
+      (dolist (option '("policy" "explain" "dry-run" "namespaces-only"))
+        (check (search option said) "~A completions omit ~A" shell option))
+      (check (not (search "bash-completions" said))
+             "~A completions offer an internal flag" shell)
+      ;; Quoting: a description carrying an apostrophe would end the quote it
+      ;; sits inside and leave the script unparsable.
+      (check (not (search "scute's" said))
+             "~A completions carry an unescaped apostrophe" shell)))
+  ;; The bash script is a shell script, and bash is the judge of that.
+  (let ((script (scratch-pathname "completions")))
+    (unwind-protect
+         (multiple-value-bind (status said) (scute-run "completions bash")
+           (declare (ignore status))
+           (with-open-file (stream script :direction :output :if-exists :supersede)
+             (write-string said stream))
+           (check (zerop (cffi:foreign-funcall
+                          "system" :string (format nil "bash -n ~A" script) :int))
+                  "the bash completions are not valid bash:~%~A" said)
+           ;; And it completes: ask it for the top-level words.
+           (let ((answer (scratch-pathname "completed")))
+             (unwind-protect
+                  (progn
+                    (cffi:foreign-funcall
+                     "system" :string
+                     (format nil "bash -c 'source ~A; COMP_WORDS=(scute \"\"); ~
+                                  COMP_CWORD=1; _scute; echo \"${COMPREPLY[@]}\"' > ~A 2>/dev/null"
+                             script answer)
+                     :int)
+                    (let ((completed (read-file-string answer)))
+                      (dolist (command '("run" "learn" "check" "doctor"))
+                        (check (search command completed)
+                               "completing an empty first word did not offer ~A: ~S"
+                               command completed))))
+               (delete-scratch answer))))
+      (delete-scratch script)))
+  (multiple-value-bind (status said) (scute-run "completions tcsh")
+    (check (= 64 status) "an unknown shell exited ~D" status)
+    (check (search "bash" said) "the refusal does not say which shells are known")))

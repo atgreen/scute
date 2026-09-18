@@ -139,7 +139,7 @@ argument gets you.")
    :options (append
              (list (clingon:make-option
                     :string :long-name "policy" :key :policy
-                    :description "Policy file describing the sandbox (not yet implemented)"))
+                    :description "Policy file describing the sandbox"))
              (mapcar (lambda (entry)
                        (destructuring-bind (kind . name) entry
                          (clingon:make-option
@@ -272,6 +272,25 @@ argument gets you.")
    :examples '(("Check whether this host can sandbox at all:" . "scute doctor")
                ("The same, for a script:" . "scute doctor --json"))))
 
+(defun completions-handler (cmd)
+  (reporting-failures
+   (let ((shell (first (clingon:command-arguments cmd))))
+     (unless shell
+       (usage-error "which shell? scute completions bash|zsh|fish"))
+     (write-completions shell)
+     (uiop:quit 0 t))))
+
+(defun make-completions-command ()
+  (clingon:make-command
+   :name "completions"
+   :description "Write shell completions, generated from scute's own commands"
+   :usage "bash|zsh|fish"
+   :handler #'completions-handler
+   :examples '(("Complete scute in this shell, now:"
+                . "source <(scute completions bash)")
+               ("Install them for everyone:"
+                . "scute completions bash > /etc/bash_completion.d/scute"))))
+
 ;;── CLI ────────────────────────────────────────────────────────────────────────
 
 (defun make-app ()
@@ -284,7 +303,8 @@ argument gets you.")
    :license "MIT"
    :usage "[GLOBAL-OPTIONS] COMMAND [OPTIONS] [ARGUMENTS ...]"
    :sub-commands (list (make-run-command) (make-learn-command)
-                       (make-check-command) (make-doctor-command))
+                       (make-check-command) (make-doctor-command)
+                       (make-completions-command))
    :handler (lambda (cmd)
               (clingon:print-usage-and-exit cmd *standard-output*))))
 

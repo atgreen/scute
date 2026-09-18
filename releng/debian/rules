@@ -6,16 +6,20 @@
 override_dh_auto_build:
 	make
 	make sbom
+	make completions
 
 override_dh_auto_install:
 	mkdir -p debian/scute/usr/bin
 	mkdir -p debian/scute/usr/share/sbom
 	install -m 0755 scute debian/scute/usr/bin/
+	install -D -m 0644 completions/scute.bash debian/scute/usr/share/bash-completion/completions/scute
+	install -D -m 0644 completions/_scute debian/scute/usr/share/zsh/vendor-completions/_scute
+	install -D -m 0644 completions/scute.fish debian/scute/usr/share/fish/vendor_completions.d/scute.fish
 	install -m 0644 scute-sbom.spdx.json debian/scute/usr/share/sbom/scute-$(shell dpkg-parsechangelog -S Version | sed 's/-.*//' ).spdx.json
 
 override_dh_strip:
 	# Do not strip SBCL-based binaries as it corrupts the embedded core
 
 override_dh_auto_clean:
-	rm -f scute scute-sbom.spdx.json
+	rm -rf scute scute-sbom.spdx.json completions
 	dh_auto_clean

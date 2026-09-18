@@ -96,6 +96,9 @@
            #:observations
            #:observations-paths
            #:watched-syscall
+           ;; Shell completions
+           #:write-completions
+           #:command-tree
            ;; Host diagnostics
            #:doctor-report
            #:print-doctor-report
