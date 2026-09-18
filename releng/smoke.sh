@@ -81,4 +81,53 @@ clean "$scute" run --policy learned.policy -- /bin/sh -c 'cat /etc/hostname > co
   || fail "the command failed under the policy learned from it"
 say "learn and re-run" "$(grep -c . learned.policy) lines"
 
+# Everything below is something the README claims.  If a claim stops being true,
+# this is where it should be noticed -- not by a reader trying it.
+
+clean "$scute" check --policy scute.policy . /etc >/dev/null \
+  || fail "check refused paths the policy allows"
+if clean "$scute" check --policy scute.policy /root >/dev/null 2>&1; then
+  fail "check accepted a path the policy does not allow"
+fi
+say "check" "allowed and denied"
+
+clean "$scute" run --policy scute.policy --dry-run -- /bin/sh -c 'echo nope > witness2' \
+  > plan.txt || fail "--dry-run failed"
+grep -q '^command' plan.txt || fail "--dry-run printed no plan"
+if [ -f witness2 ]; then fail "--dry-run ran the command"; fi
+say "--dry-run" "printed a plan, ran nothing"
+
+printf '[filesystem]\nread-execute = ["/usr"]\n' > narrow.policy
+# Expected to fail: that is the point of asking why.
+clean "$scute" run --policy narrow.policy --explain -- /bin/sh -c 'cat /etc/hostname' \
+  > explain.txt 2>&1 || true
+grep -q 'refused' explain.txt || fail "--explain did not report a refusal"
+grep -q 'read = ' explain.txt || fail "--explain suggested no rule"
+say "--explain" "named what was refused"
+
+printf '[filesystem]\nread-execute = ["/usr"]\nread = ["/etc"]\nread-write = [".", "/dev/null"]\n\n[audit]\nevents = ["exec", "open"]\n' > audited.policy
+clean "$scute" run --policy audited.policy --audit trail.jsonl -- /bin/sh -c 'cat /etc/hostname > copy2' \
+  || fail "an audited run failed"
+grep -q '"event": "exec"' trail.jsonl || fail "the audit trail recorded no exec"
+say "audit trail" "$(grep -c . trail.jsonl) records"
+
+status=0
+clean "$scute" run --namespaces-only --timeout 1s -- /bin/sleep 60 >/dev/null 2>&1 || status=$?
+[ "$status" -eq 124 ] || fail "a command stopped for time exited $status rather than 124"
+say "--timeout" "124"
+
+AWS_SECRET_ACCESS_KEY=hunter2 clean "$scute" run --policy scute.policy -- \
+  /bin/sh -c 'test -z "$AWS_SECRET_ACCESS_KEY"' \
+  || fail "a secret in the environment reached the command"
+say "environment" "secrets dropped"
+
+clean "$scute" completions bash > completions.bash || fail "completions failed"
+bash -n completions.bash || fail "the completions are not valid bash"
+clean "$scute" man > scute.1 || fail "man failed"
+if command -v groff >/dev/null; then
+  groff -man -Tutf8 -ww scute.1 >/dev/null 2>groff.err || fail "groff rejected the manual page"
+  if [ -s groff.err ]; then fail "groff complained about the manual page"; fi
+fi
+say "completions and man" "valid"
+
 echo "smoke: all good"
