@@ -508,34 +508,96 @@ front of a sandboxed agent, including one that does understand verbs, and know
 the agent cannot route around it. What the platform gives you in exchange is a
 daemon, an image, and a cluster.
 
-And for the credential half there is
-[KeyFence](https://github.com/atgreen/keyfence), which makes a key worthless
-outside its destination: the agent holds an opaque `kf_` token and the real
-credential never enters its address space. Scute drops secrets from the
-environment, which stops a command reading what it was never given — but a
-command that legitimately needs a key still holds one. Those two compose, and
-scute can run the proxy for you:
+## Credentials the sandbox cannot read
+
+Dropping secrets from the environment stops a command reading what it was never
+given. It does nothing for the key the command legitimately needs: an agent that
+calls an API holds that API's key, and so does everything it runs.
+
+[KeyFence](https://github.com/atgreen/keyfence) is a credential broker — an
+HTTPS proxy that holds the real secret and swaps it in on each request, so the
+agent holds only an opaque `kf_` token locked to one destination. Scute drives
+it. Say so in the policy:
+
+```toml
+[network]
+mode = "host"
+proxy = "http://127.0.0.1:10210"    # the broker, and the only reachable address
+
+[credentials.anthropic]
+secret-file = "~/.secrets/anthropic"   # read by scute, never by the sandbox
+destinations = ["api.anthropic.com"]   # what the token is worth anything at
+env = "ANTHROPIC_API_KEY"              # where the sandbox finds its token
+```
+
+```sh
+scute run --policy agent.policy -- claude
+```
+
+Scute reads the secret in the supervisor, mints a destination-locked token,
+hands the sandbox that token and the CA certificate its runtimes must trust,
+runs the command, and revokes the token afterwards. The sandboxed command's
+environment holds `ANTHROPIC_API_KEY=kf_dc8b83…` and nothing else of yours.
+
+The part no proxy can do for itself is the reason to run it under scute.
+`HTTPS_PROXY` is a convention: an agent that ignores it, a subprocess that never
+read it, or a prompt-injected one told to avoid it connects straight out and the
+broker never sees the request. Here the kernel permits the proxy's port and
+refuses every other address, so going around the swap is not something the
+command can choose. Nor can it mint tokens of its own — the broker's control
+port is not the proxy port, so it is refused like anything else:
+
+```console
+$ scute run --policy agent.policy -- bash -c 'exec 3<>/dev/tcp/127.0.0.1/10212'
+bash: /dev/tcp/127.0.0.1/10212: Permission denied
+```
+
+`scute run --dry-run` prints which file a policy would read before it reads it,
+and `scute doctor` says whether a broker is there to attach to.
+
+### Run the broker as a service
+
+Scute attaches to a broker that is already running, and starts one per run only
+when there is none. A service is the better arrangement: no broker startup on
+each run, one certificate authority that stays put between runs, and the process
+holding your secrets confined by systemd rather than inheriting whatever scute
+was started with.
+
+```sh
+cp releng/keyfence.service ~/.config/systemd/user/
+systemctl --user enable --now keyfence
+```
+
+The shipped unit listens on loopback only, generates a control API key on first
+start where scute looks for it, and runs the broker with `NoNewPrivileges`,
+`ProtectSystem=strict`, an empty capability bounding set, and a system call
+filter — the process holding the real credentials should be able to do less than
+the agent it protects, not more.
+
+Two properties fall out, each enforced by something that does not trust the
+other: the real credential was never in the sandbox, because scute never put it
+there; and the token is worthless anywhere but its destination, because that is
+what the broker does with it.
+
+## Anything else beside the sandbox
+
+`--with` starts any command beside the sandbox and stops it afterwards — the
+broker arrangement above, done by hand, or anything else the sandboxed command
+needs to talk to:
 
 ```sh
 scute run --policy agent.policy --with 'keyfence serve' -- claude
 ```
 
-`--with` starts that command beside the sandbox — outside it, since it is the
-thing holding your secrets — waits until the port the policy names answers, runs
-the sandboxed command, and stops it afterwards. Three properties fall out, each
-enforced by something that does not trust the others:
-
-- the agent cannot reach the network except through the proxy, because the kernel
-  permits TCP to that port and nothing else;
-- the real credential was never in the sandbox, because the environment filter
-  passed only the opaque token;
-- and the token is worthless anywhere but its destination, because that is what
-  KeyFence does with it.
+It waits until the port the policy's proxy names answers before running the
+sandboxed command, so nothing races the thing it depends on.
 
 The command comes from the command line and **never from a policy**. A policy
 travels with the code being sandboxed; one that could start a process on the host
 would be a way to run anything at all. (`--with` splits on spaces, so anything
-with quoting belongs in a small script.)
+with quoting belongs in a small script.) A `[credentials]` policy is the
+exception that proves the rule: it cannot name a program, only ask for the one
+broker scute knows how to drive.
 
 ```toml
 [filesystem]

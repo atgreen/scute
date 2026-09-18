@@ -1,0 +1,31 @@
+# An agent that may call one API, and cannot hold the key to it.
+#
+#     scute run --policy docs/agent.policy -- claude
+#
+# What the sandboxed command gets is an opaque kf_ token that works at
+# api.anthropic.com and nowhere else, through a broker it cannot go around,
+# with the real key read by scute and never placed inside the sandbox.
+#
+# Wants a credential broker.  Run one as a service:
+#
+#     cp releng/keyfence.service ~/.config/systemd/user/
+#     systemctl --user enable --now keyfence
+#
+# Check with: scute doctor
+
+[filesystem]
+read-execute = ["/usr"]
+read = ["/etc", "/proc"]
+read-write = [".", "/dev/null"]
+
+[network]
+mode = "host"
+proxy = "http://127.0.0.1:10210"       # the broker: the one reachable address
+
+[credentials.anthropic]
+secret-file = "~/.secrets/anthropic"   # read by scute, never by the sandbox
+destinations = ["api.anthropic.com"]   # where the token is worth anything
+env = "ANTHROPIC_API_KEY"              # where the sandbox finds its token
+
+[environment]
+keep = ["ANTHROPIC_MODEL"]

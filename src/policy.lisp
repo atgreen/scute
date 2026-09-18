@@ -62,6 +62,21 @@ parser read it."
   (kind nil :read-only t)
   (path nil :read-only t))
 
+(defstruct (credential-request (:constructor make-credential-request
+                                   (name secret-file destinations variable ttl)))
+  "One credential the sandbox needs, and what the sandbox is given instead."
+  (name nil :read-only t)
+  (secret-file nil :read-only t)   ; read by the supervisor, never by the sandbox
+  (destinations nil :read-only t)  ; hosts the token is locked to
+  (variable nil :read-only t)      ; the environment variable the token lands in
+  (ttl nil :read-only t))          ; seconds, or NIL for the run's own limit
+
+(defstruct (broker-settings (:constructor make-broker-settings
+                                (name proxy-port control-port)))
+  (name nil :read-only t)          ; :keyfence is the only one v0 knows
+  (proxy-port nil :read-only t)
+  (control-port nil :read-only t))
+
 (defstruct (resource-limits (:constructor make-resource-limits
                                 (&key memory processes cpu-percent wall-clock)))
   "The limits a policy asks for.  NIL means the policy did not ask.
@@ -100,6 +115,8 @@ is the only kind anyone can check.")
   (bind-tcp    nil :read-only t)     ; the only ports it may listen on
   (proxy      nil :read-only t)      ; everything outbound goes through this
   (allow      nil :read-only t)      ; the only addresses it may reach
+  (broker     nil :read-only t)      ; a credential broker to run beside it
+  (credentials nil :read-only t)     ; what that broker is asked to hold
   (pathname   nil :read-only t))
 
 ;;── The document Scute expects ─────────────────────────────────────────────────
@@ -241,6 +258,97 @@ Answers the mode and that permission."
                         (mapcar (lambda (text) (parse-endpoint text pathname))
                                 (string-array (cdr named) "allow" pathname)))))))))))
 
+(defun expand-home (path)
+  "PATH with a leading ~/ replaced by the home directory.
+
+A secret lives under a home directory more often than not, and a policy that
+had to spell that out could not be shared between two people's machines."
+  (if (and (> (length path) 1) (char= #\~ (char path 0)) (char= #\/ (char path 1)))
+      (concatenate 'string (or (sb-posix:getenv "HOME") "~") (subseq path 1))
+      path))
+
+(defun validate-credential (name value pathname)
+  "One [credentials.NAME] table: a secret to hold, and where its token goes."
+  (let ((entries (table-entries value (format nil "credentials.~A" name) pathname)))
+    (check-known-keys entries '("secret-file" "destinations" "env" "ttl")
+                      (format nil "[credentials.~A]" name) pathname)
+    (flet ((entry (key) (cdr (assoc key entries :test #'string=))))
+      (let ((secret-file (let ((raw (entry "secret-file")))
+                           (when raw (scalar-string raw "secret-file" pathname))))
+            (variable (let ((raw (entry "env")))
+                        (when raw (scalar-string raw "env" pathname))))
+            (destinations (let ((raw (entry "destinations")))
+                            (when raw (string-array raw "destinations" pathname)))))
+        (unless secret-file
+          (policy-error (format nil "[credentials.~A] must say which secret-file ~
+                                     holds the credential"
+                                name)
+                        pathname))
+        (unless variable
+          (policy-error (format nil "[credentials.~A] must say which env variable ~
+                                     the sandbox receives its token in"
+                                name)
+                        pathname))
+        (unless destinations
+          (policy-error (format nil "[credentials.~A] must name the destinations ~
+                                     the token is locked to"
+                                name)
+                        pathname))
+        ;; A token that works anywhere is not containment, it is a second copy
+        ;; of the credential with a different name on it.
+        (when (member "*" destinations :test #'string=)
+          (policy-error (format nil "[credentials.~A] destinations cannot be \"*\"; ~
+                                     a token is worth having because it is locked ~
+                                     to somewhere"
+                                name)
+                        pathname))
+        (make-credential-request
+         name (expand-home secret-file) destinations variable
+         (let ((ttl (entry "ttl"))) (when ttl (parse-duration ttl pathname))))))))
+
+(defparameter +default-control-port-offset+ 2
+  "How far the broker's control API sits from its proxy port, by its own default
+layout: KeyFence proxies on 10210 and answers control requests on 10212.")
+
+(defun validate-credentials (value proxy-port pathname)
+  "The [credentials] table: which broker to run, and what it holds for us.
+Answers the broker settings and the credentials it will be asked for."
+  (let ((entries (table-entries value "credentials" pathname)))
+    (let ((scalars (remove-if #'consp entries :key #'cdr))
+          (tables (remove-if-not #'consp entries :key #'cdr)))
+      (check-known-keys scalars '("broker" "control-port") "[credentials]" pathname)
+      (let* ((broker (let ((named (assoc "broker" scalars :test #'string=)))
+                       ;; Naming one is optional: there is one broker, and a
+                       ;; policy that asks for credentials has already said the
+                       ;; interesting part.
+                       (if named
+                           (scalar-string (cdr named) "broker" pathname)
+                           "keyfence")))
+             (name (if (string= "keyfence" broker)
+                       :keyfence
+                       (policy-error
+                        (format nil "broker ~S is not one Scute knows; expected ~
+                                     \"keyfence\""
+                                broker)
+                        pathname)))
+             (control (or (cdr (assoc "control-port" scalars :test #'string=))
+                          (+ proxy-port +default-control-port-offset+))))
+        (unless (and (integerp control) (< 0 control 65536))
+          (policy-error "control-port is a TCP port number" pathname))
+        (when (= control proxy-port)
+          (policy-error "the broker's control port cannot be its proxy port: the ~
+                         sandbox may reach the proxy, and the control port is ~
+                         where credentials are handed over"
+                        pathname))
+        (unless tables
+          (policy-error "[credentials] names a broker but no credentials; add a ~
+                         [credentials.NAME] table saying what it should hold"
+                        pathname))
+        (values (make-broker-settings name proxy-port control)
+                (mapcar (lambda (entry)
+                          (validate-credential (car entry) (cdr entry) pathname))
+                        tables))))))
+
 (defparameter +duration-multipliers+
   '((#\s . 1) (#\m . 60) (#\h . 3600)))
 
@@ -349,13 +457,32 @@ silently.")
                                     :test #'string=))))
                    environment)))
 
+(defun credentials-proxy-port (tables pathname)
+  "The port the policy's proxy sits on, which is where the broker must listen.
+
+A brokered run has no port of its own to choose.  The proxy in [network] is
+already the one address the sandbox may reach, so that is where the broker has
+to be -- and a policy asking for credentials without naming a proxy is asking
+for a swap that nothing routes through."
+  (let ((network (cdr (assoc "network" tables :test #'string=))))
+    (let ((proxy (and network
+                      (let ((named (assoc "proxy" (table-entries network "network" pathname)
+                                          :test #'string=)))
+                        (when named (scalar-string (cdr named) "proxy" pathname))))))
+      (unless proxy
+        (policy-error "[credentials] needs [network] to name a proxy: the broker ~
+                       has to be the one address the sandbox can reach, or the ~
+                       command can simply go around it"
+                      pathname))
+      (proxy-url-port proxy pathname))))
+
 (defun validate-sandbox-policy (document &optional pathname)
   "Check DOCUMENT against the policy schema and answer a SANDBOX-POLICY.
 Anything the schema does not name is an error: a policy Scute half understands
 is a sandbox the operator half asked for."
   (let ((tables (table-entries document "policy" pathname)))
     (check-known-keys tables '("filesystem" "network" "limits" "audit"
-                               "environment")
+                               "environment" "credentials")
                       "a policy" pathname)
     (flet ((table (name) (cdr (assoc name tables :test #'string=))))
       (let ((filesystem (table "filesystem")))
@@ -382,6 +509,15 @@ is a sandbox the operator half asked for."
                    (validate-limits (table "limits") pathname))
          :audit (when (table "audit")
                   (validate-audit (table "audit") pathname))
+         :broker (when (table "credentials")
+                   (validate-credentials (table "credentials")
+                                         (credentials-proxy-port tables pathname)
+                                         pathname))
+         :credentials (when (table "credentials")
+                        (nth-value 1 (validate-credentials
+                                      (table "credentials")
+                                      (credentials-proxy-port tables pathname)
+                                      pathname)))
          :environment (when (table "environment")
                         (validate-environment (table "environment") pathname))
          :pathname pathname)))))
@@ -406,7 +542,9 @@ is a sandbox the operator half asked for."
   (proxy       nil :read-only t)
   (allow       nil :read-only t)
   (limits      nil :read-only t)
-  (audit       nil :read-only t))
+  (audit       nil :read-only t)
+  (broker      nil :read-only t)
+  (credentials nil :read-only t))
 
 (defun canonical-directory (pathname)
   "PATHNAME as a canonical directory name, ending in a slash."
@@ -520,7 +658,9 @@ nothing here touches the kernel."
      :proxy (sandbox-policy-proxy policy)
      :allow (sandbox-policy-allow policy)
      :limits (sandbox-policy-limits policy)
-     :audit (sandbox-policy-audit policy))))
+     :audit (sandbox-policy-audit policy)
+     :broker (sandbox-policy-broker policy)
+     :credentials (sandbox-policy-credentials policy))))
 
 (defun compile-command-launch-plan (command filesystem &optional directory keep)
   "A launch plan for COMMAND with FILESYSTEM given as (KIND PATH) forms.
@@ -541,15 +681,20 @@ a policy's would be, so the two routes cannot diverge."
                          :keep keep)))
 
 (defun revised-launch-plan (plan &key (wall-clock :keep) (unix-sockets :keep)
-                                      (network :keep))
+                                      (network :keep) (environment :keep)
+                                      (filesystem :keep))
   "PLAN with what the command line overrode, whatever its policy said.
 A plan is immutable, so an override makes another one rather than changing it."
   (let ((limits (launch-plan-limits plan)))
     (%make-launch-plan
      :command (launch-plan-command plan)
      :directory (launch-plan-directory plan)
-     :environment (launch-plan-environment plan)
-     :filesystem (launch-plan-filesystem plan)
+     :environment (if (eq environment :keep)
+                      (launch-plan-environment plan)
+                      environment)
+     :filesystem (if (eq filesystem :keep)
+                     (launch-plan-filesystem plan)
+                     filesystem)
      :network (if (eq network :keep) (launch-plan-network plan) network)
      :unix-sockets (if (eq unix-sockets :keep)
                        (launch-plan-unix-sockets plan)
@@ -559,6 +704,8 @@ A plan is immutable, so an override makes another one rather than changing it."
      :proxy (launch-plan-proxy plan)
      :allow (launch-plan-allow plan)
      :audit (launch-plan-audit plan)
+     :broker (launch-plan-broker plan)
+     :credentials (launch-plan-credentials plan)
      :limits (if (eq wall-clock :keep)
                  limits                       ; including none at all
                  (make-resource-limits
@@ -604,6 +751,22 @@ was asked for."
     (when (or connect bind)
       (format stream "~13T~@[connect tcp ~{~D~^ ~}~]~@[ bind tcp ~{~D~^ ~}~]~%"
               connect bind)))
+  ;; Printed in full, because this is the one place a policy asks Scute to read
+  ;; something the sandbox itself could not: whoever reviews the policy should
+  ;; see which files that is before any of them is opened.
+  (dolist (request (launch-plan-credentials plan))
+    (format stream "credential   ~A~%" (credential-request-name request))
+    (format stream "~13Tholds ~A~%" (credential-request-secret-file request))
+    (format stream "~13Tthe sandbox gets a token in ~A~%"
+            (credential-request-variable request))
+    (format stream "~13Tusable only at ~{~A~^, ~}~%"
+            (credential-request-destinations request)))
+  (let ((broker (launch-plan-broker plan)))
+    (when broker
+      (format stream "broker       ~(~A~), proxy on ~D, control on ~D~%"
+              (broker-settings-name broker)
+              (broker-settings-proxy-port broker)
+              (broker-settings-control-port broker))))
   ;; Names only.  The values are the caller's own, but a plan is the sort of
   ;; thing that ends up in a log.
   (format stream "environment  ~:[nothing~;~:*~{~A~^ ~}~]~%"

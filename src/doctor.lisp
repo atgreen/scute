@@ -117,6 +117,31 @@ Optional, like limits: a policy that does not ask for one is unaffected."
         (make-probe "address egress" :ok "CAP_BPF and CAP_NET_ADMIN are held")
         (make-probe "address egress" :info reason))))
 
+(defparameter +default-broker-control-port+ 10212
+  "Where a credential broker answers control requests by its own default.")
+
+(defun probe-broker ()
+  "Whether a credential broker is running for Scute to attach to.
+
+Optional, and reported either way: a policy with no [credentials] table never
+looks for one, and a policy that has one will start a broker per run rather than
+fail.  Running it as a service is better than that, which is what this says."
+  (let ((certificate (probe-file (broker-certificate-path))))
+    (cond ((broker-answering-p +default-broker-control-port+)
+           (make-probe "credential broker" :ok
+                       (format nil "answering on ~D~:[; no CA certificate at ~A~;~]"
+                               +default-broker-control-port+
+                               certificate (broker-certificate-path))))
+          (certificate
+           (make-probe "credential broker" :info
+                       (format nil "not running; its CA is at ~A, so a policy ~
+                                    asking for credentials would start one per run ~
+                                    (see releng/keyfence.service)"
+                               (namestring certificate))))
+          (t
+           (make-probe "credential broker" :info
+                       "none installed; policies without [credentials] are unaffected")))))
+
 (defun probe-audit ()
   "What the host would offer an audit program, without loading one.
 Auditing is optional in the design and absent from this build, so this reports
@@ -185,6 +210,7 @@ the kernel side only, and never as a failure."
         (probe-resource-limits)
         (probe-egress)
         (probe-seccomp)
+        (probe-broker)
         (probe-audit)
         (probe-capabilities)))
 

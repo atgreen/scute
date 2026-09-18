@@ -1,0 +1,61 @@
+# A credential broker for sandboxed agents, as a user service.
+#
+# SPDX-License-Identifier: MIT
+#
+# Install:
+#     mkdir -p ~/.config/systemd/user
+#     cp releng/keyfence.service ~/.config/systemd/user/
+#     systemctl --user enable --now keyfence
+#
+# Scute attaches to whatever is already answering on the control port, so with
+# this running a brokered sandbox costs no broker startup, and the CA the
+# agent's runtimes trust stays the same between runs.
+#
+# The listeners are on the loopback interface only.  Nothing off this machine
+# can reach the proxy, and the sandbox reaches it because its policy names it --
+# the one address the kernel permits it.
+
+[Unit]
+Description=KeyFence credential broker
+Documentation=https://github.com/atgreen/keyfence
+After=network.target
+
+[Service]
+Type=simple
+
+# The control API mints tokens out of real credentials, so it is worth a key
+# even on a loopback port: every process of this user can reach 127.0.0.1.
+# Generated once, kept where Scute looks for it, readable only by its owner.
+ExecStartPre=/bin/sh -c 'mkdir -p %h/.keyfence && test -s %h/.keyfence/api-key || { umask 077; head -c 16 /dev/urandom | od -An -tx1 | tr -d " \\n" > %h/.keyfence/api-key; }'
+ExecStart=/bin/sh -c 'exec keyfence -proxy 127.0.0.1:10210 -api 127.0.0.1:10212 -ssh 127.0.0.1:10211 -data-dir %h/.keyfence -api-key "$(cat %h/.keyfence/api-key)"'
+
+Restart=on-failure
+RestartSec=2
+
+# This process holds the real credentials, which is the whole point of it: it
+# should be able to do less than the agent it is protecting, not more.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.keyfence
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete
+CapabilityBoundingSet=
+UMask=0077
+
+[Install]
+WantedBy=default.target

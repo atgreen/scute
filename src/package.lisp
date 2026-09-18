@@ -135,6 +135,41 @@
            #:*learned-connections*
            #:observations-connections
            #:watched-syscall
+           ;; Credential brokering
+           #:credential-request
+           #:make-credential-request
+           #:credential-request-name
+           #:credential-request-secret-file
+           #:credential-request-destinations
+           #:credential-request-variable
+           #:credential-request-ttl
+           #:broker-settings
+           #:make-broker-settings
+           #:broker-settings-name
+           #:broker-settings-proxy-port
+           #:broker-settings-control-port
+           #:launch-plan-broker
+           #:launch-plan-credentials
+           #:call-with-broker
+           #:start-broker
+           #:stop-broker
+           #:mint-token
+           #:revoke-tokens
+           #:broker-certificate
+           #:broker-certificate-path
+           #:broker-answering-p
+           #:broker-helper
+           #:broker-environment
+           #:broker-tokens
+           #:broker-error
+           #:read-secret
+           #:plan-with-broker
+           #:loopback-request
+           #:http-response-status
+           #:http-response-body
+           #:json-string-field
+           #:json-escape
+           #:expand-home
            ;; Shell completions
            #:write-completions
            #:command-tree

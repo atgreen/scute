@@ -350,6 +350,45 @@ One right is deliberately left ungoverned in v0: `LANDLOCK_ACCESS_FS_IOCTL_DEV`
 an interactive shell nobody can run is not a useful sandbox. Device `ioctl` is
 therefore out of v0's scope, stated here rather than discovered later.
 
+## Credential brokering
+
+A sandbox that may call an API needs that API's key, and an environment filter
+cannot help: the key is exactly what the command was given on purpose. The
+containment that works is a broker — an HTTPS proxy holding the real secret,
+handing out destination-locked opaque tokens, and swapping one for the other on
+each request. KeyFence is such a broker.
+
+What Scute contributes is the part a proxy cannot do for itself. `HTTPS_PROXY`
+is a convention; a command is free to ignore it. Under a policy naming a proxy,
+the kernel permits that one port and refuses every other address, so the swap is
+not something the command can route around — and the broker's control port,
+being a different port, is refused like anything else, so the sandbox cannot
+mint tokens of its own.
+
+The arrangement:
+
+- `[credentials.NAME]` in a policy names a secret file, the destinations its
+  token is locked to, and the environment variable the token lands in. A policy
+  cannot name a program to run: it selects the one broker Scute knows how to
+  drive, started with arguments Scute writes. The alternative — a policy that
+  could start an arbitrary host process — is a way to run anything at all.
+- Scute attaches to a broker already listening, and starts one per run only when
+  there is none. Attaching is the intent: `releng/keyfence.service` runs it as a
+  systemd user service, which costs no startup per run, keeps one certificate
+  authority between runs, and confines the process holding the secrets more
+  tightly than the shell Scute was started from.
+- Secrets are read in the supervisor, before the sandbox exists, and handed to
+  the broker over loopback. They are never placed in the sandbox's environment,
+  never written into a command line, and never passed through a shell.
+- The sandbox is given read access to the broker's CA certificate — the file,
+  not the directory holding it, because the CA's private key sits beside it.
+- Tokens are revoked when the run ends. On an attached broker that outlives the
+  sandbox, nothing else would come along to do it.
+
+`scute run --dry-run` prints which files a policy would read before any of them
+is opened, because a policy asking Scute to read something the sandbox itself
+could not reach is the one place a policy widens what the operator is trusting.
+
 ## Module map
 
 - `src/conditions.lisp` defines stable setup, policy, enforcement, and child

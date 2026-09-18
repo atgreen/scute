@@ -138,18 +138,24 @@ argument gets you.")
                  :unix-sockets (if (clingon:getopt cmd :allow-unix-sockets)
                                    t
                                    :keep))))
+      ;; A dry run answers before anything is started: no helper, no broker, and
+      ;; above all no secret read.  Printing what would happen must not be a way
+      ;; to make some of it happen.
+      (when (clingon:getopt cmd :dry-run)
+        ;; Print first, then refuse: the plan is what the caller asked to see,
+        ;; and a refusal explains itself better beside it.
+        (print-launch-plan plan)
+        (refuse-unimplemented-controls plan)
+        (uiop:quit 0 t))
       (call-with-helper
        (clingon:getopt cmd :with)
        (let ((proxy (launch-plan-proxy plan)))
          (and proxy (proxy-url-port proxy nil)))
        (lambda ()
-      (cond ((clingon:getopt cmd :dry-run)
-             ;; Print first, then refuse: the plan is what the caller asked to
-             ;; see, and a refusal explains itself better beside it.
-             (print-launch-plan plan)
-             (refuse-unimplemented-controls plan)
-             (uiop:quit 0 t))
-            ((launch-plan-audit plan)
+        (call-with-broker
+         plan
+         (lambda (plan)
+      (cond ((launch-plan-audit plan)
              (multiple-value-bind (result observations)
                  (run-launch-plan plan :observe t)
                (let ((events (audit-policy-events (launch-plan-audit plan)))
@@ -183,7 +189,8 @@ argument gets you.")
                (when (sandbox-result-timed-out result)
                  (format *error-output*
                          "~&scute: the command ran past its time limit and was stopped~%"))
-               (uiop:quit (command-exit-status result) t)))))))))
+               (uiop:quit (command-exit-status result) t)))))
+         :program (clingon:getopt cmd :broker-path)))))))
 
 (defun make-run-command ()
   (clingon:make-command
@@ -207,6 +214,10 @@ argument gets you.")
                    (clingon:make-option
                     :flag :short-name #\n :long-name "dry-run" :key :dry-run
                     :description "Print the compiled plan and run nothing")
+                   (clingon:make-option
+                    :string :long-name "broker-path" :key :broker-path
+                    :parameter "PATH"
+                    :description "Run this credential broker, not the one on PATH")
                    (clingon:make-option
                     :string :long-name "with" :key :with :parameter "COMMAND"
                     :description "Run COMMAND beside the sandbox -- a credential proxy, say")

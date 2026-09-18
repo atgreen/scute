@@ -30,13 +30,16 @@
   (remove "" (uiop:split-string text :separator " ") :test #'string=))
 
 (defun start-helper (text)
-  "Start TEXT as a process beside the sandbox, and answer it.
+  "Start TEXT as a process beside the sandbox, and answer it."
+  (start-helper-arguments (split-command text) text))
+
+(defun start-helper-arguments (command &optional label)
+  "Start COMMAND, an argument vector, as a process beside the sandbox.
 
 Started with the same clone3 the sandbox uses rather than with run-program,
 because the supervisor must stay single-threaded: a thread would prevent it
 creating the user namespace the sandbox needs."
-  (let* ((command (split-command text))
-         (program (resolve-executable (first command)))
+  (let* ((program (resolve-executable (first command)))
          (path (cffi:foreign-string-alloc program))
          (argv (foreign-string-vector command))
          (envp (foreign-string-vector (sb-ext:posix-environ))))
@@ -46,7 +49,7 @@ creating the user namespace the sandbox needs."
       (when (zerop pid)
         (%execve path argv envp)
         (%exit 127))
-      (%make-helper pid text))))
+      (%make-helper pid (or label (format nil "~{~A~^ ~}" command))))))
 
 (defun helper-running-p (helper)
   (cffi:with-foreign-object (status :int)
