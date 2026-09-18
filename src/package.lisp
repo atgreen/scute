@@ -100,6 +100,13 @@
            #:proxy-address-bindable-p
            #:compile-egress-guard
            #:egress-guard-available-p
+           #:install-egress-redirect
+           #:compile-egress-redirect
+           #:egress-redirect-forms
+           #:endpoint-address-word
+           #:network-port-word
+           #:proxy-endpoint
+           #:+proxied-ports+
            #:sandbox-policy-connect-tcp
            #:sandbox-policy-bind-tcp
            #:sandbox-policy-unix-sockets

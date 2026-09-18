@@ -226,9 +226,10 @@ Answers the mode and that permission."
           (unix (assoc "unix-sockets" entries :test #'string=)))
       (let ((setting (cond ((string= "none" mode) :none)
                            ((string= "host" mode) :host)
+                           ((string= "proxied" mode) :proxied)
                            (t (policy-error
-                               (format nil "network mode ~S is not one v0 knows; ~
-                                            expected \"none\" or \"host\""
+                               (format nil "network mode ~S is not one Scute knows; ~
+                                            expected \"none\", \"host\" or \"proxied\""
                                        mode)
                                pathname)))))
         (when (and unix (not (member (cdr unix) '(t nil))))
@@ -254,12 +255,34 @@ Answers the mode and that permission."
                                   ;; around it, so naming one grants its port
                                   ;; and, unless the policy says otherwise,
                                   ;; nothing else.
-                                  (when proxy-port (list proxy-port))))
+                                  (when proxy-port (list proxy-port))
+                                  ;; Proxied rewrites the destination in the
+                                  ;; kernel, and Landlock has already seen the
+                                  ;; original by then: it checks the connect
+                                  ;; syscall, the rewrite happens further in. So
+                                  ;; the web ports have to pass here, and what
+                                  ;; constrains where they actually go is the BPF
+                                  ;; program.
+                                  (when (string= "proxied" mode) (list 80 443))))
                  (bind (ports "bind-tcp")))
             (when (and (eq setting :none) (or connect bind))
               (policy-error "connect-tcp and bind-tcp name ports on a network, ~
                              and mode is \"none\", which is the absence of one"
                             pathname))
+            ;; Proxied means the kernel sends every web connection to the proxy,
+            ;; so there has to be one, and it is the egress control: an allow list
+            ;; beside it would be two answers to the same question.
+            (when (eq setting :proxied)
+              (unless proxy
+                (policy-error "mode \"proxied\" sends every web connection to a ~
+                               proxy, so [network] has to name one"
+                              pathname))
+              (when (assoc "allow" entries :test #'string=)
+                (policy-error "mode \"proxied\" is the egress control: every web ~
+                               connection goes to the proxy and nothing else goes ~
+                               anywhere, so an allow list would be a second answer ~
+                               to the same question"
+                              pathname)))
             (values setting (and unix (eq t (cdr unix))) connect bind proxy
                     (let ((named (assoc "allow" entries :test #'string=)))
                       (when named
@@ -796,6 +819,12 @@ capabilities to the binary made working policies start failing -- the rule was
 added automatically, and then nothing could install it."
   (and (egress-guard-available-p) (limits-installable-p)))
 
+(defun proxy-endpoint (url)
+  "The endpoint a proxy URL names, resolved."
+  (parse-endpoint (format nil "~A:~D" (or (proxy-url-host url) "127.0.0.1")
+                          (proxy-url-port url nil))
+                  nil))
+
 (defun plan-with-proxy-bound-by-address (plan &optional (guard-available
                                                     (proxy-address-bindable-p)))
   "PLAN with its proxy's address permitted, not only its port.
@@ -859,6 +888,7 @@ compiles being a plan that runs."
   (format stream "network      ~(~A~)~:[~;, unix sockets allowed~]~%"
           (case (launch-plan-network plan)
             (:host "the host's, shared")
+            (:proxied "the host's, with every web connection sent to the proxy")
             (t "none"))
           (launch-plan-unix-sockets plan))
   (let ((proxy (launch-plan-proxy plan)))

@@ -202,7 +202,7 @@ table, an unknown key, a value of the wrong shape or a duplicate key is an error
 | | `read-execute` | array of paths | the same, and execute |
 | | `read-write` | array of paths | read, write, create, delete, rename |
 | | `read-write-execute` | array of paths | the same, and execute |
-| `[network]` | `mode` | `"none"` or `"host"` | no network at all, or the host's, shared |
+| `[network]` | `mode` | `"none"`, `"host"` or `"proxied"` | no network, the host's, or the host's with every web connection sent to the proxy |
 | | `connect-tcp` | array of ports | the only TCP ports the command may connect to |
 | | `bind-tcp` | array of ports | the only TCP ports it may listen on |
 | | `proxy` | URL | set the proxy variables, and permit only its port |
@@ -291,10 +291,32 @@ mode = "host"
 allow = ["api.github.com:443"]       # these addresses only
 ```
 
+```toml
+[network]
+mode = "proxied"
+proxy = "http://127.0.0.1:10210"     # every web connection goes here
+```
+
 A port is not an address: `connect-tcp = [443]` means any host on 443. Naming a
 `proxy` sets `HTTPS_PROXY` and its friends for the command **and** permits TCP
 to that port alone, so a command that ignores the variables still cannot reach
 anything else. It is a proxy rather than a suggestion.
+
+`mode = "proxied"` is the strongest of the four, and the only one that does not
+depend on the command cooperating. The others let a command reach the proxy;
+this one *sends* it there — a BPF program on the sandbox's cgroup rewrites the
+destination of every connection to port 80 or 443, and refuses anything else. A
+tool that ignores `HTTPS_PROXY` gets proxied anyway instead of failing, so a
+credential swap applies to code that never heard of a proxy.
+
+Where the connection was going is not lost: the client still believes it is
+talking to the original host, so it sends that host's name in the TLS handshake
+and the proxy reads it there. TLS to a bare IP address has no name to read and is
+refused. Only 80 and 443 are redirected — sending SSH or a database connection to
+an HTTP proxy would break it, and refusing is clearer than mangling.
+
+This needs [the one privilege](#an-address-allowlist) and a cgroup of its own, as
+the address allowlist does.
 
 `unix-sockets` is separate from all of this, because a network namespace does
 not stop a command reaching `systemd-resolved`, the system bus or an

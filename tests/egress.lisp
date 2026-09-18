@@ -214,3 +214,65 @@ the plan is left alone; an allow list the policy wrote itself is still refused."
     (multiple-value-bind (capable) (call-scute 'egress-guard-available-p)
       (check (or (not (call-scute 'proxy-address-bindable-p)) capable)
              "bindable without the capability to load the program"))))
+
+(deftest test-the-redirect-program-compiles-and-names-the-proxy
+  "A connect4 program may rewrite the destination it was asked about, which is
+what makes a proxy unavoidable rather than merely mandatory.  Compiling needs no
+privileges, so the program's shape is checked wherever the suite runs."
+  (let* ((endpoint (call-scute 'make-endpoint "127.0.0.1" 10210 #(127 0 0 1)))
+         (programs (nth-value 1 (call-scute 'compile-egress-redirect endpoint))))
+    (check (= 1 (length programs)) "expected one program, got ~D" (length programs))
+    (let ((program (first programs)))
+      (check (string= "scute_egress_proxied" (getf program :name))
+             "the program is called ~S" (getf program :name))
+      (check (plusp (length (getf program :insns)))
+             "the program has no instructions")
+      (check (string= "cgroup/connect4" (getf program :section))
+             "attached at ~S, which is not where a destination can be rewritten"
+             (getf program :section)))))
+
+(deftest test-the-redirect-uses-the-byte-order-the-kernel-presents
+  "Byte order is where this sort of code goes wrong, so the numbers compiled into
+the program are pinned: connect4 hands over the address and port in network byte
+order, and a little-endian machine reading those bytes as integers sees them
+reversed."
+  (check (= #x0100007F (call-scute 'endpoint-address-word
+                                   (call-scute 'make-endpoint "127.0.0.1" 1 #(127 0 0 1))))
+         "127.0.0.1 became ~X" (call-scute 'endpoint-address-word
+                                           (call-scute 'make-endpoint "127.0.0.1" 1 #(127 0 0 1))))
+  (check (= #xBB01 (call-scute 'network-port-word 443))
+         "443 became ~X" (call-scute 'network-port-word 443))
+  (check (= #x5000 (call-scute 'network-port-word 80))
+         "80 became ~X" (call-scute 'network-port-word 80))
+  (check (= #xE227 (call-scute (quote network-port-word) 10210))
+         "10210 became ~X" (call-scute 'network-port-word 10210)))
+
+(deftest test-a-proxied-policy-says-what-it-needs-and-refuses-what-it-cannot-mean
+  "Proxied sends every web connection to the proxy, so there has to be one -- and
+an allow list beside it would be a second answer to the same question."
+  (flet ((policy (text) (ignore-errors
+                         (call-scute 'validate-sandbox-policy
+                                     (call-scute 'parse-policy-text text)))))
+    (check (null (policy (format nil "[filesystem]~%read = [\"/etc\"]~%~%~
+                                      [network]~%mode = \"proxied\"~%")))
+           "proxied without a proxy was accepted")
+    (check (null (policy (format nil "[filesystem]~%read = [\"/etc\"]~%~%~
+                                      [network]~%mode = \"proxied\"~%~
+                                      proxy = \"http://127.0.0.1:10210\"~%~
+                                      allow = [\"api.github.com:443\"]~%")))
+           "proxied with an allow list was accepted")
+    (let ((good (policy (format nil "[filesystem]~%read = [\"/etc\"]~%~%~
+                                     [network]~%mode = \"proxied\"~%~
+                                     proxy = \"http://127.0.0.1:10210\"~%"))))
+      (check good "a proper proxied policy was refused")
+      (when good
+        (let ((plan (call-scute 'compile-launch-plan good '("/bin/true"))))
+          (check (eq :proxied (call-scute 'launch-plan-network plan))
+                 "the mode did not survive into the plan")
+          ;; Landlock sees the connect syscall, and the rewrite happens further
+          ;; in, so the original ports have to pass here.
+          (let ((connect (call-scute 'launch-plan-connect-tcp plan)))
+            (dolist (port '(80 443 10210))
+              (check (member port connect)
+                     "port ~D is not permitted, so the rewrite would never be reached: ~S"
+                     port connect))))))))

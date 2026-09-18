@@ -103,6 +103,68 @@ therefore built from the octets rather than from any host-order number."
          (network-port (logior (ash (logand port #xff) 8) (ash port -8))))
     (logior (ash address 32) network-port)))
 
+(defun endpoint-address-word (endpoint)
+  "ENDPOINT's address as connect4 presents it: the octets, in that order."
+  (let ((octets (endpoint-address endpoint)))
+    (logior (ash (aref octets 3) 24) (ash (aref octets 2) 16)
+            (ash (aref octets 1) 8) (aref octets 0))))
+
+(defun network-port-word (port)
+  "PORT as connect4 presents it: sixteen bits, byte-swapped."
+  (logior (ash (logand port #xff) 8) (ash port -8)))
+
+(defparameter +proxied-ports+ '(80 443)
+  "The ports a proxied sandbox has redirected to its proxy.
+
+Only these.  Sending anything else to an HTTP proxy would break it -- an SSH
+session, a database connection -- and refusing those outright says so, where
+quietly delivering them somewhere that cannot speak their protocol would leave
+somebody debugging a timeout.")
+
+(defun egress-redirect-forms (endpoint)
+  "The program that sends a sandbox's web connections to ENDPOINT.
+
+A connect4 program may rewrite the destination it was asked about, which is the
+difference between a proxy that a command has to be persuaded to use and one it
+cannot avoid.  HTTPS_PROXY is a convention; this is not.
+
+Where the connection was going is not lost by the rewrite: the client still
+believes it is talking to the original host, so it sends that host's name in the
+TLS handshake, and the proxy reads it there.
+
+The proxy's address and port are compiled in rather than read from a map, because
+compiling needs no privileges and happens once per run anyway."
+  (let ((address (endpoint-address-word endpoint))
+        (port (network-port-word (endpoint-port endpoint))))
+    `((whistler:defprog scute-egress-proxied
+       (:type :cgroup-sock-addr :section "cgroup/connect4" :license "GPL")
+       (let* ((destination u32 (ctx user-ip4))
+              (dport u32 (ctx user-port)))
+         ;; The web ports go to the proxy; the proxy itself is left alone, so that
+         ;; the redirected connection is not redirected again; everything else is
+         ;; refused, because a sandbox whose egress is a proxy has no other way
+         ;; out by definition.
+         (if (= dport ,(network-port-word 443))
+             (progn (setf (ctx user-ip4) ,address)
+                    (setf (ctx user-port) ,port)
+                    1)
+             (if (= dport ,(network-port-word 80))
+                 (progn (setf (ctx user-ip4) ,address)
+                        (setf (ctx user-port) ,port)
+                        1)
+                 (if (= dport ,port)
+                     (if (= destination ,address) 1 0)
+                     0))))))))
+
+(defun compile-egress-redirect (endpoint)
+  "Compile the redirect for ENDPOINT.  Touches no kernel."
+  (uiop:symbol-call
+   '#:whistler/loader '#:compile-bpf-forms
+   '()
+   (mapcar (lambda (form)
+             (uiop:symbol-call '#:whistler/loader '#:whistler-intern-form form))
+           (egress-redirect-forms endpoint))))
+
 ;;── Installing it ──────────────────────────────────────────────────────────────
 
 (defun egress-guard-available-p ()
@@ -175,3 +237,33 @@ Answers the attachment, which the supervisor detaches when the sandbox ends."
                         cgroup
                         (symbol-value (uiop:find-symbol* '#:+bpf-cgroup-inet4-connect+
                                                          '#:whistler/loader))))))
+
+(defun install-egress-redirect (cgroup endpoint)
+  "Send CGROUP's web connections to ENDPOINT, and refuse everything else.
+
+The same privileges and the same attachment point as the guard; a different
+answer to the same question.  The guard says which addresses a sandbox may
+reach; this says that it reaches the proxy whatever it asked for."
+  (multiple-value-bind (available reason) (egress-guard-available-p)
+    (unless available
+      (setup-error :egress-redirect :detail (format nil "~A" reason))))
+  (let ((narration (make-string-output-stream)))
+    (multiple-value-bind (map-specs prog-specs) (compile-egress-redirect endpoint)
+      (declare (ignore map-specs))
+      (let ((progs (handler-case
+                       (with-narration-captured narration
+                         (uiop:symbol-call '#:whistler/loader '#:session-load-progs
+                                           prog-specs '()))
+                     (error (condition)
+                       (setup-error :load-egress-redirect
+                                    :detail (format nil "~A~@[; the loader said: ~A~]"
+                                                    condition
+                                                    (let ((said (get-output-stream-string
+                                                                 narration)))
+                                                      (and (plusp (length said)) said))))))))
+        (uiop:symbol-call '#:whistler/loader '#:attach-cgroup
+                          (uiop:symbol-call '#:whistler/loader '#:prog-info-fd
+                                            (cdr (first progs)))
+                          cgroup
+                          (symbol-value (uiop:find-symbol* '#:+bpf-cgroup-inet4-connect+
+                                                           '#:whistler/loader)))))))

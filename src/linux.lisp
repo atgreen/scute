@@ -38,7 +38,9 @@ is how a policy says the command shares the host's, which some builds need and
 which the policy therefore has to say out loud."
   (ecase mode
     (:none +sandbox-clone-flags+)
-    (:host (logandc2 +sandbox-clone-flags+ +clone-newnet+))))
+    ;; Proxied is the host's network with every outbound connection rewritten to
+    ;; the proxy, so it needs the same namespace arrangement as :host.
+    ((:host :proxied) (logandc2 +sandbox-clone-flags+ +clone-newnet+))))
 
 (defconstant +clone-args-size-ver0+ 64)
 

@@ -408,11 +408,17 @@ that is wrong at once instead of once per attempt."
         (scute-error (condition) (note "seccomp" (princ-to-string condition))))
       ;; Only the limits a cgroup enforces need a delegated subtree; a
       ;; wall-clock limit is the supervisor's own clock.
-      (when (launch-plan-allow plan)
+      (when (or (launch-plan-allow plan)
+                (eq :proxied (launch-plan-network plan)))
         (multiple-value-bind (available reason) (egress-guard-available-p)
-          (unless available (note "address-level egress" reason))))
+          (unless available
+            (note (if (eq :proxied (launch-plan-network plan))
+                      "proxied egress"
+                      "address-level egress")
+                  reason))))
       (when (or (cgroup-limits-p (launch-plan-limits plan))
-                (launch-plan-allow plan))
+                (launch-plan-allow plan)
+                (eq :proxied (launch-plan-network plan)))
         (multiple-value-bind (installable root explanation) (limits-installable-p)
           (declare (ignore root))
           (unless installable
@@ -457,7 +463,8 @@ rules to enforce, while an explaining run has the caller's."
   (let ((cgroup (let ((limits (launch-plan-limits plan)))
                   ;; An address allowlist needs a cgroup to attach its guard to,
                   ;; whether or not the policy asked for any limits.
-                  (when (or (cgroup-limits-p limits) (launch-plan-allow plan))
+                  (when (or (cgroup-limits-p limits) (launch-plan-allow plan)
+                            (eq :proxied (launch-plan-network plan)))
                     (create-sandbox-cgroup (or limits (make-resource-limits))))))
         (guard nil)
         (resources nil)
@@ -466,6 +473,12 @@ rules to enforce, while an explaining run has the caller's."
          (progn
            (when (launch-plan-allow plan)
              (setf guard (install-egress-guard cgroup (launch-plan-allow plan))))
+           (when (eq :proxied (launch-plan-network plan))
+             ;; Proxied is the other kind of egress control: rather than saying
+             ;; which addresses may be reached, it sends the web ports to the
+             ;; proxy and refuses the rest.
+             (setf guard (install-egress-redirect
+                          cgroup (proxy-endpoint (launch-plan-proxy plan)))))
            ;; Nothing above needs a capability again, so let them go now rather
            ;; than after the child exists: the shorter that window, the better.
            ;; Dumpability has to come back with them, because a non-dumpable
