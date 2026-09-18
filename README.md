@@ -123,6 +123,32 @@ And the mechanism is sound for *watching* but not for *deciding* — a path can
 change between the notification and the syscall — which is exactly why learning
 writes a draft for you to read rather than enforcing what it saw.
 
+## When a policy is wrong
+
+A sandboxed command that is refused something reports its own confusion —
+`Permission denied`, from somewhere deep inside a library — and leaves you
+guessing which line a policy is missing. Ask instead:
+
+```sh
+$ scute run --policy scute.policy --explain -- ./build.sh
+/usr/bin/bash: line 1: copy: Permission denied
+scute: the command was refused 3 paths:
+  /dev/tty                                      write
+  /etc/ld.so.cache                              read
+  /home/you/project/copy                        write
+
+Adding this to the policy would allow them:
+
+[filesystem]
+read = ["/etc"]
+read-write = [".", "/dev/tty"]
+```
+
+A seccomp filter runs at syscall entry, before the security modules decide
+anything, so scute sees the attempt Landlock went on to refuse. `--explain`
+enforces the policy exactly as usual — it only watches as well, at the cost of
+a round trip per path, which is why it is a flag rather than the default.
+
 ## Policy
 
 A policy is a TOML document, validated whole before anything privileged

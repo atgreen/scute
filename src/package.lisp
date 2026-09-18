@@ -89,6 +89,10 @@
            ;; Learning
            #:learned-rules
            #:write-learned-policy
+           #:refused-observations
+           #:report-refusals
+           #:refusal-rules
+           #:reachable-path-p
            #:observations
            #:observations-paths
            #:watched-syscall

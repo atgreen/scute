@@ -9,7 +9,7 @@
   (call-scute 'run-launch-plan
               (call-scute 'compile-command-launch-plan command '()
                           (or directory (sb-posix:getcwd)))
-              :learn t))
+              :observe t))
 
 (defun observed-access (observations path)
   "What PATH was reached for, by a path that may have been canonicalized."
@@ -117,6 +117,109 @@ would."
                             (call-scute 'compile-command-launch-plan
                                         '("/usr/bin/unshare" "--user" "/bin/true")
                                         '())
-                            :learn t)))
+                            :observe t)))
     (check (not (eql 0 (call-scute 'sandbox-result-exit-code result)))
            "a learning run allowed a syscall the filter denies: ~S" result)))
+
+;;── Explaining a refusal ───────────────────────────────────────────────────────
+
+(defun explain-run (policy-text command directory)
+  "Run COMMAND under POLICY-TEXT, watching, and answer what it was refused."
+  (let ((plan (call-scute 'compile-launch-plan
+                          (call-scute 'validate-sandbox-policy
+                                      (call-scute 'parse-policy-text policy-text))
+                          command :directory directory)))
+    (multiple-value-bind (result observations)
+        (call-scute 'run-launch-plan plan :observe t)
+      (values (call-scute 'refused-observations observations
+                          (call-scute 'launch-plan-filesystem plan))
+              result
+              plan))))
+
+(deftest test-explaining-names-what-was-refused
+  "A command refused something reports its own confusion; scute says which path
+and what access, because a seccomp filter sees the attempt before the security
+modules refuse it."
+  (let ((workspace (scratch-pathname "explain")))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist (format nil "~A/" workspace))
+           (multiple-value-bind (refused result)
+               (explain-run "[filesystem]
+read-execute = [\"/usr\"]"
+                            ;; Separate statements: a redirection that fails
+                            ;; stops the command before it can read anything,
+                            ;; and then there is nothing to report about the read.
+                            '("/bin/sh" "-c" "cat /etc/hostname; echo x > copy")
+                            workspace)
+             (check (not (eql 0 (call-scute 'sandbox-result-exit-code result)))
+                    "the command succeeded under a policy that forbids its work")
+             (check (assoc "/etc/hostname" refused :test #'string=)
+                    "reading /etc/hostname was not reported as refused: ~S" refused)
+             (let ((write (assoc (format nil "~A/copy" workspace) refused
+                                 :test #'string=)))
+               (check write "writing copy was not reported as refused: ~S" refused)
+               (check (member :write (cdr write))
+                      "the refusal did not say what was wanted: ~S" write))
+             ;; Every refusal names somewhere a rule could actually name.
+             (dolist (refusal refused)
+               (check (call-scute 'reachable-path-p (car refusal))
+                      "~A cannot be named by any rule, so suggesting it would ~
+                       produce a policy that will not load" (car refusal)))))
+      (ignore-errors (delete-file (format nil "~A/copy" workspace)))
+      (ignore-errors (sb-posix:rmdir workspace)))))
+
+(deftest test-a-sufficient-policy-explains-nothing
+  "Nothing is reported when nothing was refused.  This is the test that would
+have caught rules naming a file -- /dev/tty, /dev/null -- being read as granting
+nothing, because the access questions asked for directory-only rights."
+  (let ((workspace (scratch-pathname "explain-clean")))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist (format nil "~A/" workspace))
+           (multiple-value-bind (refused result)
+               (explain-run (format nil "[filesystem]~%~
+                                         read-execute = [\"/usr\"]~%~
+                                         read = [\"/etc\"]~%~
+                                         read-write = [\"~A\", \"/dev/tty\", \"/dev/null\"]~%"
+                                    workspace)
+                            '("/bin/sh" "-c" "cat /etc/hostname > copy")
+                            workspace)
+             (check (eql 0 (call-scute 'sandbox-result-exit-code result))
+                    "the command failed under a policy that allows its work: ~S"
+                    result)
+             (check (null refused)
+                    "a policy that allowed everything still reported refusals: ~S"
+                    refused)))
+      (ignore-errors (delete-file (format nil "~A/copy" workspace)))
+      (ignore-errors (sb-posix:rmdir workspace)))))
+
+(deftest test-the-suggested-rules-are-the-missing-ones
+  "What scute suggests adding is what makes the command work: the refusals fold
+into rules the same way a learned policy does, and applying them is enough."
+  (let ((workspace (scratch-pathname "explain-fix")))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist (format nil "~A/" workspace))
+           (multiple-value-bind (refused) 
+               (explain-run "[filesystem]
+read-execute = [\"/usr\"]"
+                            '("/bin/sh" "-c" "cat /etc/hostname > copy")
+                            workspace)
+             (let* ((suggested (call-scute 'refusal-rules refused workspace))
+                    (text (with-output-to-string (stream)
+                            (format stream "[filesystem]~%read-execute = [\"/usr\"]~%")
+                            (loop for (kind . paths) in suggested
+                                  do (format stream "~(~A~) = [~{~S~^, ~}]~%"
+                                             kind paths))))
+                    (plan (call-scute 'compile-launch-plan
+                                      (call-scute 'validate-sandbox-policy
+                                                  (call-scute 'parse-policy-text text))
+                                      '("/bin/sh" "-c" "cat /etc/hostname > copy")
+                                      :directory workspace))
+                    (result (call-scute 'run-launch-plan plan)))
+               (check (eql 0 (call-scute 'sandbox-result-exit-code result))
+                      "the command still failed after adding what scute ~
+                       suggested:~%~A~%result ~S" text result))))
+      (ignore-errors (delete-file (format nil "~A/copy" workspace)))
+      (ignore-errors (sb-posix:rmdir workspace)))))

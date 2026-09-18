@@ -42,7 +42,7 @@ killed from outside; the cgroup is what tells them apart."
 
 (defstruct (launch-resources (:constructor %make-launch-resources))
   command path directory argv envp envp-count landlock-ruleset seccomp-program
-  errno-location learn-up-read learn-up-write learn-go-read learn-go-write
+  errno-location listener-up-read listener-up-write listener-go-read listener-go-write
   sync-read sync-write status-read status-write
   sync-buffer status-buffer
   cap-header cap-data cap-last)
@@ -90,7 +90,7 @@ killed from outside; the cgroup is what tells them apart."
     (cffi:foreign-free (cffi:mem-aref vector :pointer index)))
   (cffi:foreign-free vector))
 
-(defun acquire-launch-resources (plan &key learn)
+(defun acquire-launch-resources (plan &key observe)
   "Preallocate everything the child will need to enact PLAN.
 The Landlock ruleset is built here too: the parent owns every resource, and
 the child only uses what is already in its hands."
@@ -103,7 +103,7 @@ the child only uses what is already in its hands."
          ;; launch that does not happen.  The program is shared and read-only:
          ;; these resources borrow it rather than owning it.
          (watched nil)
-         (filter (if learn
+         (filter (if observe
                      (multiple-value-bind (program table) (learn-seccomp-filter)
                        (setf watched table)
                        program)
@@ -111,10 +111,10 @@ the child only uses what is already in its hands."
     (multiple-value-bind (sync-read sync-write) (make-sync-pipe)
       (multiple-value-bind (status-read status-write) (make-sync-pipe)
         (multiple-value-bind (cap-header cap-data) (make-empty-capability-request)
-         (multiple-value-bind (learn-up-read learn-up-write)
-             (if learn (make-sync-pipe) (values nil nil))
-          (multiple-value-bind (learn-go-read learn-go-write)
-              (if learn (make-sync-pipe) (values nil nil))
+         (multiple-value-bind (listener-up-read listener-up-write)
+             (if observe (make-sync-pipe) (values nil nil))
+          (multiple-value-bind (listener-go-read listener-go-write)
+              (if observe (make-sync-pipe) (values nil nil))
           (values
            (%make-launch-resources
            :command command
@@ -134,8 +134,8 @@ the child only uses what is already in its hands."
            :cap-last last-capability
            :landlock-ruleset ruleset
            :seccomp-program filter
-            :learn-up-read learn-up-read :learn-up-write learn-up-write
-            :learn-go-read learn-go-read :learn-go-write learn-go-write)
+            :listener-up-read listener-up-read :listener-up-write listener-up-write
+            :listener-go-read listener-go-read :listener-go-write listener-go-write)
            watched))))))))
 
 (defun release-launch-resources (resources)
@@ -145,10 +145,10 @@ the child only uses what is already in its hands."
                     (launch-resources-status-read resources)
                     (launch-resources-status-write resources)
                     (launch-resources-landlock-ruleset resources)
-                    (launch-resources-learn-up-read resources)
-                    (launch-resources-learn-up-write resources)
-                    (launch-resources-learn-go-read resources)
-                    (launch-resources-learn-go-write resources)))
+                    (launch-resources-listener-up-read resources)
+                    (launch-resources-listener-up-write resources)
+                    (launch-resources-listener-go-read resources)
+                    (launch-resources-listener-go-write resources)))
     (when (and fd (<= 0 fd)) (%close fd)))
   (cffi:foreign-string-free (launch-resources-path resources))
   (cffi:foreign-string-free (launch-resources-directory resources))
@@ -208,7 +208,7 @@ collector."
       ;; Seccomp before Landlock, and both after no_new_privs, which each
       ;; requires.  The filter allows landlock_restrict_self and execve.
       (let ((listener (%seccomp-install (launch-resources-seccomp-program resources)
-                                        (if (launch-resources-learn-up-write resources)
+                                        (if (launch-resources-listener-up-write resources)
                                             +seccomp-filter-flag-new-listener+
                                             0))))
         (when (minusp listener)
@@ -216,12 +216,12 @@ collector."
         ;; Learning: hand the listener to the supervisor, wait for it to have
         ;; it, and let go.  A command that kept the listener could answer its
         ;; own notifications.
-        (when (launch-resources-learn-up-write resources)
+        (when (launch-resources-listener-up-write resources)
           (setf (cffi:mem-ref status-buffer :int32 0) listener)
-          (unless (= 4 (%write (launch-resources-learn-up-write resources)
+          (unless (= 4 (%write (launch-resources-listener-up-write resources)
                                status-buffer 4))
             (die +stage-learn-handshake+ +child-exit-setup-failed+))
-          (unless (= 1 (%read (launch-resources-learn-go-read resources)
+          (unless (= 1 (%read (launch-resources-listener-go-read resources)
                               status-buffer 1))
             (die +stage-learn-handshake+ +child-exit-setup-failed+))
           (%close listener)))
@@ -254,12 +254,12 @@ The child is parked waiting for this: it will not exec until the supervisor
 holds the listener, because a command that kept it could answer its own
 notifications and wave anything through."
   (cffi:with-foreign-object (buffer :uint8 4)
-    (unless (= 4 (%read (launch-resources-learn-up-read resources) buffer 4))
+    (unless (= 4 (%read (launch-resources-listener-up-read resources) buffer 4))
       (setup-error :learn-handshake
                    :detail "the child did not hand over its listener"))
     (let ((listener (steal-listener pid (cffi:mem-ref buffer :int32 0))))
       (setf (cffi:mem-ref buffer :uint8 0) 1)
-      (%write (launch-resources-learn-go-write resources) buffer 1)
+      (%write (launch-resources-listener-go-write resources) buffer 1)
       (watch-child listener pid observations))))
 
 (defun call-with-forwarded-signals (pid function)
@@ -403,14 +403,16 @@ copy of it and would write it a second time."
       (run-child resources))                ; never returns
     pid))
 
-(defun run-launch-plan (plan &key learn)
+(defun run-launch-plan (plan &key observe)
   "Enact PLAN: launch its command in the sandbox it describes and supervise it.
 
 Everything PLAN asks for is established before the command exists.  A control
 PLAN requests that this build cannot install is an error, not an omission.
 
-With LEARN, the command runs under a filter that reports every path it reaches
-for, and what it reached for comes back as a second value."
+With OBSERVE, the command runs under a filter that reports every path it
+reaches for, and what it reached for comes back as a second value.  What the
+plan enforces is unchanged by watching: a learning run simply has no filesystem
+rules to enforce, while an explaining run has the caller's."
   (preflight plan)
   ;; Acquisition order follows the design's startup sequence, and every step is
   ;; unwound in reverse by the unwind-protects below.
@@ -421,9 +423,9 @@ for, and what it reached for comes back as a second value."
     (unwind-protect
          (progn
            (multiple-value-bind (acquired watched)
-               (acquire-launch-resources plan :learn learn)
+               (acquire-launch-resources plan :observe observe)
              (setf resources acquired
-                   observations (and learn (make-observations watched))))
+                   observations (and observe (make-observations watched))))
            (let ((pid (spawn-sandbox-child resources))
                  (reaped nil))
              (unwind-protect
@@ -435,7 +437,7 @@ for, and what it reached for comes back as a second value."
                     (verify-no-capabilities)
                     (multiple-value-bind (status stage child-errno)
                         (supervise-child resources pid
-                                         (when learn
+                                         (when observe
                                            (lambda (child)
                                              (observe-child resources child observations))))
                       (setf reaped t)

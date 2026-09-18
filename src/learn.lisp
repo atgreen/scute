@@ -353,3 +353,63 @@ Answers an alist of access kind to the paths it should name."
         do (format stream "~(~A~) = [~{~S~^, ~}]~%" kind paths))
   (format stream "~%[network]~%mode = \"none\"~%")
   rules)
+
+;;── Explaining a refusal ───────────────────────────────────────────────────────
+;;
+;;; A sandboxed command that is refused something reports its own confusion --
+;;; "Permission denied", from somewhere deep inside a library -- and the person
+;;; running it has to guess which path a policy forgot.  Scute watches the same
+;;; way it does when learning, and afterwards says which of the paths the
+;;; command reached for its own rules would not have allowed.
+;;;
+;;; A seccomp filter runs at syscall entry, before the security modules decide
+;;; anything, so an attempt Landlock went on to refuse is still seen here.
+
+(defun permitted-access-p (rules path access abi)
+  (and (granting-rule rules path access abi) t))
+
+(defun reachable-path-p (path)
+  "Whether PATH is somewhere a rule could name.
+
+A dynamic loader probes for library variants that are not installed, and those
+attempts fail because there is nothing there, not because a policy refused
+them.  Suggesting rules for paths that do not exist would also produce a policy
+that will not load, since a rule naming a missing path is an error.  A path
+about to be created counts: its directory is what governs it."
+  (or (probe-file path)
+      (let ((slash (position #\/ path :from-end t)))
+        (and slash (plusp slash) (probe-file (subseq path 0 slash))))))
+
+(defun refused-observations (observations rules)
+  "The paths in OBSERVATIONS that RULES do not allow, and what was wanted.
+Answers an alist of path to the accesses that were not permitted."
+  (let ((abi (or (landlock-abi-version) 1))
+        (refused '()))
+    (maphash (lambda (path accesses)
+               (when (reachable-path-p path)
+                 (let ((missing (remove-if (lambda (access)
+                                             (permitted-access-p rules path access abi))
+                                           accesses)))
+                   (when missing (push (cons path missing) refused)))))
+             (observations-paths observations))
+    (sort refused #'string< :key #'car)))
+
+(defun refusal-rules (refused directory)
+  "The rules that would have allowed REFUSED, folded the way a policy is."
+  (let ((observations (make-observations nil)))
+    (loop for (path . accesses) in refused
+          do (dolist (access accesses)
+               (record-observation observations nil path access)))
+    (learned-rules observations directory)))
+
+(defun report-refusals (refused directory stream)
+  "Say what was refused, and what would allow it."
+  (when refused
+    (format stream "~&scute: the command was refused ~D path~:P:~%" (length refused))
+    (loop for (path . accesses) in refused
+          do (format stream "  ~A~48T~{~(~A~)~^ ~}~%" path accesses))
+    (format stream "~&Adding this to the policy would allow them:~%~%[filesystem]~%")
+    (loop for (kind . paths) in (refusal-rules refused directory)
+          do (format stream "~(~A~) = [~{~S~^, ~}]~%" kind paths))
+    (terpri stream))
+  refused)

@@ -220,6 +220,22 @@ and anything else is named exactly, a directory as itself and a file as itself.
 `/proc` must be an anchor rather than exact: `/proc/self/status` canonicalizes to
 a pid that will not exist next time.
 
+### Explaining a refusal
+
+The same machinery answers a different question. A command refused something
+reports whatever its libraries make of `EACCES`, which is rarely the path and
+never the rule. Because a seccomp filter runs at syscall entry, before the
+security modules decide anything, an attempt Landlock goes on to refuse is still
+seen; `scute run --explain` enforces the policy exactly as usual and watches as
+well, then says which of the paths the command reached for its own rules would
+not have allowed, and folds those into the lines that would allow them.
+
+Paths that exist nowhere are dropped rather than reported: a dynamic loader
+probes for library variants that are not installed, and those attempts fail for
+want of a file rather than for want of a rule. Suggesting them would also
+produce a policy that will not load, since a rule naming a missing path is an
+error.
+
 ### Stopping a sandbox
 
 `pid_namespaces(7)` delivers a signal from an ancestor namespace to PID 1 only

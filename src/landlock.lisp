@@ -233,10 +233,15 @@ Returns the ruleset descriptor and the ABI version it was built for."
 ;;; Landlock's access rights in your head, so Scute answers it instead.
 
 (defparameter +access-questions+
-  (list (cons :read (logior +fs-read-file+ +fs-read-dir+))
-        (cons :write (logior +fs-write-file+ +fs-make-reg+))
+  (list (cons :read +fs-read-file+)
+        (cons :write +fs-write-file+)
         (cons :execute +fs-execute+))
-  "The three things anyone actually asks of a path, and the rights each needs.")
+  "The three things anyone actually asks of a path, and the right each needs.
+
+One right each, and deliberately not the directory-only ones.  READ_DIR and
+MAKE_REG are stripped from any rule that names a file rather than a directory,
+so asking for them would make every rule on a file -- /dev/null and /dev/tty
+being the everyday cases -- look as though it granted nothing at all.")
 
 (defun nearest-existing-path (path)
   "PATH if it exists, or the deepest ancestor of it that does.

@@ -112,6 +112,18 @@ argument gets you.")
              (print-launch-plan plan)
              (refuse-unimplemented-controls plan)
              (uiop:quit 0 t))
+            ((clingon:getopt cmd :explain)
+             (multiple-value-bind (result observations)
+                 (run-launch-plan plan :observe t)
+               (let ((refused (refused-observations observations
+                                                    (launch-plan-filesystem plan))))
+                 (if refused
+                     (report-refusals refused (launch-plan-directory plan)
+                                      *error-output*)
+                     (format *error-output*
+                             "~&scute: the policy allowed everything the command ~
+                              reached for~%")))
+               (uiop:quit (command-exit-status result) t)))
             (t
              (let ((result (run-launch-plan plan)))
                (when (sandbox-result-oom-killed-p result)
@@ -140,7 +152,10 @@ argument gets you.")
                     :description "Run with no filesystem restriction at all")
                    (clingon:make-option
                     :flag :short-name #\n :long-name "dry-run" :key :dry-run
-                    :description "Print the compiled plan and run nothing")))
+                    :description "Print the compiled plan and run nothing")
+                   (clingon:make-option
+                    :flag :long-name "explain" :key :explain
+                    :description "Say which paths the policy refused, and what would allow them")))
    :handler #'run-handler
    :examples '(("Run a shell under a policy file:"
                 . "scute run --policy scute.policy -- /bin/sh -i")
@@ -148,6 +163,8 @@ argument gets you.")
                 . "scute run --policy scute.policy --dry-run -- /bin/sh -i")
                ("Run a shell that can read the system and write only here:"
                 . "scute run --read-execute /usr --read /etc --read-write . -- /bin/sh -i")
+               ("Find out what a policy is refusing:"
+                . "scute run --policy scute.policy --explain -- ./build.sh")
                ("Run with the process layer alone, filesystem unrestricted:"
                 . "scute run --namespaces-only -- /bin/sh -i"))))
 
@@ -208,7 +225,7 @@ argument gets you.")
      (unless command
        (usage-error "scute learn needs a command to watch: learn -- COMMAND ..."))
      (multiple-value-bind (result observations)
-         (run-launch-plan (compile-command-launch-plan command '()) :learn t)
+         (run-launch-plan (compile-command-launch-plan command '()) :observe t)
        (let ((rules (learned-rules observations (sb-posix:getcwd))))
          (if output
              (with-open-file (stream output :direction :output
