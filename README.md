@@ -468,24 +468,53 @@ Scute confines one command on your own kernel. That is the whole of it: a single
 unprivileged binary, no daemon, no container, no image to build, about 20 ms of
 overhead, and a policy you can read in one screen.
 
-It deliberately does not do two things that matter for agent work, and there are
-better tools for both:
+The other way to sandbox an agent is a platform: run it in a container or a
+MicroVM, put a proxy in front of it, and manage the arrangement. NVIDIA's
+[OpenShell](https://github.com/NVIDIA/OpenShell) is that shape of tool, with a
+gateway and a Kubernetes path. Scute is the other bet, and the interesting
+difference is not size — it is where the boundary sits.
 
-- **Egress policy at the HTTP layer.** Scute can make a proxy the only way out
-  and can name the TCP ports a command may use, but it cannot tell `GET` from
-  `POST`. NVIDIA's
-  [OpenShell](https://github.com/NVIDIA/OpenShell) runs agent sandboxes behind a
-  proxy that enforces exactly that, in containers or MicroVMs, with a gateway and
-  a Kubernetes path. If you want the platform rather than the primitive, that is
-  the shape of tool to reach for.
-- **Credentials.** Scute drops secrets from the environment, which stops a
-  command reading what it was never given — but a command that legitimately needs
-  a key still holds one.
-  [KeyFence](https://github.com/atgreen/keyfence) makes the key worthless outside
-  its destination: the agent holds an opaque `kf_` token and the real credential
-  never enters its address space.
+|                           | Scute                                 | Container or MicroVM platform             |
+| ------------------------- | ------------------------------------- | ----------------------------------------- |
+| What is confined          | the process, by the kernel            | an image, by the runtime                  |
+| Filesystem the agent sees | yours, minus what the policy withheld | one you assembled, entirely               |
+| To start                  | `scute run --policy p -- cmd`         | build an image, start a daemon            |
+| Startup cost              | about 20 ms                           | image build, then seconds                 |
+| Needs root or a daemon    | no                                    | usually both                              |
+| Egress control            | port and address, unbypassable        | HTTP verbs and hosts, via a proxy         |
+| Writing the policy        | `scute learn` watches a real run      | by hand, then rebuild to test             |
+| If it is misconfigured    | the command fails at the syscall      | the agent quietly has more than you meant |
 
-They compose, and scute can run the proxy for you:
+A container boundary confines an *image*. The agent gets a filesystem you
+assembled, so "can it read `~/.ssh`" is answered by what you copied in, and
+everything you did copy in is fair game to whatever runs inside. Scute's
+boundary is the *process*, on the files you already have. Nothing is copied and
+nothing is built: the command runs against your real working tree while the
+kernel refuses every path the policy did not name. You can narrow a container
+the same way with bind mounts, but then the question becomes what you remembered
+to leave out, and you find out after an image build rather than at the first
+syscall.
+
+That difference is also why `learn` can work the way it does. It watches the
+same process, on the same paths, that you will afterwards run under the policy
+it writes — no image to keep in step, nothing to reproduce twice.
+
+What a proxy platform has that scute does not is HTTP-layer egress policy: it
+can tell `GET` from `POST` and allow one but not the other. Scute stops at the
+port. It stops there *unbypassably*, though, which is the part worth having —
+`mode = "host"` with a `proxy` makes that one address the only reachable thing
+in the kernel's opinion, not the library's. So you can put any proxy you like in
+front of a sandboxed agent, including one that does understand verbs, and know
+the agent cannot route around it. What the platform gives you in exchange is a
+daemon, an image, and a cluster.
+
+And for the credential half there is
+[KeyFence](https://github.com/atgreen/keyfence), which makes a key worthless
+outside its destination: the agent holds an opaque `kf_` token and the real
+credential never enters its address space. Scute drops secrets from the
+environment, which stops a command reading what it was never given — but a
+command that legitimately needs a key still holds one. Those two compose, and
+scute can run the proxy for you:
 
 ```sh
 scute run --policy agent.policy --with 'keyfence serve' -- claude
