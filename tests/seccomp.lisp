@@ -92,3 +92,51 @@ pass on, and has checked rather than assumed."
     (when (member (car entry) '("CapEff" "CapPrm" "CapInh" "CapAmb") :test #'string=)
       (check (zerop (cdr entry))
              "the supervisor still holds ~A = ~(~16,'0X~)" (car entry) (cdr entry)))))
+
+(deftest test-nested-user-namespaces-are-refused
+  "A command cannot put itself in a new user namespace, by any of the three
+routes.  This matters more than the rest of the denylist: a nested user
+namespace hands its creator a full capability set inside itself, which is where
+a great many kernel exploits begin."
+  (let ((filter (call-scute 'v0-seccomp-filter)))
+    (dolist (name '("clone(CLONE_NEWUSER)" "clone3" "unshare"))
+      (check (member name (call-scute 'seccomp-filter-denied filter) :test #'string=)
+             "~A is not among what the filter denies" name)))
+  ;; unshare, which needs no capability and worked before the filter existed.
+  (let ((result (call-scute 'run-namespaced-command
+                            '("/usr/bin/unshare" "--user" "/bin/true")
+                            :filesystem +unrestricted+)))
+    (check (not (eql 0 (call-scute 'sandbox-result-exit-code result)))
+           "unshare --user was allowed: ~S" result))
+  ;; And clone itself, which seccomp can only refuse by reading its flags.
+  ;; The suffix matters: gcc will not compile a file it cannot recognize, and
+  ;; scratch-pathname ends its names with a pid.
+  (let ((source (format nil "~A.c" (scratch-pathname "nested")))
+        (program (scratch-pathname "nested")))
+    (unwind-protect
+         (progn
+           (with-open-file (stream source :direction :output :if-exists :supersede)
+             (write-string "#define _GNU_SOURCE
+#include <sched.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#include <signal.h>
+int main(void) {
+  long p = syscall(SYS_clone, (unsigned long)(CLONE_NEWUSER | SIGCHLD), 0L, 0L, 0L, 0L);
+  if (p < 0) return 7;          /* refused */
+  if (p == 0) _exit(0);
+  return 0;                     /* a namespace was created */
+}
+" stream))
+           (if (plusp (cffi:foreign-funcall
+                       "system" :string
+                       (format nil "gcc -o ~A ~A >/dev/null 2>&1" program source)
+                       :int))
+               (format *error-output*
+                       "~&SKIP: no working gcc, so the clone route is untested~%")
+               (let ((result (call-scute 'run-namespaced-command (list program)
+                                         :filesystem +unrestricted+)))
+                 (check (eql 7 (call-scute 'sandbox-result-exit-code result))
+                        "clone(CLONE_NEWUSER) was not refused inside the sandbox: ~S"
+                        result))))
+      (delete-scratch source program))))

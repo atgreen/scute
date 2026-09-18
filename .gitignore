@@ -12,6 +12,7 @@ systems/
 /scute
 /scute-sbom.spdx.json
 /completions/
+/.test-passed
 
 # Beads / Dolt files (added by bd init)
 .dolt/

@@ -86,6 +86,68 @@ struct clone3 takes its flags from.  This is defence in depth, not a boundary.")
 (defun denied-syscall-names ()
   (loop for (nil . names) in +denied-syscalls+ append names))
 
+;;── Closing the nested user namespace ──────────────────────────────────────────
+;;
+;;; Denying unshare alone does not stop a program from creating a user
+;;; namespace, because clone and clone3 can do the same thing.  A nested user
+;;; namespace hands its creator a full capability set inside itself, which is
+;;; where a large share of kernel exploits begin, so the gap is worth closing
+;;; rather than documenting.
+;;;
+;;; clone takes its flags in a register, so seccomp can look at them: a clone
+;;; asking for CLONE_NEWUSER is refused and every other clone is untouched.
+;;; clone3 takes them in a struct that seccomp cannot read, so it is refused
+;;; whole -- with ENOSYS rather than EPERM, because that is the answer a C
+;;; library is looking for when it decides whether to fall back to clone.
+
+(defconstant +clone-newuser+ #x10000000)
+(defconstant +scmp-cmp-masked-eq+ 7)
+(defconstant +enosys+ 38)
+
+(defun add-masked-argument-rule (context action name argument mask value)
+  "Refuse NAME when (ARGUMENT & MASK) equals VALUE.
+seccomp_rule_add takes its comparisons as varargs; the _array form takes them
+as a struct, which is the one a foreign call can build."
+  (let ((number (cffi:foreign-funcall "seccomp_syscall_resolve_name"
+                                      :string name :int)))
+    (when (<= number +scmp-error+)
+      (return-from add-masked-argument-rule nil))
+    ;; struct scmp_arg_cmp: an unsigned int, an enum, then two 64-bit data.
+    (cffi:with-foreign-object (comparison :uint8 24)
+      (dotimes (index 24) (setf (cffi:mem-aref comparison :uint8 index) 0))
+      (setf (cffi:mem-ref comparison :uint32 0) argument
+            (cffi:mem-ref comparison :uint32 4) +scmp-cmp-masked-eq+
+            (cffi:mem-ref comparison :uint64 8) mask
+            (cffi:mem-ref comparison :uint64 16) value)
+      (let ((result (cffi:foreign-funcall "seccomp_rule_add_array"
+                                          :pointer context
+                                          :uint32 action
+                                          :int number
+                                          :unsigned-int 1
+                                          :pointer comparison
+                                          :int)))
+        (unless (zerop result)
+          (setup-error :seccomp-rule-add
+                       :detail (format nil "~A with an argument test: libseccomp ~
+                                            answered ~D"
+                                       name result)))
+        t))))
+
+(defun deny-nested-user-namespaces (context)
+  "Refuse the two ways a command could put itself in a new user namespace."
+  (let ((denied '()))
+    (when (add-masked-argument-rule context (scmp-act-errno +eperm+) "clone" 0
+                                    +clone-newuser+ +clone-newuser+)
+      (push "clone(CLONE_NEWUSER)" denied))
+    (let ((number (cffi:foreign-funcall "seccomp_syscall_resolve_name"
+                                        :string "clone3" :int)))
+      (unless (<= number +scmp-error+)
+        (when (zerop (cffi:foreign-funcall "seccomp_rule_add" :pointer context
+                                           :uint32 (scmp-act-errno +enosys+)
+                                           :int number :unsigned-int 0 :int))
+          (push "clone3" denied))))
+    denied))
+
 ;;── Building the filter ────────────────────────────────────────────────────────
 
 (defstruct (seccomp-filter (:constructor %make-seccomp-filter))
@@ -156,6 +218,7 @@ struct clone3 takes its flags from.  This is defence in depth, not a boundary.")
                             (setup-error :seccomp-rule-add
                                          :detail (format nil "~A: libseccomp answered ~D"
                                                          name result))))))))
+           (setf denied (append (deny-nested-user-namespaces context) denied))
            (multiple-value-bind (program instructions) (export-filter-program context)
              (%make-seccomp-filter :program program
                                    :instructions instructions

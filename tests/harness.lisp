@@ -69,10 +69,24 @@ must stay clear of the supervisor's own wait and signal handling."
       (incf *failures*)
       (format *error-output* "FAIL: ~A signalled ~A~%" name condition))))
 
+(defparameter +completion-sentinel+ ".test-passed"
+  "Written only when the whole suite has run and passed.
+
+make checks for this file rather than trusting an exit status.  SBCL exits 0
+when SIGTERM reaches it with the default disposition, so a test that lets a
+signal through would otherwise abort the suite and still report success -- and
+a suite that can pass without running is worse than no suite.")
+
 (defun run-tests ()
+  (ignore-errors (delete-file +completion-sentinel+))
   (setf *failures* 0 *ran* 0)
   (mapc #'run-test (reverse *tests*))
   (when (plusp *failures*)
     (error "~D Scute test~:P failed" *failures*))
+  (when (zerop *ran*)
+    (error "no Scute tests ran at all"))
+  (with-open-file (stream +completion-sentinel+ :direction :output
+                                                :if-exists :supersede)
+    (format stream "~D~%" *ran*))
   (format t "~D Scute test~:P passed.~%" *ran*)
   t)

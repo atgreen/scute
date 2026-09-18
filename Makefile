@@ -17,9 +17,14 @@ sbom: scute-sbom.spdx.json
 scute-sbom.spdx.json: ocicl.csv
 	ocicl create-sbom spdx $@
 
+# The sentinel is the point: a suite that dies partway through must not look
+# like one that passed.  SBCL exits 0 on an unhandled SIGTERM.
 test: scute
+	rm -f .test-passed
 	sbcl --noinform --non-interactive \
 		--eval '(asdf:test-system :scute)'
+	@test -f .test-passed || { echo "the suite did not run to the end"; exit 1; }
+	@rm -f .test-passed
 
 check: test
 

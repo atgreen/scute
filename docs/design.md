@@ -269,10 +269,15 @@ them also need a capability the sandbox does not have; they are denied anyway,
 because a syscall that cannot be reached is a syscall whose bugs cannot be
 reached either.
 
-One limit is stated here rather than left to be discovered. Denying `unshare`
-does not prevent a program from creating a nested user namespace: `clone` and
-`clone3` can do the same, and seccomp cannot read the struct `clone3` takes its
-flags from. The denial is defence in depth, not a boundary.
+A nested user namespace is closed by all three of its routes, because it
+deserves more than defence in depth: a process that creates one holds a full
+capability set inside it, which is where a great many kernel exploits begin.
+`unshare` is refused outright. `clone` takes its flags in a register, so the
+filter reads them and refuses only a clone asking for `CLONE_NEWUSER`, leaving
+every ordinary fork alone. `clone3` takes its flags in a struct that seccomp
+cannot read, so it is refused whole -- with `ENOSYS` rather than `EPERM`,
+because that is the answer a C library is looking for when it decides whether to
+fall back to `clone`, where the flags are visible again.
 
 One right is deliberately left ungoverned in v0: `LANDLOCK_ACCESS_FS_IOCTL_DEV`
 (ABI 5). Handling it without granting it breaks `tcsetattr` on a terminal, and
