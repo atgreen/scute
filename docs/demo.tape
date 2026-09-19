@@ -16,6 +16,10 @@ Set TypingSpeed 60ms
 Set Theme "Catppuccin Mocha"
 
 Hide
+# The scute being demonstrated is the one just built, not whatever is installed:
+# the recording moves to a temporary directory, so the repository has to be put
+# on PATH before it goes. "make demo" does this too, for a tape run some other way.
+Type "export PATH=$PWD/..:$PATH" Enter
 Type "cd $(mktemp -d) && export PS1='$ ' && clear" Enter
 Show
 

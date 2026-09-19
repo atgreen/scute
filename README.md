@@ -19,6 +19,7 @@ Landlock, user namespaces, cgroup delegation, libseccomp — gets an error befor
 the command runs, never a weaker sandbox than the one it asked for.
 
 **Contents** — [Install](#install) · [Quickstart](#quickstart) ·
+[Running an agent](#running-an-agent-by-name) ·
 [Writing a policy](#writing-a-policy) · [Policy reference](#policy-reference) ·
 [Commands](#commands) · [Network](#network) ·
 [Credentials](#credentials-the-sandbox-cannot-read) ·
@@ -143,6 +144,26 @@ Policies are looked for in, nearest first:
 
 `SCUTE_POLICY_PATH` replaces the list. A path is never shadowed by a name:
 `--policy ./mine.policy` is that file.
+
+### Before an agent policy will run
+
+A shipped policy names the credential it needs and does not hold it. Register the
+real one with the broker once — after which it never leaves the broker again:
+
+```sh
+keyfence credential add anthropic          # the key, read from stdin
+gh auth token | keyfence credential add github
+```
+
+Then ask whether everything the policy needs is there, before relying on it:
+
+```sh
+$ scute check --policy claude
+anthropic          registered with the broker (anthropic)
+```
+
+A credential the broker does not hold is reported as `NOT registered`, and the
+run refuses rather than starting an agent that will fail its first request.
 
 ### Extending a policy you do not own
 
@@ -330,6 +351,8 @@ climb out of it.
 | `scute learn -- COMMAND` | run it unrestricted and write the policy it needed |
 | `scute check --policy FILE PATH ...` | what the policy permits at each path |
 | `scute doctor` | what this host can enforce (`--json` for scripts) |
+| `scute policies` | the policies installed here, and which file each came from |
+| `scute codex` | any installed policy is a command: this is `run --policy codex` |
 | `scute completions bash` | shell completions (`zsh`, `fish`) |
 | `scute man` | the manual page |
 
@@ -865,9 +888,17 @@ write outside what it was given, cannot reach the network beyond what it was
 allowed, cannot regain a capability, cannot put itself in a fresh user
 namespace, and cannot exceed the memory, process or CPU limits it was given.
 
-Scute needs no privileges of its own for any of that: it is not setuid, carries
-no file capabilities, and expects no root. Everything it installs, an ordinary
-user may install for their own processes.
+Scute needs no privileges of its own for any of that: it is not setuid and
+expects no root, and everything it installs, an ordinary user may install for
+their own processes.
+
+The package does grant it two file capabilities — `cap_bpf` and `cap_net_admin`
+— and only so that the default network can be the kernel redirect rather than the
+port-level fallback. They are used to load one BPF program, compiled by scute from
+forms in its own source and attached to a cgroup scute created, after which
+**every capability is dropped and verified empty before the sandboxed child
+exists**. The child never has them. `sudo setcap -r $(command -v scute)` declines
+the arrangement and leaves a scute that sandboxes exactly as before.
 
 It does **not** contain an attack on the kernel itself. Every layer here —
 Landlock, seccomp, namespaces, cgroups — is enforced by the kernel you are
@@ -884,8 +915,9 @@ what a handler replaced, so there is nothing to put back. It does not affect
 
 Granting `/proc` grants more than it looks like. The sandbox gets a fresh PID
 namespace, but not a fresh `/proc`: it sees the host's, so `read = ["/proc"]`
-lets it read every process's command line. Environments are safe — the user
-namespace maps your uid elsewhere, so `/proc/PID/environ` is refused — but a
+lets it read every process's command line. Environments are safe — reading
+`/proc/PID/environ` needs ptrace access, and a process in a user namespace of its
+own does not have it over processes outside, whatever uid it runs as — but a
 secret passed as a command-line argument anywhere on the machine is legible to a
 sandbox that has `/proc`. That is one reason to keep secrets out of argv.
 

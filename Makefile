@@ -32,7 +32,7 @@ man: scute
 demo: scute
 	@command -v vhs >/dev/null || \
 		{ echo "vhs is not installed: https://github.com/charmbracelet/vhs"; exit 1; }
-	cd docs && vhs demo.tape
+	cd docs && PATH="$(CURDIR):$$PATH" vhs demo.tape
 
 # Rebuilding replaces the binary and loses its file capabilities, so granting
 # them belongs with building rather than after it.  This is the thing to put in

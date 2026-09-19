@@ -90,10 +90,23 @@ Scute sandboxes fine without limits, and refuses clearly when a policy wants
 them on a host that cannot give them."
   (multiple-value-bind (installable root explanation) (limits-installable-p)
     (declare (ignore root))
-    (make-probe "resource limits" (if installable :ok :info)
-                (if installable
-                    explanation
-                    (format nil "~A. ~A" explanation +delegation-remedy+)))))
+    (cond (installable (make-probe "resource limits" :ok explanation))
+          ;; Scute makes a cgroup of its own when a plan needs one, so the state
+          ;; this shell happens to be in is not the answer to whether limits work
+          ;; here -- and telling somebody to type systemd-run, which Scute now
+          ;; types for itself, sends them to fix something that is not broken.
+          ((own-scope-possible-p)
+           (make-probe "resource limits" :ok
+                       (format nil "this shell's cgroup cannot hand controllers ~
+                                    to children, so Scute will make a scope of ~
+                                    its own")))
+          (t
+           (multiple-value-bind (possible reason) (own-scope-possible-p)
+             (declare (ignore possible))
+             (make-probe "resource limits" :info
+                         (format nil "~A, and Scute cannot make a scope of its ~
+                                      own here (~A). ~A"
+                                 explanation reason +delegation-remedy+)))))))
 
 (defun probe-seccomp ()
   "Build the v0 filter to answer this, rather than only looking for the library:
