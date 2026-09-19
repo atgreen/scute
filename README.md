@@ -88,6 +88,12 @@ rather than the port-level fallback. A build from source gets there with
 `make egress`, which is one `setcap` and is
 [exactly what it grants](#an-address-allowlist).
 
+A container is the exception. A process may not run a file whose permitted
+capabilities lie outside its own bounding set, so the packaged binary will not
+start in one that was not given them: `--cap-add=CAP_BPF --cap-add=CAP_NET_ADMIN`,
+or `sudo setcap -r $(command -v scute)` to give up the kernel redirect and keep
+the port-level fallback.
+
 KeyFence holds the credentials a sandbox must not: a policy that says nothing
 about the network is routed through it. Run it as a service, which is where
 credentials belong:

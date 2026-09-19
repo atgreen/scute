@@ -107,6 +107,11 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: fedora:latest
+      # The packaged binary carries cap_bpf and cap_net_admin as permitted file
+      # capabilities, and a process may not exec a file whose permitted set is
+      # not within its own bounding set.  Without these the installed scute
+      # cannot be run at all -- "Operation not permitted" before main().
+      options: --cap-add=CAP_BPF --cap-add=CAP_NET_ADMIN
     steps:
       - name: Install build tools
         run: |
