@@ -77,7 +77,7 @@ done
 
 %files
 %license LICENSE
-%doc README.md
+%doc README.md CHANGELOG.md
 # CAP_BPF and CAP_NET_ADMIN, so that the default network is the kernel redirect
 # rather than the port-level fallback: with them, every web connection a sandbox
 # makes has its destination rewritten to the broker, and a client that ignores the
@@ -100,7 +100,7 @@ done
 %{_datadir}/scute/policies/*.policy
 
 %changelog
-* Fri Sep 19 2026 Anthony Green <green@moxielogic.com> - 0.1.0-2
+* Sat Sep 19 2026 Anthony Green <green@moxielogic.com> - 0.1.0-2
 - The sandbox runs as the calling user rather than as root inside its user
   namespace, so tools that refuse to run as root will run
 - doctor reports the capabilities this binary started with rather than what is

@@ -1,0 +1,260 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  # An RPM without a release: run this by hand and take the artifact.  Only a
+  # tag push publishes anything.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ------------------------------------------------------------------
+  # The version, once, for everything downstream.
+  #
+  # Three places say what version this is -- the tag, scute.asd, and the spec --
+  # and a release where they disagree is a release nobody can reason about, so
+  # a mismatch stops here rather than shipping.
+  # ------------------------------------------------------------------
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        run: |
+          asd=$(sed -n 's/^  :version *"\(.*\)".*/\1/p' scute.asd)
+          spec=$(awk '/^Version:/ {print $2}' releng/scute.spec)
+          if [ "${asd}" != "${spec}" ]; then
+            echo "scute.asd says ${asd} and the spec says ${spec}" >&2
+            exit 1
+          fi
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            if [ "${tag}" != "${asd}" ]; then
+              echo "tag ${tag} does not match the tree's ${asd}" >&2
+              exit 1
+            fi
+            grep -q "^## \[${asd}\]" CHANGELOG.md \
+              || { echo "CHANGELOG.md has no entry for ${asd}" >&2; exit 1; }
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=${asd}" >> "$GITHUB_OUTPUT"
+
+  # ------------------------------------------------------------------
+  # The package, built and signed in a Fedora container.
+  #
+  # x86_64 only.  The binary is a dumped SBCL image, so a package for another
+  # architecture means an SBCL running on that architecture rather than a cross
+  # compiler flag, and that is a machine this workflow does not have.
+  # ------------------------------------------------------------------
+  rpm:
+    needs: version
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:latest
+    steps:
+      - name: Install build tools
+        run: |
+          dnf install -y rpm-build rpmdevtools rpm-sign sbcl gcc make git tar gzip findutils
+          curl -o /etc/yum.repos.d/ocicl.repo \
+            https://ocicl.github.io/ocicl/rpm-repo/ocicl.repo
+          dnf install -y ocicl
+
+      - uses: actions/checkout@v4
+
+      # A build by hand is not a release, and must not be able to pass for one:
+      # 0.git<sha> sorts below the 1 a real release carries, so an artifact
+      # taken from the Actions tab is upgraded by the package it anticipates.
+      - name: Mark a hand-run build
+        if: needs.version.outputs.publish != 'true'
+        run: |
+          sed -i "s/^Release:.*/Release:        0.git$(git rev-parse --short HEAD)%{?dist}/" \
+            releng/scute.spec
+
+      - name: Fetch dependencies
+        run: |
+          ocicl setup > ~/.sbclrc
+          ocicl install
+
+      # The tarball rpmbuild unpacks carries the dependency tree with it, so the
+      # package is a function of what is checked out and not of the day it was
+      # built.  That is what "make rpm" is for; the release uses it rather than
+      # a second recipe that could drift from it.
+      - name: Build the RPM
+        run: |
+          make rpm
+          mkdir -p dist
+          cp build/rpm/RPMS/*/*.rpm dist/
+
+      - name: Sign the RPM
+        env:
+          RPM_GPG_PRIVATE_KEY: ${{ secrets.RPM_GPG_PRIVATE_KEY }}
+        if: ${{ env.RPM_GPG_PRIVATE_KEY != '' }}
+        run: |
+          mkdir -p ~/.gnupg && chmod 700 ~/.gnupg
+          echo "allow-loopback-pinentry" > ~/.gnupg/gpg-agent.conf
+          echo "pinentry-mode loopback" > ~/.gnupg/gpg.conf
+          echo "${RPM_GPG_PRIVATE_KEY}" | base64 -d | gpg --batch --import
+          GPG_NAME=$(gpg --list-secret-keys --with-colons | awk -F: '/^uid/{print $10; exit}')
+          printf '%%_signature gpg\n%%_gpg_name %s\n' "${GPG_NAME}" > ~/.rpmmacros
+          rpmsign --addsign dist/*.rpm
+          gpg --batch --export --armor > /tmp/RPM-GPG-KEY-scute
+          rpm --import /tmp/RPM-GPG-KEY-scute
+          rpm --checksig dist/*.rpm
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpm
+          path: dist/*.rpm
+
+  # ------------------------------------------------------------------
+  # The release itself, with the notes the changelog already carries: what a
+  # release says it changed and what the repository says it changed should not
+  # be two texts that can disagree.
+  # ------------------------------------------------------------------
+  release:
+    needs: [version, rpm]
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: rpm
+          path: dist
+
+      - name: Generate checksums
+        run: cd dist && sha256sum * > checksums.txt
+
+      - name: Extract release notes from the changelog
+        run: |
+          awk -v heading="## [${VERSION}]" '
+            index($0, heading) == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+            END { if (!found) exit 1 }
+          ' CHANGELOG.md > release-notes.md
+          test -s release-notes.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: release-notes.md
+          files: |
+            dist/*.rpm
+            dist/checksums.txt
+
+  # ------------------------------------------------------------------
+  # Repository metadata, pointing at the release's own assets, so that
+  # "dnf install scute" works without hosting the packages twice.
+  # ------------------------------------------------------------------
+  rpm-repo:
+    needs: [version, release]
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install createrepo_c
+        run: sudo apt-get update && sudo apt-get install -y createrepo-c
+
+      - name: Collect the release's RPMs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /tmp/rpms
+          gh release download "${TAG}" --pattern '*.rpm' --dir /tmp/rpms --skip-existing
+          ls -lh /tmp/rpms
+
+      - name: Build repodata
+        # Gzip explicitly: createrepo_c 1.2 and later default to zstd, and the
+        # rewriting below has to know what it is looking for.  Gzip is also what
+        # every dnf and yum in service can read without argument.
+        run: createrepo_c --general-compress-type=gz /tmp/rpms
+
+      - name: Point package locations at the release assets
+        run: |
+          BASE="https://github.com/${{ github.repository }}/releases/download/${TAG}"
+          cd /tmp/rpms/repodata
+          gunzip -f ./*-primary.xml.gz
+          PRIMARY=$(ls ./*-primary.xml)
+          sed -i "s|<location href=\"\([^\"]*\.rpm\)\"|<location href=\"${BASE}/\1\"|g" "${PRIMARY}"
+          gzip -9 "${PRIMARY}"
+
+          # repomd.xml has to be rebuilt because its checksums now describe
+          # files that have been rewritten.
+          cd /tmp/rpms
+          printf '<?xml version="1.0" encoding="UTF-8"?>\n<repomd xmlns="http://linux.duke.edu/metadata/repo">\n' \
+            > repodata/repomd.xml
+          for gz in repodata/*.xml.gz; do
+            fname=$(basename "${gz}")
+            type=$(echo "${fname}" | sed 's/.*-\([a-z_]*\)\.xml\.gz/\1/')
+            checksum=$(sha256sum "${gz}" | awk '{print $1}')
+            size=$(stat -c%s "${gz}")
+            gunzip -k -f "${gz}"
+            open_checksum=$(sha256sum "${gz%.gz}" | awk '{print $1}')
+            open_size=$(stat -c%s "${gz%.gz}")
+            rm -f "${gz%.gz}"
+            printf '  <data type="%s">\n' "${type}" >> repodata/repomd.xml
+            printf '    <checksum type="sha256">%s</checksum>\n' "${checksum}" >> repodata/repomd.xml
+            printf '    <open-checksum type="sha256">%s</open-checksum>\n' "${open_checksum}" >> repodata/repomd.xml
+            printf '    <location href="repodata/%s"/>\n' "${fname}" >> repodata/repomd.xml
+            printf '    <size>%s</size>\n' "${size}" >> repodata/repomd.xml
+            printf '    <open-size>%s</open-size>\n' "${open_size}" >> repodata/repomd.xml
+            printf '  </data>\n' >> repodata/repomd.xml
+          done
+          echo '</repomd>' >> repodata/repomd.xml
+
+      - name: Sign the metadata and export the public key
+        env:
+          RPM_GPG_PRIVATE_KEY: ${{ secrets.RPM_GPG_PRIVATE_KEY }}
+        if: ${{ env.RPM_GPG_PRIVATE_KEY != '' }}
+        run: |
+          echo "${RPM_GPG_PRIVATE_KEY}" | base64 -d | gpg --batch --import
+          gpg --batch --detach-sign --armor /tmp/rpms/repodata/repomd.xml
+          gpg --batch --export --armor > /tmp/rpms/RPM-GPG-KEY-scute
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpm-repo
+          path: |
+            /tmp/rpms/repodata/
+            /tmp/rpms/RPM-GPG-KEY-scute
+
+  pages:
+    needs: [version, rpm-repo]
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: rpm-repo
+          path: docs/rpm-repo
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

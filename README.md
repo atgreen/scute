@@ -55,7 +55,20 @@ the command runs, never a weaker sandbox than the one it asked for.
 
 ## Install
 
-Scute is not published yet, so build it. It needs SBCL and
+Fedora, RHEL and derivatives. Scute depends on
+[KeyFence](https://github.com/atgreen/keyfence), which is packaged in a
+repository of its own, so enable both and `dnf` will pull it in:
+
+```sh
+sudo curl -o /etc/yum.repos.d/keyfence.repo \
+  https://atgreen.github.io/keyfence/rpm-repo/keyfence.repo
+sudo curl -o /etc/yum.repos.d/scute.repo \
+  https://atgreen.github.io/scute/rpm-repo/scute.repo
+sudo dnf install scute
+```
+
+Or take the RPM from the [releases](https://github.com/atgreen/scute/releases),
+or build it. From source it needs SBCL and
 [ocicl](https://github.com/ocicl/ocicl), which `ocicl.csv` pins.
 
 ```sh
@@ -65,11 +78,19 @@ sudo make install    # /usr/local: the binary, man page, completions, policies
 ```
 
 `make install PREFIX=~/.local` installs into your own home instead, policies
-included, with no root involved. RPM and Debian packaging live in `releng/`.
+included, with no root involved. `make rpm` builds a package of whatever is
+checked out, no tag or release required; Debian packaging lives in `releng/`
+beside the spec.
 
-It also needs [KeyFence](https://github.com/atgreen/keyfence), which holds the
-credentials a sandbox must not: a policy that says nothing about the network is
-routed through it. Run it as a service, which is where credentials belong:
+The package from the repository is the one that arrives with `cap_bpf` and
+`cap_net_admin` already set, so the default network is the kernel redirect
+rather than the port-level fallback. A build from source gets there with
+`make egress`, which is one `setcap` and is
+[exactly what it grants](#an-address-allowlist).
+
+KeyFence holds the credentials a sandbox must not: a policy that says nothing
+about the network is routed through it. Run it as a service, which is where
+credentials belong:
 
 ```sh
 systemctl --user enable --now keyfence.socket keyfence-api.socket
@@ -751,7 +772,7 @@ authority that stays put, and systemd confining the process that holds your
 secrets.
 
 ```sh
-sudo dnf install keyfence                                    # ships the units
+sudo dnf install keyfence               # from the repository Install enables
 systemctl --user enable --now keyfence.socket keyfence-api.socket
 ```
 
@@ -1039,6 +1060,14 @@ version, which was the last piece outstanding.
 `docs/design.md` is the architecture and the reasoning behind it. The task graph
 lives in [beads](https://github.com/steveyegge/beads); `bd ready` shows what is
 claimable.
+
+A release is a `v*` tag and nothing else: GitHub Actions builds the RPM in a
+Fedora container, signs it, takes the release notes from the matching entry in
+`CHANGELOG.md`, and publishes the repository metadata that the `scute.repo`
+above points at. Every push runs the suite on a runner arranged to look like a
+workstation — real namespaces, a real Landlock ruleset, real cgroups — and
+builds and installs the package, because a spec that has stopped describing the
+tree is not something a tag should be the first to discover.
 
 ## Author and License
 

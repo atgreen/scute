@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ------------------------------------------------------------------
+  # The suite, on a runner rearranged to look like a workstation.
+  #
+  # Scute's tests are not unit tests around a mock kernel: they make
+  # namespaces, install Landlock rulesets, and put real limits in real
+  # cgroups.  So the job's first act is releng/ci-host.sh, which gives the
+  # runner the two things a hosted one withholds -- unprivileged user
+  # namespaces and a delegated cgroup -- and then gets out of the way.
+  # ------------------------------------------------------------------
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SBCL and the libraries Scute opens by name
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sbcl libseccomp2 groff-base
+
+      - name: Install ocicl
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download --repo ocicl/ocicl --pattern '*_amd64.deb' --dir /tmp
+          sudo dpkg -i /tmp/ocicl_*_amd64.deb
+          ocicl setup > ~/.sbclrc
+
+      # ocicl.csv pins every dependency, so the key is the whole answer: a
+      # changed pin is a changed tree, and an unchanged one need not be fetched.
+      - name: Cache the dependency tree
+        uses: actions/cache@v4
+        with:
+          path: ocicl
+          key: ocicl-${{ runner.os }}-${{ hashFiles('ocicl.csv') }}
+
+      - name: Fetch dependencies
+        run: ocicl install
+
+      - name: Build
+        run: make
+
+      # Informational, and deliberately before the suite: when a test fails for
+      # want of something the host does not have, this is the step that says so.
+      - name: What this host can enforce
+        run: ./scute doctor || true
+
+      - name: Test and smoke
+        run: releng/ci-host.sh make check
+
+  # ------------------------------------------------------------------
+  # The package, built the way the release builds it and installed the way a
+  # reader of the README installs it.  Unsigned and thrown away: this asks
+  # whether the spec still describes the tree, and whether the dependencies
+  # resolve against the repositories people are told to enable -- neither of
+  # which the suite above would notice breaking.
+  # ------------------------------------------------------------------
+  rpm:
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:latest
+    steps:
+      - name: Install build tools
+        run: |
+          dnf install -y rpm-build rpmdevtools sbcl gcc make git tar gzip findutils
+          curl -o /etc/yum.repos.d/ocicl.repo \
+            https://ocicl.github.io/ocicl/rpm-repo/ocicl.repo
+          dnf install -y ocicl
+
+      - uses: actions/checkout@v4
+
+      - name: Fetch dependencies
+        run: |
+          ocicl setup > ~/.sbclrc
+          ocicl install
+
+      - name: Build the RPM
+        run: make rpm
+
+      - name: Install it
+        run: |
+          curl -o /etc/yum.repos.d/keyfence.repo \
+            https://atgreen.github.io/keyfence/rpm-repo/keyfence.repo
+          dnf install -y ./build/rpm/RPMS/*/*.rpm
+          rpm -qlv scute
+          scute --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpm-unsigned
+          path: build/rpm/RPMS/*/*.rpm
+          retention-days: 7

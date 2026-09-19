@@ -15,6 +15,7 @@ systems/
 /man/
 /.test-passed
 /.system-stamp
+/build/
 
 # Beads / Dolt files (added by bd init)
 .dolt/
