@@ -42,8 +42,171 @@ parser read it."
       (policy-error (format nil "policy will not parse: ~A" condition)
                     pathname))))
 
-(defun read-sandbox-policy (pathname)
-  "Read and validate the policy in PATHNAME."
+;;── Finding a policy by name ───────────────────────────────────────────────────
+;;;
+;;; A policy that only exists on the machine it was written on is a note, not a
+;;; tool.  Scute ships policies for the agents people actually run, and a name is
+;;; how you reach one: --policy codex, not --policy /usr/share/scute/policies/
+;;; codex.policy.
+;;;
+;;; The search is ordered so that yours wins.  A shipped policy is a starting
+;;; point, and the way to change one is to put a policy of the same name in your
+;;; own configuration directory, where an upgrade will not touch it.
+
+(defparameter +policy-extension+ ".policy")
+
+(defun policy-search-path ()
+  "Where a policy named rather than spelled out is looked for, nearest first.
+
+SCUTE_POLICY_PATH replaces the list, which is what tests use and what somebody
+with policies in one shared directory wants."
+  (let ((override (sb-posix:getenv "SCUTE_POLICY_PATH")))
+    (if (and override (plusp (length override)))
+        (remove "" (uiop:split-string override :separator ":") :test #'string=)
+        (let ((home (sb-posix:getenv "HOME"))
+              (config (sb-posix:getenv "XDG_CONFIG_HOME"))
+              (data (sb-posix:getenv "XDG_DATA_HOME")))
+          (remove nil
+                  (list
+                   ;; Yours, first: an edited copy must outrank the shipped one.
+                   (cond ((and config (plusp (length config)))
+                          (format nil "~A/scute/policies" config))
+                         (home (format nil "~A/.config/scute/policies" home)))
+                   (cond ((and data (plusp (length data)))
+                          (format nil "~A/scute/policies" data))
+                         (home (format nil "~A/.local/share/scute/policies" home)))
+                   "/usr/local/share/scute/policies"
+                   "/usr/share/scute/policies"))))))
+
+(defun policy-name-p (text)
+  "Whether TEXT is a name to look up rather than a path to open.
+
+A name has no slash and no extension: \"codex\".  Anything else is a path, so an
+existing file is never shadowed by a shipped policy of the same name."
+  (and (plusp (length text))
+       (not (find #\/ text))
+       (not (search +policy-extension+ text))
+       (not (probe-file text))))
+
+(defun available-policies ()
+  "The policy names on the search path, nearest first, each named once.
+What a refusal lists, and what \"scute policies\" prints."
+  (let ((seen '()))
+    (dolist (directory (policy-search-path) (nreverse seen))
+      (dolist (file (ignore-errors
+                     (directory (merge-pathnames
+                                 (format nil "*~A" +policy-extension+)
+                                 (uiop:ensure-directory-pathname directory)))))
+        (let ((name (pathname-name file)))
+          (unless (member name seen :test #'string=)
+            (push name seen)))))))
+
+(defun locate-policy (text)
+  "TEXT as a policy file: itself if it is a path, or the nearest match by name."
+  (if (not (policy-name-p text))
+      text
+      (or (loop for directory in (policy-search-path)
+                for candidate = (format nil "~A/~A~A" (string-right-trim "/" directory)
+                                        text +policy-extension+)
+                when (probe-file candidate)
+                  return candidate)
+          (let ((available (available-policies)))
+            (policy-error
+             (if available
+                 (format nil "no policy named ~S, and no file by that name. ~
+                              Installed: ~{~A~^, ~}"
+                         text available)
+                 (format nil "no policy named ~S, and no file by that name. ~
+                              Nothing is installed in ~{~A~^, ~}"
+                         text (policy-search-path)))
+             nil)))))
+
+;;── Drop-in directories ────────────────────────────────────────────────────────
+;;;
+;;; codex.d/*.policy, beside codex.policy, merged into it.  A shipped policy
+;;; cannot know where this machine keeps its module cache or that this user wants
+;;; one more credential in every run, and copying the whole policy to change one
+;;; line means an upgrade's improvements never arrive.
+;;;
+;;; A fragment is not a policy: a file containing nothing but two extra paths is
+;;; exactly the case this is for, so fragments are merged before validation rather
+;;; than validated one by one.
+;;;
+;;; One merge rule, so that nobody has to remember two: an array appends, a scalar
+;;; is an answer and the last answer wins, and a table is merged key by key.  A
+;;; drop-in therefore adds paths, adds arguments, and replaces a mode, a limit or a
+;;; program by naming another one.  Fragments are taken in filename order -- 10-
+;;; before 20- -- and the search path is walked from its far end, so a fragment in
+;;; your own configuration has the last word over one shipped beside the policy.
+;;;
+;;; This widens what a policy grants, and that is not a hole: whoever can write a
+;;; drop-in could copy the policy instead, so it hands them nothing they did not
+;;; already have.  The mechanism for an operator constraining somebody else is a
+;;; different one, and it can only narrow.
+
+(defun table-document-p (value)
+  "Whether VALUE is a TOML table rather than an array or a scalar.
+
+A table is an alist keyed by strings; an array of strings is a list of strings.
+Both are lists, so the elements decide."
+  (and (consp value)
+       (not (stringp value))
+       (every (lambda (entry) (and (consp entry) (stringp (car entry)))) value)))
+
+(defun merge-policy-values (base addition)
+  "BASE with ADDITION merged in: tables recursively, arrays appended, else last wins."
+  (cond ((and (table-document-p base) (table-document-p addition))
+         (merge-policy-documents base addition))
+        ((and (listp base) (listp addition)
+              (not (stringp base)) (not (stringp addition)))
+         ;; Appended, minus what is already there: a drop-in repeating a path it
+         ;; needs is ordinary, while a policy listing one twice is a typo -- and
+         ;; that second case is inside one file, where the validator still sees it.
+         (append base (remove-if (lambda (item) (member item base :test #'equal))
+                                 addition)))
+        (t addition)))
+
+(defun merge-policy-documents (base addition)
+  "BASE with every entry of ADDITION merged into it, in BASE's key order."
+  (let ((result (copy-alist base)))
+    (loop for (key . value) in addition
+          for existing = (assoc key result :test #'string=)
+          do (if existing
+                 (setf (cdr existing) (merge-policy-values (cdr existing) value))
+                 (setf result (append result (list (cons key value))))))
+    result))
+
+(defun drop-in-directory (pathname)
+  "The NAME.d beside the policy file PATHNAME."
+  (let* ((path (uiop:parse-native-namestring pathname))
+         (stem (pathname-name path)))
+    (uiop:ensure-directory-pathname
+     (merge-pathnames (format nil "~A.d" stem) path))))
+
+(defun drop-in-files (pathname name)
+  "The fragment files that extend the policy at PATHNAME.
+
+Ordered so that the last word belongs to the directory nearest the user: the
+search path is walked from its far end, and within a directory the files are taken
+in filename order, which is what a 10- and 20- prefix is for."
+  (let ((directories (if name
+                         (reverse (mapcar (lambda (directory)
+                                            (uiop:ensure-directory-pathname
+                                             (format nil "~A/~A.d"
+                                                     (string-right-trim "/" directory)
+                                                     name)))
+                                          (policy-search-path)))
+                         (list (drop-in-directory pathname)))))
+    (loop for directory in directories
+          append (sort (mapcar #'namestring
+                               (ignore-errors
+                                (directory (merge-pathnames
+                                            (format nil "*~A" +policy-extension+)
+                                            directory))))
+                       #'string<))))
+
+(defun read-policy-document (pathname)
+  "Parse the policy text in PATHNAME, without validating it."
   (let ((text (handler-case
                   (with-open-file (stream pathname :direction :input
                                                    :external-format :utf-8)
@@ -53,14 +216,36 @@ parser read it."
                 (error (condition)
                   (policy-error (format nil "cannot be read: ~A" condition)
                                 pathname)))))
-    (validate-sandbox-policy (parse-policy-text text pathname) pathname)))
+    (parse-policy-text text pathname)))
+
+(defun read-sandbox-policy (pathname)
+  "Read and validate the policy in PATHNAME, or the policy PATHNAME names."
+  (let* ((text (if (stringp pathname) pathname (namestring pathname)))
+         (name (and (policy-name-p text) text))
+         (base (locate-policy text))
+         (fragments (drop-in-files base name))
+         (document (reduce (lambda (merged fragment)
+                             (merge-policy-documents merged
+                                                     (read-policy-document fragment)))
+                           fragments
+                           :initial-value (read-policy-document base)))
+         (sources (cons base fragments)))
+    ;; The files that contributed travel with the policy, so that --dry-run can
+    ;; name them: a policy whose meaning comes from files nobody can see is worse
+    ;; than no drop-ins at all.
+    (validate-sandbox-policy document base sources)))
 
 ;;── What a policy says ─────────────────────────────────────────────────────────
 
-(defstruct (filesystem-rule (:constructor make-filesystem-rule (kind path)))
-  "One access kind and the path a policy declared it for, exactly as written."
+(defstruct (filesystem-rule (:constructor make-filesystem-rule (kind path &optional optional)))
+  "One access kind and the path a policy declared it for, exactly as written.
+
+OPTIONAL is what a leading \"?\" asked for: a path to grant if this host has it.
+Kept here rather than in the string so that ~ expansion, the relative-path rules
+and the refusal messages all see the path the policy meant."
   (kind nil :read-only t)
-  (path nil :read-only t))
+  (path nil :read-only t)
+  (optional nil :read-only t))
 
 (defstruct (credential-request (:constructor make-credential-request
                                    (name secret-file destinations variable ttl
@@ -120,6 +305,8 @@ is the only kind anyone can check.")
   (allow      nil :read-only t)      ; the only addresses it may reach
   (broker     nil :read-only t)      ; a credential broker to run beside it
   (credentials nil :read-only t)     ; what that broker is asked to hold
+  (command    nil :read-only t)      ; the program this policy is for, and its arguments
+  (sources    nil :read-only t)      ; every file that contributed, drop-ins included
   (pathname   nil :read-only t))
 
 ;;── The document Scute expects ─────────────────────────────────────────────────
@@ -180,13 +367,33 @@ is the only kind anyone can check.")
     ("read-write" . :read-write) ("read-write-execute" . :read-write-execute))
   "The filesystem keys a policy may use, and the access kind each names.")
 
+(defun optional-path-p (declared)
+  "Whether DECLARED is marked as a path that may be absent, by a leading \"?\".
+
+A policy that ships with Scute has to describe machines it has never seen.
+/home/linuxbrew/.linuxbrew holds the agent on one host and does not exist on the
+next; ~/.cache/go-build is there once Go has run and not before.  Naming those
+unconditionally makes a policy that refuses to start, and leaving them out makes
+one that cannot work -- so a policy may say that a path is wanted if it is there.
+
+Marked, never inferred.  An unmarked path that does not exist is still a refusal,
+because a typo in a path is the most common way a policy grants nothing where its
+author believed it granted something."
+  (and (plusp (length declared)) (char= #\? (char declared 0))))
+
+(defun declared-path (declared)
+  "DECLARED without any optional marker."
+  (if (optional-path-p declared) (subseq declared 1) declared))
+
 (defun validate-filesystem (value pathname)
   (let ((entries (table-entries value "filesystem" pathname)))
     (check-known-keys entries (mapcar #'car +access-key-names+)
                       "[filesystem]" pathname)
     (loop for (key . paths) in entries
           for kind = (cdr (assoc key +access-key-names+ :test #'string=))
-          append (mapcar (lambda (path) (make-filesystem-rule kind path))
+          append (mapcar (lambda (path)
+                           (make-filesystem-rule kind (declared-path path)
+                                                 (optional-path-p path)))
                          (string-array paths key pathname)))))
 
 (defun proxy-url-host (url)
@@ -303,7 +510,8 @@ Answers the mode and that permission."
   "PATH with a leading ~/ replaced by the home directory.
 
 A secret lives under a home directory more often than not, and a policy that
-had to spell that out could not be shared between two people's machines."
+had to spell that out could not be shared between two people's machines -- which
+goes double for a policy Scute ships: /home/green is nobody else's path."
   (if (and (> (length path) 1) (char= #\~ (char path 0)) (char= #\/ (char path 1)))
       (concatenate 'string (or (sb-posix:getenv "HOME") "~") (subseq path 1))
       path))
@@ -530,7 +738,13 @@ looks like a filesystem problem."
 
 A policy that sets a variable means it, so setting wins over both what the caller
 had and what the policy kept.  Anything else would make the value depend on the
-shell the command was started from, which is the thing a policy is for avoiding."
+shell the command was started from, which is the thing a policy is for avoiding.
+
+A leading ~/ in a value is expanded, as it is in a path: a shipped policy has to
+say where a tool's configuration lives without knowing whose home it is in, and a
+variable holding a path is how half of them are told.  Only a leading ~/, and
+nothing else about the value, because guessing at the rest of somebody's string is
+not Scute's business."
   (let ((result (remove-if (lambda (entry)
                              (let ((equals (position #\= entry)))
                                (and equals
@@ -539,7 +753,7 @@ shell the command was started from, which is the thing a policy is for avoiding.
                            environment)))
     (append result
             (loop for (name . value) in settings
-                  collect (format nil "~A=~A" name value)))))
+                  collect (format nil "~A=~A" name (expand-home value))))))
 
 (defun kept-environment (extra &optional (environment (sb-ext:posix-environ)))
   "ENVIRONMENT with only the variables scute keeps and EXTRA names."
@@ -570,13 +784,41 @@ for a swap that nothing routes through."
                       pathname))
       (proxy-url-port proxy pathname))))
 
-(defun validate-sandbox-policy (document &optional pathname)
+(defun validate-command (value pathname)
+  "One [command] table: the program a policy is for, and the arguments it needs.
+
+A policy that names its own command is the difference between documentation and a
+thing you can run.  Confining codex means knowing that its own sandbox has to be
+turned off, and a flag that lives in a README is a flag somebody leaves out --
+whereas one written here is read by whoever reviews the policy and passed by
+whoever runs it.
+
+The program is resolved when the plan is compiled, not here, so that a policy can
+be read and checked on a machine where the program is not installed."
+  (let ((entries (table-entries value "command" pathname)))
+    (check-known-keys entries '("program" "arguments") "[command]" pathname)
+    (let* ((program (let ((named (assoc "program" entries :test #'string=)))
+                      (unless named
+                        (policy-error "[command] must name a program" pathname))
+                      (scalar-string (cdr named) "program" pathname)))
+           (arguments (let ((named (assoc "arguments" entries :test #'string=)))
+                        (when named
+                          (let ((values (cdr named)))
+                            (unless (and (listp values) (every #'stringp values))
+                              (policy-error "[command] arguments must be a list of strings"
+                                            pathname))
+                            values)))))
+      (when (zerop (length program))
+        (policy-error "[command] program cannot be empty" pathname))
+      (cons program arguments))))
+
+(defun validate-sandbox-policy (document &optional pathname sources)
   "Check DOCUMENT against the policy schema and answer a SANDBOX-POLICY.
 Anything the schema does not name is an error: a policy Scute half understands
 is a sandbox the operator half asked for."
   (let ((tables (table-entries document "policy" pathname)))
     (check-known-keys tables '("filesystem" "network" "limits" "audit"
-                               "environment" "credentials")
+                               "environment" "credentials" "command")
                       "a policy" pathname)
     (flet ((table (name) (cdr (assoc name tables :test #'string=))))
       (let ((filesystem (table "filesystem")))
@@ -617,6 +859,9 @@ is a sandbox the operator half asked for."
          :environment-set (when (table "environment")
                             (nth-value 1 (validate-environment (table "environment")
                                                                pathname)))
+         :command (when (table "command")
+                    (validate-command (table "command") pathname))
+         :sources (or sources (and pathname (list pathname)))
          :pathname pathname)))))
 
 ;;── The launch plan ────────────────────────────────────────────────────────────
@@ -641,7 +886,12 @@ is a sandbox the operator half asked for."
   (limits      nil :read-only t)
   (audit       nil :read-only t)
   (broker      nil :read-only t)
-  (credentials nil :read-only t))
+  (credentials nil :read-only t)
+  (sources     nil :read-only t)     ; the policy files this plan was read from
+  ;; Optional paths this host does not have.  Kept so that --dry-run can say
+  ;; what a policy asked for and did not get: a grant that quietly vanished is
+  ;; how someone spends an afternoon on "permission denied".
+  (absent      nil :read-only t))
 
 (defun canonical-directory (pathname)
   "PATHNAME as a canonical directory name, ending in a slash."
@@ -695,16 +945,21 @@ before anything is created, and scute run --dry-run shows it."
              (char= #\/ (char path (length base)))))))
 
 (defun resolve-rule (rule directory &optional pathname)
-  "Resolve RULE against DIRECTORY into the PATH-RULE the kernel will be told.
+  "Resolve RULE against DIRECTORY into the PATH-RULE the kernel will be told, or
+NIL for an optional path that is not here.
+
 A relative path means what it says from where Scute was invoked, and may not
 climb out of there: a policy that writes \"../..\" is describing somewhere it
 was not asked about."
-  (let* ((declared (filesystem-rule-path rule))
+  (let* ((declared (expand-home (filesystem-rule-path rule)))
+         (optional (filesystem-rule-optional rule))
          (relative (not (char= #\/ (char declared 0))))
          (truename (probe-file (if relative
                                   (merge-pathnames declared directory)
                                   declared))))
     (unless truename
+      (when optional
+        (return-from resolve-rule nil))
       (policy-error (format nil "~S does not exist" declared) pathname))
     (let ((path (namestring truename)))
       (when (and relative (not (beneath-directory-p path directory)))
@@ -722,6 +977,11 @@ was not asked about."
   "Resolve POLICY and COMMAND into an immutable launch plan.
 Paths are canonical, the command is the program that will actually run, and
 nothing here touches the kernel."
+  ;; A policy may name its own command, and then what the caller wrote after --
+  ;; are arguments to it rather than a program of their own.  This is what lets a
+  ;; shipped policy be run rather than copied: "scute run --policy codex" knows
+  ;; that codex needs its own sandbox turned off, because the policy says so.
+  (setf command (append (sandbox-policy-command policy) command))
   (unless (and (listp command) command (every #'stringp command))
     (usage-error "the command must be a non-empty list of strings"))
   (let ((directory (canonical-directory directory)))
@@ -753,10 +1013,17 @@ nothing here touches the kernel."
                                       (format nil "https_proxy=~A" proxy)
                                       (format nil "http_proxy=~A" proxy)))
                         kept))
-     :filesystem (mapcar (lambda (rule)
-                           (resolve-rule rule directory
-                                         (sandbox-policy-pathname policy)))
-                         (sandbox-policy-filesystem policy))
+     :filesystem (remove nil
+                         (mapcar (lambda (rule)
+                                   (resolve-rule rule directory
+                                                 (sandbox-policy-pathname policy)))
+                                 (sandbox-policy-filesystem policy)))
+     :sources (sandbox-policy-sources policy)
+     :absent (loop for rule in (sandbox-policy-filesystem policy)
+                   when (and (filesystem-rule-optional rule)
+                             (null (resolve-rule rule directory
+                                                 (sandbox-policy-pathname policy))))
+                     collect (filesystem-rule-path rule))
      :network (sandbox-policy-network policy)
      :unix-sockets (sandbox-policy-unix-sockets policy)
      :connect-tcp (sandbox-policy-connect-tcp policy)
@@ -812,6 +1079,8 @@ A plan is immutable, so an override makes another one rather than changing it."
      :audit (launch-plan-audit plan)
      :broker (launch-plan-broker plan)
      :credentials (launch-plan-credentials plan)
+     :absent (launch-plan-absent plan)
+     :sources (launch-plan-sources plan)
      :limits (if (eq wall-clock :keep)
                  limits                       ; including none at all
                  (make-resource-limits
@@ -917,6 +1186,13 @@ compiles being a plan that runs."
   ;; Printed in full, because this is the one place a policy asks Scute to read
   ;; something the sandbox itself could not: whoever reviews the policy should
   ;; see which files that is before any of them is opened.
+  (let ((sources (launch-plan-sources plan)))
+    (when sources
+      (format stream "policy       ~A~%" (first sources))
+      (dolist (fragment (rest sources))
+        (format stream "~13T+ ~A~%" fragment))))
+  (dolist (path (launch-plan-absent plan))
+    (format stream "absent       ~A (optional; not on this host)~%" path))
   (dolist (request (launch-plan-credentials plan))
     (format stream "credential   ~A~%" (credential-request-name request))
     (if (credential-request-reference request)

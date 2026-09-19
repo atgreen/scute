@@ -17,6 +17,10 @@ override_dh_auto_install:
 	install -D -m 0644 completions/_scute debian/scute/usr/share/zsh/vendor-completions/_scute
 	install -D -m 0644 completions/scute.fish debian/scute/usr/share/fish/vendor_completions.d/scute.fish
 	install -D -m 0644 man/scute.1 debian/scute/usr/share/man/man1/scute.1
+	for policy in policies/*.policy; do \
+		install -D -m 0644 "$$policy" \
+			debian/scute/usr/share/scute/policies/"$$(basename $$policy)"; \
+	done
 	install -m 0644 scute-sbom.spdx.json debian/scute/usr/share/sbom/scute-$(shell dpkg-parsechangelog -S Version | sed 's/-.*//' ).spdx.json
 
 override_dh_strip:

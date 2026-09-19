@@ -42,6 +42,7 @@
            #:filesystem-rule
            #:filesystem-rule-kind
            #:filesystem-rule-path
+           #:filesystem-rule-optional
            #:resource-limits
            #:resource-limits-memory
            #:resource-limits-processes
@@ -172,6 +173,19 @@
            #:broker-settings-control-port
            #:launch-plan-broker
            #:launch-plan-credentials
+           #:launch-plan-absent
+           #:sandbox-policy-command
+           #:locate-policy
+           #:available-policies
+           #:policy-search-path
+           #:policy-name-p
+           #:policy-verb-arguments
+           #:sandbox-policy-sources
+           #:launch-plan-sources
+           #:merge-policy-documents
+           #:drop-in-files
+           #:optional-path-p
+           #:declared-path
            #:call-with-broker
            #:start-broker
            #:stop-broker

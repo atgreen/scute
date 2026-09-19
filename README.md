@@ -96,6 +96,93 @@ scute run --read-execute /usr --read /etc --read-write . -- ./build.sh
 scute run --namespaces-only -- ./build.sh          # no filesystem restriction
 ```
 
+## Running an agent by name
+
+Scute ships policies for the agents people actually run, and installs them where
+it looks for them — so the policy name is the command:
+
+```sh
+scute codex               # codex, confined to this directory
+scute claude              # claude code, with its key held by the broker
+scute bash                # a shell in this directory and nowhere else
+
+scute codex -- "work through the ready beads"    # arguments go to the agent
+scute policies            # what this host has, and which file each came from
+```
+
+`scute codex` is exactly `scute run --policy codex` — one code path, one set of
+options, one plan from `--dry-run`. A built-in command always wins, so a policy
+named `doctor` cannot take over `scute doctor`.
+
+Each shipped policy carries the command it is for, including the flag that makes it
+work. Codex wraps every command it runs in bubblewrap, which cannot nest inside
+Scute's namespaces and fails claiming your kernel forbids user namespaces; the
+policy passes `--dangerously-bypass-approvals-and-sandbox`, because Scute is the
+sandbox and the inner one is redundant and broken. A flag like that belongs where
+the policy is reviewed, not in a README somebody skims.
+
+Policies are looked for in, nearest first:
+
+| Directory | For |
+|---|---|
+| `~/.config/scute/policies` | yours, and an upgrade will not touch it |
+| `~/.local/share/scute/policies` | `make install PREFIX=~/.local` |
+| `/usr/local/share/scute/policies` | `make install` |
+| `/usr/share/scute/policies` | the package |
+
+`SCUTE_POLICY_PATH` replaces the list. A path is never shadowed by a name:
+`--policy ./mine.policy` is that file.
+
+### Extending a policy you do not own
+
+A policy Scute ships cannot know that your skills are symlinked into another
+repository, or that you want one more credential in every run. Rather than copying
+it — and never seeing an improvement again — put fragments in `NAME.d`:
+
+```sh
+mkdir -p ~/.config/scute/policies/codex.d
+cat > ~/.config/scute/policies/codex.d/10-skills.policy <<'EOF'
+# ~/.codex/skills/* are symlinks into my repositories, and Landlock resolves a
+# symlink to its target, so the target has to be granted too.
+[filesystem]
+read = ["?~/git/hackinator", "?~/git/testinator"]
+EOF
+```
+
+A fragment is not a whole policy: two extra paths is the point of it. One rule
+covers the merge — **an array appends, a scalar's last value wins, a table merges
+key by key** — so a fragment adds paths, adds arguments, and replaces a mode, a
+limit or a program by naming another. Fragments are read in filename order, and
+your own directory has the last word over one shipped beside the policy.
+
+Every file that contributed is named by `--dry-run`:
+
+```
+policy       /usr/share/scute/policies/codex.policy
+             + /home/green/.config/scute/policies/codex.d/10-skills.policy
+```
+
+This widens what a policy grants, and that is not a hole: anyone who can write a
+drop-in could copy the whole policy instead. (The operator-side mechanism, which
+can only narrow, is a different one.)
+
+### Paths a policy is not sure about
+
+A shipped policy has to describe machines it has never seen, so a `?` before a path
+means *if this host has it*:
+
+```toml
+read-execute = ["/usr", "?/home/linuxbrew/.linuxbrew", "?~/.local/bin"]
+```
+
+An unmarked path that does not exist is still refused — a typo in a path is the
+commonest way to grant nothing while believing otherwise. What was skipped is
+printed, never silent:
+
+```
+absent       ~/.nvm (optional; not on this host)
+```
+
 ## Writing a policy
 
 Don't write it by hand. Run the command once and let scute write down what it

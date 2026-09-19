@@ -545,3 +545,295 @@ read = [\"/etc\"]
 [environment.set]
 FINE = \"yes\""))
            "a perfectly good setting was refused")))
+
+;;── Policies that can be shipped ───────────────────────────────────────────────
+;;;
+;;; A policy installed with Scute has to describe machines it has never seen, and
+;;; be runnable by name rather than by path. Three things make that work, and each
+;;; of them is a way to go quietly wrong: a path that may be absent, a home
+;;; directory that is not the author's, and a command the policy carries itself.
+
+(deftest test-a-path-may-be-declared-optional
+  "A leading ? means \"if this host has it\", so one policy fits two machines."
+  (let* ((policy (policy-from-string
+                  (format nil "[filesystem]~%read = [\"/etc\", \"?/etc/definitely-absent\"]~%")))
+         (rules (call-scute 'sandbox-policy-filesystem policy)))
+    (check (= 2 (length rules)) "expected both rules to survive validation")
+    (destructuring-bind (required optional) rules
+      (check (not (call-scute 'filesystem-rule-optional required))
+             "an ordinary path was marked optional")
+      (check (call-scute 'filesystem-rule-optional optional)
+             "a ?-marked path was not marked optional")
+      (check (string= "/etc/definitely-absent" (call-scute 'filesystem-rule-path optional))
+             "the marker was left in the path: ~S"
+             (call-scute 'filesystem-rule-path optional)))))
+
+(deftest test-an-absent-optional-path-is-skipped-and-reported
+  "Skipped, and said out loud: a grant that vanishes silently is an afternoon
+spent on \"permission denied\" with a policy that looks correct."
+  (let* ((pathname (write-policy (format nil "[filesystem]~%~
+                                             read-execute = [\"/usr\"]~%~
+                                             read = [\"/etc\", \"?/etc/definitely-absent\"]~%")))
+         (plan (call-scute 'compile-launch-plan
+                           (call-scute 'read-sandbox-policy pathname)
+                           '("/bin/true"))))
+    (check (notany (lambda (rule)
+                     (search "definitely-absent" (call-scute 'path-rule-path rule)))
+                   (call-scute 'launch-plan-filesystem plan))
+           "an absent path reached the kernel rules")
+    (check (member "/etc/definitely-absent" (call-scute 'launch-plan-absent plan)
+                   :test #'string=)
+           "the plan does not report what it skipped: ~S"
+           (call-scute 'launch-plan-absent plan))))
+
+(deftest test-an-absent-path-without-the-marker-is-still-a-refusal
+  "A typo in a path is the commonest way to grant nothing while believing
+otherwise, so silence is only ever what a policy asked for.
+
+Refused when the plan is compiled rather than when the policy is parsed: whether a
+path exists is a fact about this host, and a policy has to be readable on a host
+it was not written for."
+  (let* ((pathname (write-policy (format nil "[filesystem]~%~
+                                             read-execute = [\"/usr\"]~%~
+                                             read = [\"/etc/definitely-absent\"]~%")))
+         (policy (call-scute 'read-sandbox-policy pathname))
+         (refusal (nth-value 1 (ignore-errors
+                                (call-scute 'compile-launch-plan policy '("/bin/true"))))))
+    (check (typep refusal 'scute:policy-error)
+           "an unmarked missing path was accepted")
+    (check (search "definitely-absent" (princ-to-string refusal))
+           "the refusal does not name the path: ~A" refusal)))
+
+(deftest test-a-home-relative-path-is-expanded
+  "/home/green is nobody else's path, so a shipped policy writes ~/."
+  (let* ((home (sb-posix:getenv "HOME"))
+         (pathname (write-policy (format nil "[filesystem]~%~
+                                             read-execute = [\"/usr\"]~%~
+                                             read = [\"~~/\"]~%")))
+         (plan (call-scute 'compile-launch-plan
+                           (call-scute 'read-sandbox-policy pathname)
+                           '("/bin/true"))))
+    (check (find home (call-scute 'launch-plan-filesystem plan)
+                 :key (lambda (rule) (call-scute 'path-rule-path rule))
+                 :test #'string=)
+           "~~/ did not become ~A: ~S" home
+           (mapcar (lambda (rule) (call-scute 'path-rule-path rule))
+                   (call-scute 'launch-plan-filesystem plan)))))
+
+(deftest test-a-policy-can-carry-its-own-command
+  "The flag that makes an agent work belongs where the policy is read, not in a
+README somebody skims."
+  (let* ((pathname (write-policy (format nil "[filesystem]~%~
+                                             read-execute = [\"/usr\"]~%~
+                                             read = [\"/etc\"]~%~
+                                             [command]~%~
+                                             program = \"echo\"~%~
+                                             arguments = [\"first\"]~%")))
+         (policy (call-scute 'read-sandbox-policy pathname)))
+    (check (equal '("echo" "first") (call-scute 'sandbox-policy-command policy))
+           "the command was not read: ~S" (call-scute 'sandbox-policy-command policy))
+    ;; What the caller writes after -- are arguments to it, appended.
+    (let ((plan (call-scute 'compile-launch-plan policy '("second"))))
+      (check (equal '("first" "second") (rest (call-scute 'launch-plan-command plan)))
+             "the caller's arguments did not follow the policy's: ~S"
+             (call-scute 'launch-plan-command plan))
+      (check (search "echo" (first (call-scute 'launch-plan-command plan)))
+             "the program was not resolved: ~S"
+             (first (call-scute 'launch-plan-command plan))))))
+
+(deftest test-a-command-table-is-checked-like-everything-else
+  (check (refused-p (format nil "[filesystem]~%read = [\"/etc\"]~%[command]~%~
+                                 arguments = [\"x\"]~%"))
+         "a [command] with no program was accepted")
+  (check (refused-p (format nil "[filesystem]~%read = [\"/etc\"]~%[command]~%~
+                                 program = \"sh\"~%arguments = \"not-a-list\"~%"))
+         "arguments that are not a list were accepted")
+  (check (refused-p (format nil "[filesystem]~%read = [\"/etc\"]~%[command]~%~
+                                 program = \"sh\"~%what = \"else\"~%"))
+         "an unknown key in [command] was accepted"))
+
+;;── Finding a policy by name ───────────────────────────────────────────────────
+
+(deftest test-a-name-is-looked-up-on-the-search-path
+  "--policy codex, not --policy /usr/share/scute/policies/codex.policy."
+  (let* ((directory (scratch-pathname "policies"))
+         (installed (merge-pathnames "shipped.policy"
+                                     (uiop:ensure-directory-pathname directory))))
+    (ensure-directories-exist (uiop:ensure-directory-pathname directory))
+    (with-open-file (stream installed :direction :output :if-exists :supersede)
+      (format stream "[filesystem]~%read = [\"/etc\"]~%"))
+    (sb-posix:setenv "SCUTE_POLICY_PATH" (namestring directory) 1)
+    (unwind-protect
+         (progn
+           (check (string= (namestring installed) (call-scute 'locate-policy "shipped"))
+                  "a name on the search path was not found: ~S"
+                  (call-scute 'locate-policy "shipped"))
+           (check (member "shipped" (call-scute 'available-policies) :test #'string=)
+                  "the name is not listed as available")
+           ;; A path is never shadowed by an installed policy of the same name.
+           (check (string= "./shipped.policy" (call-scute 'locate-policy "./shipped.policy"))
+                  "a path was treated as a name")
+           (let ((refusal (nth-value 1 (ignore-errors (call-scute 'locate-policy "absent")))))
+             (check (typep refusal 'scute:policy-error)
+                    "an unknown name was not refused")
+             (check (search "shipped" (princ-to-string refusal))
+                    "the refusal does not say what is installed: ~A" refusal)))
+      (sb-posix:unsetenv "SCUTE_POLICY_PATH"))))
+
+(deftest test-the-shipped-policies-are-valid
+  "The policies in this tree are the ones that get installed, so they are held to
+the same standard as any other: parsed, checked, and read for the command they
+carry. Their paths are not resolved here -- half of them are deliberately absent
+on any given machine, which is the point of the optional marker."
+  (dolist (pathname (directory (merge-pathnames "policies/*.policy"
+                                                (asdf:system-source-directory :scute))))
+    (let ((policy (call-scute 'read-sandbox-policy pathname)))
+      (check (call-scute 'sandbox-policy-command policy)
+             "~A ships without a [command], so it cannot be run by name"
+             (file-namestring pathname))
+      (check (call-scute 'sandbox-policy-filesystem policy)
+             "~A grants no filesystem access at all" (file-namestring pathname)))))
+
+;;── Drop-in directories ────────────────────────────────────────────────────────
+;;;
+;;; A shipped policy cannot know where this machine keeps its caches, and copying
+;;; the whole policy to add one path means an upgrade's improvements never arrive.
+;;; NAME.d/*.policy is how someone extends a policy they do not own.
+
+(defun with-policy-directories (function)
+  "Run FUNCTION with a search path of two scratch directories, far and near.
+Answers their pathnames, so a test can write policies and fragments into them."
+  (let* ((far (uiop:ensure-directory-pathname (scratch-pathname "far")))
+         (near (uiop:ensure-directory-pathname (scratch-pathname "near"))))
+    ;; Emptied first: the scratch names are per-process, so without this a
+    ;; fragment written by one test is still there for the next -- which is how
+    ;; three of these tests first "failed".
+    (dolist (directory (list far near))
+      (ignore-errors (uiop:delete-directory-tree directory :validate t))
+      (ensure-directories-exist directory))
+    ;; Nearest first, as the real search path is ordered.
+    (sb-posix:setenv "SCUTE_POLICY_PATH"
+                     (format nil "~A:~A" (namestring near) (namestring far)) 1)
+    (unwind-protect (funcall function far near)
+      (sb-posix:unsetenv "SCUTE_POLICY_PATH"))))
+
+(defun write-into (directory name text)
+  (let ((pathname (merge-pathnames name (uiop:ensure-directory-pathname directory))))
+    (ensure-directories-exist pathname)
+    (with-open-file (stream pathname :direction :output :if-exists :supersede)
+      (write-string text stream))
+    pathname))
+
+(deftest test-a-drop-in-adds-to-what-a-policy-grants
+  "The common case: two more paths, without touching the shipped file."
+  (with-policy-directories
+    (lambda (far near)
+      (declare (ignore near))
+      (write-into far "app.policy"
+                  (format nil "[filesystem]~%read = [\"/etc\"]~%"))
+      (write-into far "app.d/10-more.policy"
+                  (format nil "[filesystem]~%read = [\"/usr\"]~%read-write = [\"/tmp\"]~%"))
+      (let* ((policy (call-scute 'read-sandbox-policy "app"))
+             (paths (mapcar (lambda (rule) (call-scute 'filesystem-rule-path rule))
+                            (call-scute 'sandbox-policy-filesystem policy))))
+        (dolist (expected '("/etc" "/usr" "/tmp"))
+          (check (member expected paths :test #'string=)
+                 "~A did not survive the merge: ~S" expected paths))))))
+
+(deftest test-a-drop-in-can-replace-a-scalar-and-add-arguments
+  "One rule, everywhere: arrays append, and a scalar is an answer whose last
+version wins.  So a drop-in changes which program runs by naming another, and adds
+to its arguments rather than restating them -- which is what somebody wanting one
+more flag actually wants."
+  (with-policy-directories
+    (lambda (far near)
+      (declare (ignore near))
+      (write-into far "app.policy"
+                  (format nil "[filesystem]~%read = [\"/etc\"]~%~
+                               [network]~%mode = \"none\"~%~
+                               [command]~%program = \"sh\"~%arguments = [\"-c\", \"true\"]~%"))
+      (write-into far "app.d/50-mine.policy"
+                  (format nil "[network]~%mode = \"host\"~%~
+                               [command]~%program = \"bash\"~%arguments = [\"--norc\"]~%"))
+      (let ((policy (call-scute 'read-sandbox-policy "app")))
+        (check (eq :host (call-scute 'sandbox-policy-network policy))
+               "the drop-in did not change the network mode")
+        (check (equal '("bash" "-c" "true" "--norc")
+                      (call-scute 'sandbox-policy-command policy))
+               "expected the program replaced and the arguments appended, got ~S"
+               (call-scute 'sandbox-policy-command policy))))))
+
+(deftest test-the-nearest-directory-has-the-last-word
+  "Yours wins: a fragment in your own configuration outranks one shipped with the
+policy, the same way your copy of a policy outranks the installed one."
+  (with-policy-directories
+    (lambda (far near)
+      (write-into far "app.policy" (format nil "[filesystem]~%read = [\"/etc\"]~%~
+                                                [limits]~%processes = 8~%"))
+      (write-into far "app.d/10-vendor.policy" (format nil "[limits]~%processes = 64~%"))
+      (write-into near "app.d/10-mine.policy" (format nil "[limits]~%processes = 256~%"))
+      (let ((limits (call-scute 'sandbox-policy-limits
+                                (call-scute 'read-sandbox-policy "app"))))
+        (check (= 256 (call-scute 'resource-limits-processes limits))
+               "expected the nearest fragment to win, got ~D"
+               (call-scute 'resource-limits-processes limits))))))
+
+(deftest test-fragments-are-merged-in-filename-order
+  "10- before 20-, which is the only reason to number them."
+  (with-policy-directories
+    (lambda (far near)
+      (declare (ignore near))
+      (write-into far "app.policy" (format nil "[filesystem]~%read = [\"/etc\"]~%"))
+      (write-into far "app.d/20-second.policy" (format nil "[limits]~%processes = 2~%"))
+      (write-into far "app.d/10-first.policy" (format nil "[limits]~%processes = 1~%"))
+      (let ((limits (call-scute 'sandbox-policy-limits
+                                (call-scute 'read-sandbox-policy "app"))))
+        (check (= 2 (call-scute 'resource-limits-processes limits))
+               "20- did not follow 10-: processes = ~D"
+               (call-scute 'resource-limits-processes limits))))))
+
+(deftest test-a-repeated-path-in-a-drop-in-is-harmless
+  "A fragment naming a path the policy already grants is ordinary, and must not
+become the duplicate that validation refuses inside one file."
+  (with-policy-directories
+    (lambda (far near)
+      (declare (ignore near))
+      (write-into far "app.policy" (format nil "[filesystem]~%read = [\"/etc\"]~%"))
+      (write-into far "app.d/10-again.policy"
+                  (format nil "[filesystem]~%read = [\"/etc\", \"/usr\"]~%"))
+      (let* ((policy (call-scute 'read-sandbox-policy "app"))
+             (paths (mapcar (lambda (rule) (call-scute 'filesystem-rule-path rule))
+                            (call-scute 'sandbox-policy-filesystem policy))))
+        (check (= 1 (count "/etc" paths :test #'string=))
+               "/etc survived twice: ~S" paths)
+        (check (member "/usr" paths :test #'string=)
+               "the new path was lost: ~S" paths)))))
+
+(deftest test-every-file-that-contributed-is-named
+  "A policy whose meaning comes from files nobody can see is worse than no
+drop-ins, so the plan carries them and --dry-run prints them."
+  (with-policy-directories
+    (lambda (far near)
+      (declare (ignore near))
+      (let ((base (write-into far "app.policy"
+                              (format nil "[filesystem]~%read-execute = [\"/usr\"]~%~
+                                           read = [\"/etc\"]~%")))
+            (fragment (write-into far "app.d/10-more.policy"
+                                  (format nil "[filesystem]~%read-write = [\"/tmp\"]~%"))))
+        (let* ((plan (call-scute 'compile-launch-plan
+                                 (call-scute 'read-sandbox-policy "app")
+                                 '("/bin/true")))
+               (sources (call-scute 'launch-plan-sources plan)))
+          (check (equal (list (namestring base) (namestring fragment)) sources)
+                 "the plan names ~S" sources))))))
+
+(deftest test-an-empty-drop-in-directory-changes-nothing
+  (with-policy-directories
+    (lambda (far near)
+      (declare (ignore near))
+      (write-into far "app.policy" (format nil "[filesystem]~%read = [\"/etc\"]~%"))
+      (ensure-directories-exist
+       (uiop:ensure-directory-pathname (merge-pathnames "app.d" far)))
+      (let ((policy (call-scute 'read-sandbox-policy "app")))
+        (check (= 1 (length (call-scute 'sandbox-policy-filesystem policy)))
+               "an empty directory added rules")))))

@@ -1,0 +1,85 @@
+# Claude Code, confined, in the directory you run it from — with its credential
+# held by a broker rather than by the agent.
+#
+#     keyfence credential add anthropic          # once: the key goes in the keyring
+#     scute run --policy claude -- -p "explain what this repository does"
+#
+# This is the arrangement Scute exists for. The sandbox is given an opaque token
+# that is worth nothing except to api.anthropic.com through the broker, which
+# swaps it for the real key on the way past. The agent never holds a credential
+# you would have to rotate, and the broker's audit trail says what was spent.
+#
+# It needs KeyFence listening on 10210 (https://github.com/atgreen/keyfence):
+#
+#     systemctl --user enable --now keyfence.socket keyfence-api.socket
+#
+# and those of Claude Code's own hosts that carry no credential of ours:
+#
+#     keyfence -passthrough 'api.anthropic.com,statsig.anthropic.com,sentry.io'
+#
+# "scute check --policy claude" says whether all of that is true before you rely
+# on it. A "?" before a path means "if this host has it"; --dry-run lists the ones
+# that were not found.
+
+[command]
+program = "claude"
+# Claude Code asks before it acts, which is the right default and the wrong one
+# for an unattended run. Scute is the containment here, so the approvals are
+# ceremony: drop the flag for an interactive session where you want them back.
+arguments = ["--dangerously-skip-permissions"]
+
+[filesystem]
+read-execute = [
+  "/usr",
+  "?/opt",
+  "?/home/linuxbrew/.linuxbrew",
+  "?~/.local/bin",
+  "?~/.nvm",                             # claude is usually node, and node is usually nvm
+  "?~/.volta",
+]
+read = [
+  "/etc",
+  "/proc",
+  "/dev/urandom",
+  "?/sys/devices/system/cpu/online",
+  "?/sys/fs/cgroup",
+  "?~/.bashrc",
+  "?~/.bash_profile",
+  "?~/.profile",
+  "?~/.config/git",
+  "?~/.agents",                          # skills, where both agents look for them
+]
+read-write = [
+  ".",                                   # the work: where you ran scute
+  "~/.local/share/scute/agent-home",     # git and gh configuration it may write
+  "/dev/null",
+  "/dev/tty",
+  "/tmp",
+  "?~/.cache",
+  "?~/.npm",
+]
+
+[network]
+# Everything outbound goes through the broker, and the broker's port is the only
+# one the sandbox may reach: no direct 443, no way around it.
+mode = "host"
+proxy = "http://127.0.0.1:10210"
+
+# The key stays in KeyFence. What the sandbox gets is a token, usable at one host,
+# revoked when the run ends.
+[credentials.anthropic]
+ref = "anthropic"
+destinations = ["api.anthropic.com"]
+env = "ANTHROPIC_API_KEY"
+
+[limits]
+memory = "6G"
+processes = 512
+wall-clock = "2h"
+
+[environment.set]
+# Claude Code writes its own configuration and history; a scratch directory keeps
+# that out of your real one, and out of the repository.
+CLAUDE_CONFIG_DIR = "~/.local/share/scute/agent-home/claude"
+GIT_CONFIG_GLOBAL = "~/.local/share/scute/agent-home/gitconfig"
+GH_CONFIG_DIR = "~/.local/share/scute/agent-home/gh"

@@ -1,0 +1,95 @@
+# Codex, confined, in the directory you run it from.
+#
+#     scute run --policy codex -- "work through the ready beads"
+#
+# What the agent can reach is this directory and the toolchains it needs to build
+# what is in it. Not ~/.ssh, not your shell history, not your other projects.
+#
+# Codex signs in with ChatGPT rather than an API key, and that credential is its
+# own: it reads ~/.codex, which is also where a refreshed token has to land for
+# your codex and this one to remain the same login. The cost, stated plainly --
+# the agent can read your codex history from other projects. Nothing else in your
+# home is reachable, and a credential worth spending (GitHub, a registry) is
+# brokered instead, so add one only when a task needs it:
+#
+#     [credentials.github]
+#     ref = "github"                    # keyfence credential add github
+#     destinations = ["api.github.com", "github.com"]
+#     env = "GH_TOKEN"
+#
+# A "?" before a path means "if this host has it". Toolchain caches and package
+# managers are not on every machine, and a policy naming one unconditionally is a
+# policy that refuses to start. --dry-run lists the ones that were not found.
+
+[command]
+program = "codex"
+# --dangerously-bypass-approvals-and-sandbox is not bravado here, it is the
+# correct setting: codex would otherwise wrap every command in bubblewrap, which
+# cannot nest inside Scute's namespaces and fails claiming your kernel forbids
+# user namespaces. Scute is the sandbox; the inner one is redundant and broken.
+arguments = ["exec", "--dangerously-bypass-approvals-and-sandbox"]
+
+[filesystem]
+read-execute = [
+  "/usr",
+  "?/opt",                               # where a distribution or a vendor puts tools
+  "?/home/linuxbrew/.linuxbrew",         # homebrew on Linux
+  "?~/.local/bin",                       # pip, pipx, cargo install --root
+  "?~/.nvm",                             # node, when it came from nvm
+  "?~/.rustup",
+]
+read = [
+  "/etc",
+  "/proc",
+  "/dev/urandom",
+  "?/sys/devices/system/cpu/online",     # how many processors, for build parallelism
+  "?/sys/fs/cgroup",
+  "?/sys/kernel/mm/transparent_hugepage/enabled",
+  "?/sys/kernel/mm/transparent_hugepage/hpage_pmd_size",
+  "?~/.bashrc",                          # codex runs bash -lc, and a shell that
+  "?~/.bash_profile",                    # cannot read its own rc says so before
+  "?~/.profile",                         # every single command
+  "?~/.cargo/env",                       # which those often source
+  "?~/.config/git",                      # attributes and ignore files git reads
+  "?~/.agents",                          # skills, where both agents look for them
+  "?~/go/bin",                           # tools a toolchain looks for
+]
+read-write = [
+  ".",                                   # the work: where you ran scute
+  "~/.codex",                            # its own credential, sessions and logs
+  "~/.local/share/scute/agent-home",     # git and gh configuration it may write
+  "/dev/null",
+  "/dev/tty",                            # the terminal, for an interactive session
+  "/tmp",
+  "?~/.cache",                           # build caches: go, cargo, npm, pip
+  "?~/go/pkg/mod",                       # the Go module cache, which go writes to
+  "?~/.config/go",
+  "?~/.npm",
+  "?~/.cargo/registry",
+]
+
+[network]
+# The agent's own API, and whatever it needs to fetch. To put every connection
+# through a credential broker instead, name one -- and then the only port it may
+# reach is the broker's:
+#
+#     proxy = "http://127.0.0.1:10210"
+#
+# KeyFence must pass codex's own hosts through untouched, since that credential is
+# codex's and not the broker's to swap:
+#
+#     keyfence -passthrough 'chatgpt.com,ab.chatgpt.com,*.chatgpt.com,api.openai.com,auth.openai.com,*.oaiusercontent.com'
+mode = "host"
+connect-tcp = [443, 80, 53]
+
+[limits]
+memory = "6G"
+processes = 512
+wall-clock = "2h"
+
+[environment.set]
+# Your own git config is often a symlink into a dotfiles repository the sandbox
+# cannot read, and git treats a config it cannot read as an error -- which arrives
+# disguised as "go build: error obtaining VCS status: exit status 128".
+GIT_CONFIG_GLOBAL = "~/.local/share/scute/agent-home/gitconfig"
+GH_CONFIG_DIR = "~/.local/share/scute/agent-home/gh"

@@ -151,9 +151,21 @@ there is something --explain could find.  SCUTE_NO_HINTS=1 turns it off."
             "~&scute: the command failed.  If a path was refused, this says which:~%~
              ~&       scute run --explain ...~%")))
 
+(defun policy-names-a-command-p (cmd)
+  "Whether the policy this invocation names carries a command of its own.
+
+Read here rather than assumed, so that \"no command given\" stays the answer for
+a policy that does not name one -- which is most of them."
+  (let ((policy (clingon:getopt cmd :policy)))
+    ;; Errors are not swallowed here: a policy that cannot be found or parsed
+    ;; must say so, rather than becoming "no command given" -- which is what
+    ;; somebody sees after mistyping the name of a shipped policy, and which
+    ;; sends them looking in the wrong place entirely.
+    (and policy (sandbox-policy-command (read-sandbox-policy policy)) t)))
+
 (defun run-command (cmd)
   (let ((command (clingon:command-arguments cmd)))
-    (when (null command)
+    (when (and (null command) (not (policy-names-a-command-p cmd)))
       (usage-error "no command given; see scute run --help"))
     ;; Before anything is built: a plan needing a cgroup of Scute's own is
     ;; better re-executed in one than refused with instructions.  This happens
@@ -419,6 +431,31 @@ there is something --explain could find.  SCUTE_NO_HINTS=1 turns it off."
                ("Teach it a second command:"
                 . "scute learn --output scute.policy --merge -- ./run-lint"))))
 
+;;── policies ───────────────────────────────────────────────────────────────────
+
+(defun policies-handler (cmd)
+  (declare (ignore cmd))
+  (reporting-failures
+   (let ((names (available-policies)))
+     (if (null names)
+         (format t "~&No policies are installed. Looked in:~%~{  ~A~%~}"
+                 (policy-search-path))
+         ;; Where each one came from, because two directories can hold the same
+         ;; name and knowing which one answered is the difference between editing
+         ;; a policy and editing a copy of it that nothing reads.
+         (dolist (name names)
+           (format t "~&~A~24T~A~%" name (locate-policy name))))
+     (uiop:quit 0 t))))
+
+(defun make-policies-command ()
+  (clingon:make-command
+   :name "policies"
+   :description "List the policies installed on this host, and where each is"
+   :usage ""
+   :handler #'policies-handler
+   :examples '(("What can be run by name:" . "scute policies")
+               ("Run one of them:" . "scute run --policy codex -- \"fix the build\""))))
+
 ;;── doctor ─────────────────────────────────────────────────────────────────────
 
 (defun doctor-handler (cmd)
@@ -475,6 +512,42 @@ there is something --explain could find.  SCUTE_NO_HINTS=1 turns it off."
                ("Install them for everyone:"
                 . "scute completions bash > /etc/bash_completion.d/scute"))))
 
+;;── A policy name as the verb ──────────────────────────────────────────────────
+;;;
+;;; "scute codex" rather than "scute run --policy codex".  The confinement is the
+;;; point of the tool, and asking someone to spell out the mechanism every time is
+;;; how the mechanism gets skipped -- the same reason Scute makes its own cgroup
+;;; instead of printing the systemd-run line.
+;;;
+;;; This is a rewriting of the arguments, not a second way to run things: "scute
+;;; codex ..." becomes "scute run --policy codex ...", with one code path, one set
+;;; of options, and one plan printed by --dry-run.
+;;;
+;;; A built-in command always wins.  A policy called "doctor" cannot take over
+;;; "scute doctor", because a command that means one thing on one machine and
+;;; something else on the next is worse than a policy nobody can reach by name.
+
+(defparameter +subcommand-names+
+  '("run" "learn" "check" "doctor" "policies" "completions" "man" "help")
+  "The verbs Scute has of its own.  A policy may not shadow one.")
+
+(defun policy-verb-arguments (arguments)
+  "ARGUMENTS with a leading policy name turned into "run --policy NAME".
+
+Answers ARGUMENTS unchanged when the first one is an option, a command Scute
+already has, or not the name of an installed policy -- so an unknown verb still
+reaches clingon and gets clingon's own error, rather than being reported as a
+missing policy."
+  (let ((first (first arguments)))
+    (if (or (null first)
+            (zerop (length first))
+            (char= #\- (char first 0))
+            (member first +subcommand-names+ :test #'string=)
+            (not (policy-name-p first))
+            (null (ignore-errors (locate-policy first))))
+        arguments
+        (list* "run" "--policy" first (rest arguments)))))
+
 ;;── CLI ────────────────────────────────────────────────────────────────────────
 
 (defun make-app ()
@@ -482,16 +555,19 @@ there is something --explain could find.  SCUTE_NO_HINTS=1 turns it off."
   (clingon:make-command
    :name    "scute"
    :version +version+
-   :description "Run one command inside a deny-by-default Linux sandbox"
+   :description "Run one command inside a deny-by-default Linux sandbox.
+An installed policy can be named directly: \"scute codex\" is \"scute run --policy
+codex\", and \"scute policies\" lists what this host has."
    :authors (list "Anthony Green <green@moxielogic.com>")
    :license "MIT"
-   :usage "[GLOBAL-OPTIONS] COMMAND [OPTIONS] [ARGUMENTS ...]"
+   :usage "[GLOBAL-OPTIONS] COMMAND|POLICY [OPTIONS] [-- ARGUMENTS ...]"
    :sub-commands (list (make-run-command) (make-learn-command)
                        (make-check-command) (make-doctor-command)
+                       (make-policies-command)
                        (make-completions-command) (make-man-command))
    :handler (lambda (cmd)
               (clingon:print-usage-and-exit cmd *standard-output*))))
 
 (defun main ()
   "The main entrypoint."
-  (clingon:run (make-app)))
+  (clingon:run (make-app) (policy-verb-arguments (rest sb-ext:*posix-argv*))))

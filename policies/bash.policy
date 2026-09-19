@@ -1,0 +1,60 @@
+# A shell in this directory and nowhere else.
+#
+#     scute bash
+#
+# The one to reach for when you have been sent a build script, a Makefile, or a
+# tarball you would rather not run as yourself. Inside it, the directory you
+# started in is writable and the rest of your home does not exist: no ~/.ssh, no
+# ~/.aws, no browser profile, no shell history, no other project.
+#
+# It is also the shortest way to see what a sandbox actually costs. Everything a
+# program needs is named here, and a program that wants something else is refused
+# and told so:
+#
+#     scute bash --explain          # names the paths that were refused, with the
+#                                   # lines to add to a policy of your own
+#
+# There is no network at all. That is a choice you can change, and the honest way
+# to change it is to write your own policy, starting from this one:
+#
+#     cp /usr/share/scute/policies/bash.policy ~/.config/scute/policies/bash.policy
+#
+# A policy of that name in your configuration directory wins over this one, and an
+# upgrade will not touch it. "scute policies" says which file answered.
+
+[command]
+program = "bash"
+# No profile and no rc file: a login shell sources scripts from your home that
+# start agents, read caches and set variables this sandbox deliberately cannot
+# reach, and every one of them becomes a refusal you have to read before you get a
+# prompt. An interactive shell with nothing sourced is the honest starting point.
+arguments = ["--noprofile", "--norc"]
+
+[filesystem]
+read-execute = [
+  "/usr",
+  "?/opt",
+  "?/home/linuxbrew/.linuxbrew",
+  "?~/.local/bin",
+]
+read = [
+  "/etc",
+  "/proc",
+  "/dev/urandom",
+  "?/sys/devices/system/cpu/online",
+]
+read-write = [
+  ".",                                   # where you ran scute: the work
+  "/dev/null",
+  "/dev/tty",                            # the terminal, so this is a shell you can use
+  "/tmp",
+]
+
+[network]
+# Nothing. A shell that cannot reach the network cannot send what it read, which
+# is most of the value of running an unfamiliar script this way.
+mode = "none"
+
+[limits]
+memory = "4G"
+processes = 256

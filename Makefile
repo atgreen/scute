@@ -59,6 +59,47 @@ smoke: scute
 
 check: test smoke
 
+# Installation.
+#
+# PREFIX defaults to /usr/local, which is where a build from source belongs.  For
+# a copy of your own, without root:
+#
+#     make install PREFIX=$$HOME/.local
+#
+# The policies go to $(DESTDIR)$(PREFIX)/share/scute/policies, which is on the
+# search path "scute run --policy NAME" uses -- so an installed policy is one you
+# can run by name.  A policy of the same name in ~/.config/scute/policies wins
+# over an installed one, which is how you edit one without an upgrade undoing it.
+PREFIX ?= /usr/local
+BINDIR ?= $(PREFIX)/bin
+DATADIR ?= $(PREFIX)/share
+MANDIR ?= $(DATADIR)/man
+
+install: scute completions man
+	install -D -m 0755 scute $(DESTDIR)$(BINDIR)/scute
+	install -D -m 0644 man/scute.1 $(DESTDIR)$(MANDIR)/man1/scute.1
+	install -D -m 0644 completions/scute.bash \
+		$(DESTDIR)$(DATADIR)/bash-completion/completions/scute
+	install -D -m 0644 completions/_scute $(DESTDIR)$(DATADIR)/zsh/site-functions/_scute
+	install -D -m 0644 completions/scute.fish \
+		$(DESTDIR)$(DATADIR)/fish/vendor_completions.d/scute.fish
+	for policy in policies/*.policy; do \
+		install -D -m 0644 "$$policy" \
+			"$(DESTDIR)$(DATADIR)/scute/policies/$$(basename $$policy)"; \
+	done
+	@echo
+	@echo "Installed. Policies you can now run by name:"
+	@for policy in policies/*.policy; do \
+		echo "  scute run --policy $$(basename $$policy .policy) -- ..."; \
+	done
+
+uninstall:
+	rm -f $(DESTDIR)$(BINDIR)/scute $(DESTDIR)$(MANDIR)/man1/scute.1 \
+		$(DESTDIR)$(DATADIR)/bash-completion/completions/scute \
+		$(DESTDIR)$(DATADIR)/zsh/site-functions/_scute \
+		$(DESTDIR)$(DATADIR)/fish/vendor_completions.d/scute.fish
+	rm -rf $(DESTDIR)$(DATADIR)/scute/policies
+
 # Everything compiled from this tree, wherever ASDF put it.
 clean-cache:
 	rm -rf $(HOME)/.cache/common-lisp/*$(CURDIR)
@@ -66,4 +107,4 @@ clean-cache:
 clean: clean-cache
 	rm -rf *~ scute scute.new scute-sbom.spdx.json completions man .system-stamp .test-passed
 
-.PHONY: sbom completions man demo egress test smoke check clean clean-cache
+.PHONY: sbom completions man demo egress test smoke check clean clean-cache install uninstall

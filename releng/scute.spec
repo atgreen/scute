@@ -59,6 +59,15 @@ install -D -m 0644 completions/scute.fish %{buildroot}%{_datadir}/fish/vendor_co
 %{_mandir}/man1/scute.1*
 install -D -m 0644 man/scute.1 %{buildroot}%{_mandir}/man1/scute.1
 
+# The policies Scute ships for the agents people run.  On the search path
+# "scute run --policy NAME" uses, so an installed policy is one you can run by
+# name; a copy in ~/.config/scute/policies outranks it, so editing one is not
+# something an upgrade undoes.
+for policy in policies/*.policy; do
+  install -D -m 0644 "$policy" \
+    %{buildroot}%{_datadir}/scute/policies/"$(basename "$policy")"
+done
+
 %files
 %license LICENSE
 %doc README.md
@@ -68,6 +77,7 @@ install -D -m 0644 man/scute.1 %{buildroot}%{_mandir}/man1/scute.1
 %{_datadir}/zsh/site-functions/_scute
 %{_datadir}/fish/vendor_completions.d/scute.fish
 %{_mandir}/man1/scute.1*
+%{_datadir}/scute/policies/*.policy
 
 %changelog
 * Thu Sep 17 2026 Anthony Green <green@moxielogic.com> - 0.1.0-1
