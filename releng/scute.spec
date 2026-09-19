@@ -77,7 +77,20 @@ done
 %files
 %license LICENSE
 %doc README.md
-%{_bindir}/scute
+# CAP_BPF and CAP_NET_ADMIN, so that the default network is the kernel redirect
+# rather than the port-level fallback: with them, every web connection a sandbox
+# makes has its destination rewritten to the broker, and a client that ignores the
+# proxy variables arrives there anyway instead of failing.
+#
+# This is a capability on a binary many people will have installed, so what it is
+# used for is worth being exact about. Scute loads one BPF program, which it
+# compiles itself from forms in its own source, attaches it to a cgroup it created,
+# and then drops every capability it holds -- CapEff, CapPrm, CapInh and CapAmb all
+# verified empty -- before the sandboxed child exists at all. The child never has
+# them, and neither does Scute by the time it is running anything of yours.
+#
+# Refusing this and keeping the fallback is one line: setcap -r %{_bindir}/scute.
+%caps(cap_bpf,cap_net_admin=ep) %{_bindir}/scute
 %{_datadir}/sbom/scute-%{version}.spdx.json
 %{_datadir}/bash-completion/completions/scute
 %{_datadir}/zsh/site-functions/_scute

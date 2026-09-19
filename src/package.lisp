@@ -180,6 +180,9 @@
            #:policy-search-path
            #:policy-name-p
            #:policy-verb-arguments
+           #:implicit-network
+           #:implicit-network-mode
+           #:*implicit-network-mode*
            #:sandbox-policy-sources
            #:launch-plan-sources
            #:merge-policy-documents

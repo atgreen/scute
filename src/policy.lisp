@@ -444,9 +444,36 @@ A policy wanting no network at all still says so, and needs no broker:
     [network]
     mode = \"none\"")
 
-(defparameter +implicit-network+
-  (list (cons "mode" "host") (cons "proxy" +default-broker-proxy+))
-  "The [network] table a policy that has none is read as having.")
+(defvar *implicit-network-mode* nil
+  "Overrides the mode a policy silent about the network is read as having.
+
+Bound by the tests, so that what a policy means does not depend on the
+capabilities of the machine the suite happens to run on.")
+
+(defun implicit-network-mode (&optional (guard-available (egress-guard-available-p)))
+  "Which form the default network takes on this host.
+
+\"proxied\" is the stronger of the two: the kernel rewrites the destination of
+every web connection to the broker's address, so a client that ignores the proxy
+variables does not fail -- it arrives at the broker anyway, and nothing in the
+sandbox can address anywhere else.  It needs CAP_BPF, which the packages grant and
+a build from source does not until `make egress'.
+
+Where the capability is absent the default is the port-level form: the host's
+network with the broker named as its proxy, and Landlock permitting that one port.
+A client ignoring the variables then reaches nothing rather than reaching the
+internet, which is weaker and still a sandbox.
+
+Choosing the strongest enactable form is not the silent degradation Scute refuses
+elsewhere: this is Scute's own default, not something a policy asked for.  A policy
+that writes mode = \"proxied\" itself is still refused, loudly, where the guard
+cannot be installed -- and --dry-run names which of the two any run got."
+  (or *implicit-network-mode*
+      (if guard-available "proxied" "host")))
+
+(defun implicit-network (&optional (mode (implicit-network-mode)))
+  "The [network] table a policy that has none is read as having."
+  (list (cons "mode" mode) (cons "proxy" +default-broker-proxy+)))
 
 (defun validate-network (value pathname)
   "The network section: the mode, and whether unix-domain sockets are allowed.
@@ -879,22 +906,22 @@ is a sandbox the operator half asked for."
          ;; No [network] table means the broker, not nothing.  Synthesised as a
          ;; table and validated like any other, so there is one code path and the
          ;; default cannot drift from what a policy could write by hand.
-         :network (validate-network (or (table "network") +implicit-network+)
+         :network (validate-network (or (table "network") (implicit-network))
                                     pathname)
          :unix-sockets (nth-value 1 (validate-network
-                             (or (table "network") +implicit-network+)
+                             (or (table "network") (implicit-network))
                              pathname))
          :connect-tcp (nth-value 2 (validate-network
-                             (or (table "network") +implicit-network+)
+                             (or (table "network") (implicit-network))
                              pathname))
          :bind-tcp (nth-value 3 (validate-network
-                             (or (table "network") +implicit-network+)
+                             (or (table "network") (implicit-network))
                              pathname))
          :proxy (nth-value 4 (validate-network
-                             (or (table "network") +implicit-network+)
+                             (or (table "network") (implicit-network))
                              pathname))
          :allow (nth-value 5 (validate-network
-                             (or (table "network") +implicit-network+)
+                             (or (table "network") (implicit-network))
                              pathname))
          :limits (when (table "limits")
                    (validate-limits (table "limits") pathname))
@@ -910,7 +937,7 @@ is a sandbox the operator half asked for."
                                            pathname)
                      (let ((proxy (nth-value 4 (validate-network
                                                 (or (table "network")
-                                                    +implicit-network+)
+                                                    (implicit-network))
                                                 pathname))))
                        (when proxy
                          (let ((port (proxy-url-port proxy pathname)))

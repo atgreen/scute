@@ -364,10 +364,32 @@ Exit statuses are the shell's, so scripts can read them:
 
 **A policy that says nothing about the network goes through KeyFence.** That is the
 default, and it is the answer to the question Scute exists for: an agent that needs
-a credential should never hold one. The sandbox may reach exactly one port — the
-broker's — and what it can do with that is the broker's to decide: a request with
-no token is refused, a request with one gets the real credential swapped in on the
-way past, and every one of them is a line in an audit trail.
+a credential should never hold one. What the sandbox can do with that connection is
+the broker's to decide: a request with no token is refused, a request with one gets
+the real credential swapped in on the way past, and every one of them is a line in
+an audit trail.
+
+The default has two forms, and which one you get is a fact about the host:
+
+| | How it holds | Needs |
+|---|---|---|
+| **Kernel redirect** | the destination of every web connection is rewritten to the broker, so a client that ignores the proxy variables arrives there anyway | `CAP_BPF`, which the packages grant |
+| **Port-level** | Landlock permits the broker's port and nothing else, so a client that ignores the proxy variables reaches nothing | nothing |
+
+`scute doctor` says which, and so does `--dry-run` for a given run. The packaged
+binary carries `cap_bpf,cap_net_admin`, so the kernel redirect is the ordinary case;
+a build from source gets the port-level form until `make egress`.
+
+That capability is on a binary many people will have installed, so to be exact
+about it: Scute loads one BPF program, which it compiled itself from forms in its
+own source, attaches it to a cgroup it created, and then **drops every capability
+it holds — `CapEff`, `CapPrm`, `CapInh` and `CapAmb`, verified empty — before the
+sandboxed child exists at all.** The child never has them. `setcap -r` on the
+binary declines the whole thing and leaves a Scute that still sandboxes.
+
+Choosing the stronger form where it can be enacted is Scute's own default, not
+something a policy asked for. A policy that writes `mode = "proxied"` itself is
+still refused, loudly, on a host where the guard cannot be installed.
 
 So this policy has network, and the sandbox has no way around the broker:
 

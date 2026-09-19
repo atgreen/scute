@@ -109,6 +109,25 @@ a filter that will not compile here is a launch that will not happen."
     (scute-error (condition)
       (make-probe "libseccomp" :missing (princ-to-string condition)))))
 
+(defun probe-default-network ()
+  "Which form the default network takes here.
+
+Worth reporting on its own: a policy that says nothing about the network is the
+common case, and the difference between the two forms is the difference between a
+client that cannot reach anywhere else and one that merely fails if it tries."
+  (let ((mode (implicit-network-mode)))
+    (if (string= "proxied" mode)
+        (make-probe "default network" :ok
+                    (format nil "through the broker, redirected in the kernel: a ~
+                                 client that ignores the proxy variables arrives ~
+                                 there anyway"))
+        (make-probe "default network" :info
+                    (format nil "through the broker, port-level: Landlock permits ~
+                                 the broker's port and nothing else, so a client ~
+                                 ignoring the proxy variables reaches nothing. For ~
+                                 the kernel redirect, install the package or run ~
+                                 make egress")))))
+
 (defun probe-egress ()
   "Whether this host can enforce an address-level egress allowlist.
 Optional, like limits: a policy that does not ask for one is unaffected."
@@ -144,9 +163,10 @@ than failing, and the refusal at launch says the rest."
                                installed)))
           (t
            (make-probe "credential broker" :missing
-                       "keyfence is not installed, and the default network goes ~
-                        through it: only policies with [network] mode = \"none\" ~
-                        will run.  https://github.com/atgreen/keyfence")))))
+                       (format nil "keyfence is not installed, and the default ~
+                                    network goes through it: only policies with ~
+                                    [network] mode = \"none\" will run. ~
+                                    https://github.com/atgreen/keyfence"))))))
 
 (defun probe-audit ()
   "What the host would offer an audit program, without loading one.
@@ -215,6 +235,7 @@ the kernel side only, and never as a failure."
         (probe-cgroup-v2)
         (probe-resource-limits)
         (probe-egress)
+        (probe-default-network)
         (probe-seccomp)
         (probe-broker)
         (probe-audit)

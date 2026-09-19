@@ -105,6 +105,14 @@ ran the tests."
 (defun run-tests-now ()
   (ignore-errors (delete-file +completion-sentinel+))
   (setf *failures* 0 *ran* 0)
+  ;; What a policy silent about the network means depends on whether this host
+  ;; can attach a BPF guard, which is a property of the machine the suite is run
+  ;; on and not of anything being tested.  Pinned, so that the same policy text
+  ;; means the same thing on a developer's build and on a packaged one; the tests
+  ;; that are about the choice itself bind it themselves.
+  (setf (symbol-value (or (find-symbol "*IMPLICIT-NETWORK-MODE*" '#:scute)
+                          (error "Scute has no *implicit-network-mode*")))
+        "host")
   (mapc #'run-test (reverse *tests*))
   (when (plusp *failures*)
     (error "~D Scute test~:P failed" *failures*))

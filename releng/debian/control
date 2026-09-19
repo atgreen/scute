@@ -15,7 +15,7 @@ Rules-Requires-Root: no
 
 Package: scute
 Architecture: amd64
-Depends: ${shlibs:Depends}, ${misc:Depends}, libseccomp2, keyfence
+Depends: ${shlibs:Depends}, ${misc:Depends}, libseccomp2, keyfence, libcap2-bin
 Description: run one command inside a deny-by-default Linux sandbox
  Scute runs one local command inside a deny-by-default Linux sandbox built
  from Landlock, namespaces, seccomp, and cgroup v2. It is a native sandbox

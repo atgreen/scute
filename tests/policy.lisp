@@ -919,3 +919,34 @@ refused for not repeating something it did not want to decide."
     (check (equal (list 443) (call-scute 'sandbox-policy-connect-tcp policy))
            "the ports it named were changed: ~S"
            (call-scute 'sandbox-policy-connect-tcp policy))))
+
+(deftest test-the-default-takes-the-strongest-form-the-host-allows
+  "Two forms of the same default, and which one you get is a fact about the host.
+
+With CAP_BPF -- which the packages grant -- the kernel rewrites the destination of
+every web connection to the broker, so a client that ignores the proxy variables
+arrives there anyway and nothing in the sandbox can address anywhere else. Without
+it, the broker is named as the proxy and Landlock permits that one port: a client
+ignoring the variables reaches nothing, which is weaker and still a sandbox.
+
+Choosing the stronger form where it can be enacted is Scute's own default, not
+something a policy asked for -- a policy writing mode = \"proxied\" itself is still
+refused where the guard cannot be installed."
+  (let ((scute::*implicit-network-mode* nil))
+    (check (string= "proxied" (call-scute 'implicit-network-mode t))
+           "a host that can attach the guard did not get the kernel redirect")
+    (check (string= "host" (call-scute 'implicit-network-mode nil))
+           "a host without the capability did not fall back to the port-level form"))
+  ;; And the stronger form is a whole policy, not a mode with nothing behind it:
+  ;; the web ports have to pass Landlock for the kernel to redirect them at all.
+  (let ((scute::*implicit-network-mode* "proxied"))
+    (let ((policy (policy-from-string (format nil "[filesystem]~%read = [\"/etc\"]~%"))))
+      (check (eq :proxied (call-scute 'sandbox-policy-network policy))
+             "the implicit mode was not enacted")
+      (check (string= (scute-value '+default-broker-proxy+)
+                      (call-scute 'sandbox-policy-proxy policy))
+             "redirected to nowhere: ~S" (call-scute 'sandbox-policy-proxy policy))
+      (dolist (port '(80 443 53))
+        (check (member port (call-scute 'sandbox-policy-connect-tcp policy))
+               "port ~D is refused before the kernel could redirect it: ~S"
+               port (call-scute 'sandbox-policy-connect-tcp policy))))))

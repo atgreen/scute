@@ -1,0 +1,23 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+set -e
+
+# CAP_BPF and CAP_NET_ADMIN, so that the default network is the kernel redirect
+# rather than the port-level fallback.  Scute loads one BPF program it compiled
+# itself, attaches it to a cgroup it created, and drops every capability before the
+# sandboxed child exists -- so what is granted here is never held while anything of
+# yours is running.
+#
+# Not fatal if it fails: a Scute without the capability still sandboxes, with the
+# broker named as a proxy and Landlock permitting that one port.  "scute doctor"
+# says which of the two this host will use.
+if command -v setcap >/dev/null 2>&1; then
+    setcap cap_bpf,cap_net_admin=ep /usr/bin/scute || \
+        echo "scute: could not set capabilities; the default network will be the" \
+             "port-level form. See scute doctor." >&2
+else
+    echo "scute: setcap is not installed, so the default network will be the" \
+         "port-level form. See scute doctor." >&2
+fi
+
+#DEBHELPER#
