@@ -1,6 +1,6 @@
 Name:           scute
 Version:        0.1.0
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        Run one command inside a deny-by-default Linux sandbox
 
 License:        MIT
@@ -100,5 +100,15 @@ done
 %{_datadir}/scute/policies/*.policy
 
 %changelog
+* Fri Sep 19 2026 Anthony Green <green@moxielogic.com> - 0.1.0-2
+- The sandbox runs as the calling user rather than as root inside its user
+  namespace, so tools that refuse to run as root will run
+- doctor reports the capabilities this binary started with rather than what is
+  left after its own probe launched a sandbox and dropped them
+- Grant cap_bpf and cap_net_admin, so the default network is the kernel redirect
+  to the broker rather than the port-level fallback
+- Ship policies for codex, claude and bash, runnable by name: scute codex
+- Require keyfence: a policy silent about the network is routed through it
+
 * Thu Sep 17 2026 Anthony Green <green@moxielogic.com> - 0.1.0-1
 - Initial RPM package for scute
