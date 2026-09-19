@@ -34,7 +34,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           dnf install -y sbcl libseccomp gcc make git tar gzip findutils \
-            groff procps-ng iproute sudo shadow-utils which jq
+            groff procps-ng iproute sudo shadow-utils util-linux which jq
           curl -o /etc/yum.repos.d/ocicl.repo \
             https://ocicl.github.io/ocicl/rpm-repo/ocicl.repo
           dnf install -y ocicl
@@ -60,7 +60,6 @@ jobs:
       - name: A user to build and test as
         run: |
           useradd -m builder
-          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
           chown -R builder:builder .
 
       - name: Fetch dependencies
@@ -92,8 +91,10 @@ jobs:
             kill "$pid" 2>/dev/null || true'
           test -f /home/builder/.keyfence/ca/ca.pem
 
+      # Root arranges the host and then hands the suite to builder: a
+      # container's PAM cannot be relied on to let builder ask for root back.
       - name: Test and smoke
-        run: sudo -u builder -H releng/ci-host.sh make check
+        run: SCUTE_CI_USER=builder releng/ci-host.sh make check
 
   # ------------------------------------------------------------------
   # The package, built the way the release builds it and installed the way a
