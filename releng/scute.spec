@@ -46,23 +46,24 @@ Scute shares the host kernel and does not claim to contain kernel exploits.
 %autosetup
 
 %build
-# Dependencies are vendored in the source tarball
-make
-make sbom
+# Built with the distribution's SBCL, named rather than inherited from PATH.  A
+# Lisp binary carries its toolchain's rpaths, so an SBCL installed under a private
+# prefix -- homebrew, a manual build -- produces a package whose binary will not
+# run on a machine that has no such prefix.  rpm's own rpath check refuses it, and
+# is right to.
+#
+# Dependencies are vendored in the source tarball, so nothing here needs a network.
+make SBCL=%{_bindir}/sbcl
+make SBCL=%{_bindir}/sbcl sbom
 make completions
 make man
 
 %install
 install -D -m 0755 scute %{buildroot}%{_bindir}/scute
 install -D -m 0644 scute-sbom.spdx.json %{buildroot}%{_datadir}/sbom/scute-%{version}.spdx.json
-%{_datadir}/bash-completion/completions/scute
-%{_datadir}/zsh/site-functions/_scute
-%{_datadir}/fish/vendor_completions.d/scute.fish
-%{_mandir}/man1/scute.1*
 install -D -m 0644 completions/scute.bash %{buildroot}%{_datadir}/bash-completion/completions/scute
 install -D -m 0644 completions/_scute %{buildroot}%{_datadir}/zsh/site-functions/_scute
 install -D -m 0644 completions/scute.fish %{buildroot}%{_datadir}/fish/vendor_completions.d/scute.fish
-%{_mandir}/man1/scute.1*
 install -D -m 0644 man/scute.1 %{buildroot}%{_mandir}/man1/scute.1
 
 # The policies Scute ships for the agents people run.  On the search path
@@ -89,7 +90,7 @@ done
 # verified empty -- before the sandboxed child exists at all. The child never has
 # them, and neither does Scute by the time it is running anything of yours.
 #
-# Refusing this and keeping the fallback is one line: setcap -r %{_bindir}/scute.
+# Refusing this and keeping the fallback is one line: setcap -r %%{_bindir}/scute.
 %caps(cap_bpf,cap_net_admin=ep) %{_bindir}/scute
 %{_datadir}/sbom/scute-%{version}.spdx.json
 %{_datadir}/bash-completion/completions/scute

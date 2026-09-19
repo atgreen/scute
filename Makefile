@@ -59,6 +59,28 @@ smoke: scute
 
 check: test smoke
 
+# Packaging.
+#
+# The tarball carries the ocicl dependency tree, because a package build that
+# fetched dependencies would be a package whose contents depend on the day it was
+# built.  "ocicl install" first if ocicl/ is not there yet.
+VERSION := $(shell sed -n 's/^  :version *"\(.*\)".*/\1/p' scute.asd)
+
+rpm: scute
+	@command -v rpmbuild >/dev/null || \
+		{ echo "rpmbuild is not installed: dnf install rpm-build rpmdevtools"; exit 1; }
+	@test -d ocicl || { echo "no vendored dependencies: run ocicl install"; exit 1; }
+	rm -rf build/rpm build/src
+	mkdir -p build/rpm/SOURCES build/rpm/SPECS build/src/scute-$(VERSION)
+	tar --exclude=.git --exclude=build --exclude=.beads --exclude=scute \
+	    --exclude='*~' --exclude='*.fasl' -cf - . \
+	  | tar -xf - -C build/src/scute-$(VERSION)
+	tar -czf build/rpm/SOURCES/scute-$(VERSION).tar.gz -C build/src scute-$(VERSION)
+	cp releng/scute.spec build/rpm/SPECS/
+	rpmbuild --define "_topdir $(CURDIR)/build/rpm" -bb build/rpm/SPECS/scute.spec
+	@echo
+	@echo "built: $$(ls $(CURDIR)/build/rpm/RPMS/*/*.rpm)"
+
 # Installation.
 #
 # PREFIX defaults to /usr/local, which is where a build from source belongs.  For
@@ -105,6 +127,6 @@ clean-cache:
 	rm -rf $(HOME)/.cache/common-lisp/*$(CURDIR)
 
 clean: clean-cache
-	rm -rf *~ scute scute.new scute-sbom.spdx.json completions man .system-stamp .test-passed
+	rm -rf *~ scute scute.new scute-sbom.spdx.json completions man .system-stamp .test-passed build
 
-.PHONY: sbom completions man demo egress test smoke check clean clean-cache install uninstall
+.PHONY: sbom completions man demo egress test smoke check clean clean-cache install uninstall rpm
