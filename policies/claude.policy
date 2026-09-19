@@ -59,11 +59,10 @@ read-write = [
   "?~/.npm",
 ]
 
-[network]
-# Everything outbound goes through the broker, and the broker's port is the only
-# one the sandbox may reach: no direct 443, no way around it.
-mode = "host"
-proxy = "http://127.0.0.1:10210"
+# No [network] table: everything outbound goes through the broker, and the broker's
+# port is the only one the sandbox may reach. That is Scute's default, and for this
+# policy it is the whole point -- the key is in KeyFence, and the only way to spend
+# it is through the thing that holds it.
 
 # The key stays in KeyFence. What the sandbox gets is a token, usable at one host,
 # revoked when the run ends.

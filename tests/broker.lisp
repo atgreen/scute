@@ -441,3 +441,30 @@ is what KeyFence does: a CA certificate is public by definition."
                                  (call-scute 'launch-plan-environment given))
                         "the sandbox was given no CA certificate to trust")))
           (when helper (call-scute 'stop-helper helper))))))
+
+(deftest test-credentials-need-no-proxy-named-now-that-one-is-the-default
+  "A policy asking for a credential is already routed through the broker, so
+naming its address as well is ceremony.  What cannot work is still refused: a
+policy that asks for a credential and then names a network with no broker in it."
+  (let ((defaulted (call-scute 'validate-sandbox-policy
+                               (call-scute 'parse-policy-text
+                                           (format nil "~
+[filesystem]~%read = [\"/etc\"]~%~%~
+[credentials.anthropic]~%ref = \"anthropic\"~%~
+destinations = [\"api.anthropic.com\"]~%env = \"ANTHROPIC_API_KEY\"~%")))))
+    (check (string= (scute-value '+default-broker-proxy+)
+                    (call-scute 'sandbox-policy-proxy defaulted))
+           "a credentialled policy was not routed through the broker: ~S"
+           (call-scute 'sandbox-policy-proxy defaulted))
+    (check (call-scute 'sandbox-policy-broker defaulted)
+           "no broker settings for a policy asking for a credential"))
+  (check (typep (nth-value 1 (ignore-errors
+                              (call-scute 'validate-sandbox-policy
+                                          (call-scute 'parse-policy-text
+                                                      (format nil "~
+[filesystem]~%read = [\"/etc\"]~%~%~
+[network]~%mode = \"host\"~%~%~
+[credentials.anthropic]~%ref = \"anthropic\"~%~
+destinations = [\"api.anthropic.com\"]~%env = \"ANTHROPIC_API_KEY\"~%")))))
+                'scute:policy-error)
+         "a credential was accepted beside a network that goes around the broker"))

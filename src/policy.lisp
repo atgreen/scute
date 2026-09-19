@@ -807,20 +807,30 @@ not Scute's business."
   "The port the policy's proxy sits on, which is where the broker must listen.
 
 A brokered run has no port of its own to choose.  The proxy in [network] is
-already the one address the sandbox may reach, so that is where the broker has
-to be -- and a policy asking for credentials without naming a proxy is asking
-for a swap that nothing routes through."
-  (let ((network (cdr (assoc "network" tables :test #'string=))))
-    (let ((proxy (and network
-                      (let ((named (assoc "proxy" (table-entries network "network" pathname)
-                                          :test #'string=)))
-                        (when named (scalar-string (cdr named) "proxy" pathname))))))
-      (unless proxy
-        (policy-error "[credentials] needs [network] to name a proxy: the broker ~
-                       has to be the one address the sandbox can reach, or the ~
-                       command can simply go around it"
+already the one address the sandbox may reach, so that is where the broker has to
+be -- and a policy asking for credentials whose traffic goes somewhere else is
+asking for a swap that nothing routes through.
+
+Naming it is optional, because the default network is the broker: a policy that
+says nothing about the network is already routed through it, and repeating the
+address would be ceremony.  What is still refused is a policy that asks for a
+credential and then names a network with no proxy in it, which is the one
+combination that cannot work."
+  (let* ((network (cdr (assoc "network" tables :test #'string=)))
+         (entries (and network (table-entries network "network" pathname)))
+         (named-mode (and entries (assoc "mode" entries :test #'string=)))
+         (proxy (and entries
+                     (let ((named (assoc "proxy" entries :test #'string=)))
+                       (when named (scalar-string (cdr named) "proxy" pathname))))))
+    (unless proxy
+      (when (and named-mode (not (string= "proxied" (cdr named-mode))))
+        (policy-error "[credentials] needs the network to go through the broker: ~
+                       it has to be the one address the sandbox can reach, or the ~
+                       command can simply go around it.  Either drop [network] and ~
+                       take the default, or name the proxy"
                       pathname))
-      (proxy-url-port proxy pathname))))
+      (setf proxy +default-broker-proxy+))
+    (proxy-url-port proxy pathname)))
 
 (defun validate-command (value pathname)
   "One [command] table: the program a policy is for, and the arguments it needs.
