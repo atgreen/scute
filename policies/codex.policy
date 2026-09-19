@@ -51,14 +51,18 @@ read = [
   "?~/.bash_profile",                    # cannot read its own rc says so before
   "?~/.profile",                         # every single command
   "?~/.cargo/env",                       # which those often source
-  "?~/.config/git",                      # attributes and ignore files git reads
+  "?~/.config/git",
+  "?~/.local/share/scute/agent-home/gitconfig",   # shared, and read-only                      # attributes and ignore files git reads
   "?~/.agents",                          # skills, where both agents look for them
   "?~/go/bin",                           # tools a toolchain looks for
 ]
 read-write = [
   ".",                                   # the work: where you ran scute
   "~/.codex",                            # its own credential, sessions and logs
-  "~/.local/share/scute/agent-home",     # git and gh configuration it may write
+  "~/.local/share/scute/agent-home/codex",   # its own: gh config, and whatever it
+                                         # writes for itself. One directory per agent,
+                                         # because a credential one of them acquires
+                                         # is not the other's to read
   "/dev/null",
   "/dev/tty",                            # the terminal, for an interactive session
   "/tmp",
@@ -95,4 +99,4 @@ wall-clock = "2h"
 # cannot read, and git treats a config it cannot read as an error -- which arrives
 # disguised as "go build: error obtaining VCS status: exit status 128".
 GIT_CONFIG_GLOBAL = "~/.local/share/scute/agent-home/gitconfig"
-GH_CONFIG_DIR = "~/.local/share/scute/agent-home/gh"
+GH_CONFIG_DIR = "~/.local/share/scute/agent-home/codex/gh"

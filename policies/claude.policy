@@ -49,11 +49,15 @@ read = [
   "?~/.profile",
   "?~/.cargo/env",                       # which those often source
   "?~/.config/git",
+  "?~/.local/share/scute/agent-home/gitconfig",   # shared, and read-only
   "?~/.agents",                          # skills, where both agents look for them
 ]
 read-write = [
   ".",                                   # the work: where you ran scute
-  "~/.local/share/scute/agent-home",     # git and gh configuration it may write
+  "~/.local/share/scute/agent-home/claude",   # its own: gh config, and whatever it
+                                         # writes for itself. One directory per agent,
+                                         # because a credential one of them acquires
+                                         # is not the other's to read
   "/dev/null",
   "/dev/tty",
   "/tmp",
@@ -94,4 +98,4 @@ wall-clock = "2h"
 # that out of your real one, and out of the repository.
 CLAUDE_CONFIG_DIR = "~/.local/share/scute/agent-home/claude"
 GIT_CONFIG_GLOBAL = "~/.local/share/scute/agent-home/gitconfig"
-GH_CONFIG_DIR = "~/.local/share/scute/agent-home/gh"
+GH_CONFIG_DIR = "~/.local/share/scute/agent-home/claude/gh"
