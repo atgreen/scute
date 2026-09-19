@@ -652,6 +652,47 @@ first: a broker is recognised by answering its own control API, not by returning
 200 to a health check, which plenty of things would. Anything else there is an
 error and the secret stays unread.
 
+### A credential the program reads from a file
+
+Most programs take a credential from the environment. The ones that do not are
+often the ones most worth brokering, because a file is where a credential
+otherwise sits on disk for ever.
+
+```toml
+[credentials.chatgpt]
+ref = "chatgpt"
+destinations = ["chatgpt.com"]
+file = "~/.local/share/scute/agent-home/codex/auth.json"
+template = "~/.config/scute/templates/codex-auth.json"
+```
+
+Scute renders the template at launch with `${token}` replaced by the token it
+minted, writes it 0600, grants the sandbox read access to that one file, and
+deletes it when the run ends. `--dry-run` names both files before either exists:
+
+```
+credential   chatgpt
+             the broker holds it, registered as chatgpt
+             the sandbox gets a token written into …/agent-home/codex/auth.json
+             from the template …/templates/codex-auth.json
+             usable only at chatgpt.com
+```
+
+`env` and `file` are alternatives, and a credential may have both.
+
+**Why a template rather than the token alone.** Codex does not accept an opaque
+string: it decodes its credential, checks the expiry itself, and refreshes
+anything it cannot parse — which ends with the agent fetching a real credential
+and writing it inside the sandbox, the opposite of brokering. What it accepts is a
+token shaped like its own, so the template holds a decodable payload with the
+expiry far off and `${token}` where a signature would be. KeyFence finds the token
+in that third segment and swaps the whole value for the real credential on the way
+past.
+
+The agent then holds neither an access token nor a refresh token. The refresh
+token is the one that matters: whoever refreshes owns the login from then on, so a
+refresh performed inside a sandbox rotates yours out from under you.
+
 ### Run the broker as a service
 
 Scute attaches to a broker already running, and starts one per run only when
