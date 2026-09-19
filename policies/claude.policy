@@ -46,6 +46,7 @@ read = [
   "?~/.bashrc",
   "?~/.bash_profile",
   "?~/.profile",
+  "?~/.cargo/env",                       # which those often source
   "?~/.config/git",
   "?~/.agents",                          # skills, where both agents look for them
 ]
@@ -66,10 +67,21 @@ read-write = [
 
 # The key stays in KeyFence. What the sandbox gets is a token, usable at one host,
 # revoked when the run ends.
+#
+# ANTHROPIC_AUTH_TOKEN rather than ANTHROPIC_API_KEY, and the reason is structural
+# rather than cosmetic. Claude Code asks before using an ANTHROPIC_API_KEY it has
+# not seen before, and remembers the answer against that key's identity -- so a
+# credential that is a different token on every run can never be the one that was
+# approved, and the prompt returns every time. There is nothing to approve here in
+# any case: the token is minted for this run and revoked when it ends.
+#
+# Both reach the same place. The broker swaps its token into whichever header it
+# arrives in, so x-api-key and Authorization: Bearer both come out as the real key
+# at api.anthropic.com; each was checked and each answered 200.
 [credentials.anthropic]
 ref = "anthropic"
 destinations = ["api.anthropic.com"]
-env = "ANTHROPIC_API_KEY"
+env = "ANTHROPIC_AUTH_TOKEN"
 
 [limits]
 memory = "6G"
