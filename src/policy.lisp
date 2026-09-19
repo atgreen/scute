@@ -421,6 +421,33 @@ author believed it granted something."
                       url)
               pathname)))))
 
+(defparameter +default-broker-proxy+ "http://127.0.0.1:10210"
+  "Where KeyFence listens, and so where a sandbox's network goes by default.
+
+Scute's answer to \"how does an agent use a credential it must not hold\" is a
+broker, and a broker nothing routes through is a broker nobody uses.  So a policy
+that says nothing about the network gets the broker rather than nothing: every
+connection goes to it, and what the sandbox may reach is what the broker permits --
+with a credential swapped in that the sandbox never saw, and a line in an audit
+trail for each request.
+
+Brokered rather than redirected in the kernel.  \"proxied\" is stronger, and needs
+CAP_BPF to attach its guard; as a default it would refuse to run at all on a host
+where Scute holds no capabilities, which is most of them.  What this default gives
+is Landlock permitting exactly one port -- the broker's -- so a client that ignores
+the proxy variables reaches nothing rather than reaching the internet.  Where the
+capability is there, the proxy is pinned to its address as well, and --dry-run says
+which of the two you got.
+
+A policy wanting no network at all still says so, and needs no broker:
+
+    [network]
+    mode = \"none\"")
+
+(defparameter +implicit-network+
+  (list (cons "mode" "host") (cons "proxy" +default-broker-proxy+))
+  "The [network] table a policy that has none is read as having.")
+
 (defun validate-network (value pathname)
   "The network section: the mode, and whether unix-domain sockets are allowed.
 Answers the mode and that permission."
@@ -428,9 +455,16 @@ Answers the mode and that permission."
     (check-known-keys entries '("mode" "unix-sockets" "connect-tcp" "bind-tcp"
                                 "proxy" "allow")
                       "[network]" pathname)
-    (let ((mode (scalar-string (cdr (assoc "mode" entries :test #'string=))
-                               "mode" pathname))
-          (unix (assoc "unix-sockets" entries :test #'string=)))
+    (let* ((named-mode (assoc "mode" entries :test #'string=))
+           ;; No mode means the default, whatever else the table says: a table
+           ;; naming only unix-sockets, or only a proxy, or nothing at all, is a
+           ;; policy that did not want to decide this -- and the default is the
+           ;; broker.  A mode that is named is taken exactly as written, so
+           ;; mode = "host" is still the host's network and no broker.
+           (mode (if named-mode
+                     (scalar-string (cdr named-mode) "mode" pathname)
+                     "host"))
+           (unix (assoc "unix-sockets" entries :test #'string=)))
       (let ((setting (cond ((string= "none" mode) :none)
                            ((string= "host" mode) :host)
                            ((string= "proxied" mode) :proxied)
@@ -484,11 +518,15 @@ Answers the mode and that permission."
             ;; Proxied means the kernel sends every web connection to the proxy,
             ;; so there has to be one, and it is the egress control: an allow list
             ;; beside it would be two answers to the same question.
+            ;; Repeating the broker's address in every policy is a thing to
+            ;; forget rather than a decision anybody makes twice, so it is the
+            ;; default in the two places one is meant: a mode nobody named, and
+            ;; "proxied", which is nothing without a proxy to send traffic to.
+            (when (and (null proxy)
+                       (or (null named-mode) (eq setting :proxied)))
+              (setf proxy +default-broker-proxy+)
+              (pushnew (proxy-url-port proxy pathname) connect))
             (when (eq setting :proxied)
-              (unless proxy
-                (policy-error "mode \"proxied\" sends every web connection to a ~
-                               proxy, so [network] has to name one"
-                              pathname))
               (when (assoc "allow" entries :test #'string=)
                 (policy-error "mode \"proxied\" is the egress control: every web ~
                                connection goes to the proxy and nothing else goes ~
@@ -828,27 +866,47 @@ is a sandbox the operator half asked for."
            pathname))
         (%make-sandbox-policy
          :filesystem (validate-filesystem filesystem pathname)
-         :network (if (table "network")
-                      (validate-network (table "network") pathname)
-                      :none)
-         :unix-sockets (when (table "network")
-                         (nth-value 1 (validate-network (table "network") pathname)))
-         :connect-tcp (when (table "network")
-                        (nth-value 2 (validate-network (table "network") pathname)))
-         :bind-tcp (when (table "network")
-                     (nth-value 3 (validate-network (table "network") pathname)))
-         :proxy (when (table "network")
-                  (nth-value 4 (validate-network (table "network") pathname)))
-         :allow (when (table "network")
-                  (nth-value 5 (validate-network (table "network") pathname)))
+         ;; No [network] table means the broker, not nothing.  Synthesised as a
+         ;; table and validated like any other, so there is one code path and the
+         ;; default cannot drift from what a policy could write by hand.
+         :network (validate-network (or (table "network") +implicit-network+)
+                                    pathname)
+         :unix-sockets (nth-value 1 (validate-network
+                             (or (table "network") +implicit-network+)
+                             pathname))
+         :connect-tcp (nth-value 2 (validate-network
+                             (or (table "network") +implicit-network+)
+                             pathname))
+         :bind-tcp (nth-value 3 (validate-network
+                             (or (table "network") +implicit-network+)
+                             pathname))
+         :proxy (nth-value 4 (validate-network
+                             (or (table "network") +implicit-network+)
+                             pathname))
+         :allow (nth-value 5 (validate-network
+                             (or (table "network") +implicit-network+)
+                             pathname))
          :limits (when (table "limits")
                    (validate-limits (table "limits") pathname))
          :audit (when (table "audit")
                   (validate-audit (table "audit") pathname))
-         :broker (when (table "credentials")
-                   (validate-credentials (table "credentials")
-                                         (credentials-proxy-port tables pathname)
-                                         pathname))
+         ;; Settings for the broker even when no credential is asked of it: a
+         ;; policy whose egress goes through the broker needs it running, and its
+         ;; certificate, or the sandbox cannot speak TLS through it at all.  What a
+         ;; [credentials] table adds is what it should hold, not whether it runs.
+         :broker (if (table "credentials")
+                     (validate-credentials (table "credentials")
+                                           (credentials-proxy-port tables pathname)
+                                           pathname)
+                     (let ((proxy (nth-value 4 (validate-network
+                                                (or (table "network")
+                                                    +implicit-network+)
+                                                pathname))))
+                       (when proxy
+                         (let ((port (proxy-url-port proxy pathname)))
+                           (make-broker-settings
+                            :keyfence port
+                            (+ port +default-control-port-offset+))))))
          :credentials (when (table "credentials")
                         (nth-value 1 (validate-credentials
                                       (table "credentials")

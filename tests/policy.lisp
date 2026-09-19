@@ -363,14 +363,26 @@ a variable the policy names is."
                     "PATH was dropped, and nothing will run:~%~A" said)))
       (delete-scratch report))))
 
-(deftest test-the-network-mode-is-the-policys-to-choose
-  "A sandbox has no network because it has a network namespace of its own.  A
-policy that needs one -- a build that fetches dependencies -- says so, and then
-shares the host's."
-  (check (eq :none (call-scute 'sandbox-policy-network
-                               (policy-from-string "[filesystem]
+(deftest test-a-policy-silent-about-the-network-gets-the-broker
+  "Scute's answer to \"how does an agent use a credential it must not hold\" is a
+broker, and a broker nothing routes through is a broker nobody uses.  So silence
+means the broker: the sandbox may reach exactly one port, and what it can do with
+it is what the broker permits.
+
+Silence used to mean no network at all.  The difference matters for a policy
+written before this changed, which is why it is asserted here rather than left to
+be discovered: a policy that means none now says so."
+  (let ((policy (policy-from-string "[filesystem]
 read = [\"/etc\"]")))
-         "a policy that says nothing did not default to no network")
+    (check (eq :host (call-scute 'sandbox-policy-network policy))
+           "a policy that says nothing did not get the host's network")
+    (check (string= (scute-value '+default-broker-proxy+)
+                    (call-scute 'sandbox-policy-proxy policy))
+           "it was not pointed at the broker: ~S"
+           (call-scute 'sandbox-policy-proxy policy))
+    (check (equal (list 10210) (call-scute 'sandbox-policy-connect-tcp policy))
+           "the broker's port is not the only one permitted: ~S"
+           (call-scute 'sandbox-policy-connect-tcp policy)))
   (check (eq :host (call-scute 'sandbox-policy-network
                                (policy-from-string "[filesystem]
 read = [\"/etc\"]
@@ -837,3 +849,73 @@ drop-ins, so the plan carries them and --dry-run prints them."
       (let ((policy (call-scute 'read-sandbox-policy "app")))
         (check (= 1 (length (call-scute 'sandbox-policy-filesystem policy)))
                "an empty directory added rules")))))
+
+;;── The broker is the default network ──────────────────────────────────────────
+;;;
+;;; Scute's answer to "how does an agent use a credential it must not hold" is a
+;;; broker, and a broker nothing routes through is a broker nobody uses. So a
+;;; policy that says nothing about the network gets the broker: one reachable port,
+;;; and what can be done with it is the broker's to decide.
+
+(deftest test-the-default-network-is-the-broker-and-only-the-broker
+  (let ((policy (policy-from-string (format nil "[filesystem]~%read = [\"/etc\"]~%"))))
+    (check (equal (list 10210) (call-scute 'sandbox-policy-connect-tcp policy))
+           "more than the broker's port was permitted: ~S"
+           (call-scute 'sandbox-policy-connect-tcp policy))
+    (check (null (call-scute 'sandbox-policy-allow policy))
+           "an address allowlist appeared where the policy wrote none")))
+
+(deftest test-a-policy-wanting-no-network-still-gets-none
+  "And needs no broker for it: a sandbox with no network cannot talk to one."
+  (let ((policy (policy-from-string (format nil "[filesystem]~%read = [\"/etc\"]~%~
+                                                 [network]~%mode = \"none\"~%"))))
+    (check (eq :none (call-scute 'sandbox-policy-network policy))
+           "mode = \"none\" did not survive")
+    (check (null (call-scute 'sandbox-policy-proxy policy))
+           "a proxy was added to a sandbox with no network")
+    (check (null (call-scute 'sandbox-policy-broker policy))
+           "a broker was required by a policy that cannot reach one")))
+
+(deftest test-a-broker-is-settled-for-even-without-credentials
+  "The broker has to be running for its port to be worth permitting, and its
+certificate has to be trusted for TLS through it to work at all -- neither of which
+depends on the policy asking it to hold a secret."
+  (let ((policy (policy-from-string (format nil "[filesystem]~%read = [\"/etc\"]~%"))))
+    (check (call-scute 'sandbox-policy-broker policy)
+           "no broker settings for a policy whose egress goes through one")
+    (check (null (call-scute 'sandbox-policy-credentials policy))
+           "credentials appeared where the policy named none")))
+
+(deftest test-naming-a-proxy-is-enough-to-mean-through-it
+  "mode is not required beside a proxy: there is only one thing naming one means."
+  (let ((policy (policy-from-string
+                 (format nil "[filesystem]~%read = [\"/etc\"]~%~
+                              [network]~%proxy = \"http://127.0.0.1:10210\"~%"))))
+    (check (eq :host (call-scute 'sandbox-policy-network policy))
+           "naming a proxy did not imply a network to proxy")))
+
+(deftest test-a-table-that-names-no-mode-gets-the-default
+  "One rule: a mode nobody named is the broker.  So a [network] table saying only
+that unix sockets are wanted still gets the default network, rather than being
+refused for not repeating something it did not want to decide."
+  (let ((policy (policy-from-string
+                 (format nil "[filesystem]~%read = [\"/etc\"]~%~
+                              [network]~%unix-sockets = true~%"))))
+    (check (eq :host (call-scute 'sandbox-policy-network policy))
+           "a table without a mode did not get the default network")
+    (check (string= (scute-value '+default-broker-proxy+)
+                    (call-scute 'sandbox-policy-proxy policy))
+           "it was not pointed at the broker: ~S"
+           (call-scute 'sandbox-policy-proxy policy))
+    (check (call-scute 'sandbox-policy-unix-sockets policy)
+           "the one thing the table did say was lost"))
+  ;; And a mode that is named means exactly itself: mode = "host" is the host's
+  ;; network with no broker in it, which is what many policies already say.
+  (let ((policy (policy-from-string
+                 (format nil "[filesystem]~%read = [\"/etc\"]~%~
+                              [network]~%mode = \"host\"~%connect-tcp = [443]~%"))))
+    (check (null (call-scute 'sandbox-policy-proxy policy))
+           "a proxy was added to a policy that asked for the host's network")
+    (check (equal (list 443) (call-scute 'sandbox-policy-connect-tcp policy))
+           "the ports it named were changed: ~S"
+           (call-scute 'sandbox-policy-connect-tcp policy))))

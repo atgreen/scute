@@ -25,6 +25,12 @@ BuildRequires:  make
 # to launch anything.
 Requires:       libseccomp
 
+# KeyFence is not an optional companion: a policy that says nothing about the
+# network is routed through it, which is how a sandbox uses a credential it never
+# holds.  A policy with [network] mode = "none" needs no broker, and that is the
+# only configuration this dependency is not required for.
+Requires:       keyfence
+
 
 %description
 Scute runs one local command inside a deny-by-default Linux sandbox built from

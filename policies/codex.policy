@@ -68,19 +68,21 @@ read-write = [
   "?~/.cargo/registry",
 ]
 
-[network]
-# The agent's own API, and whatever it needs to fetch. To put every connection
-# through a credential broker instead, name one -- and then the only port it may
-# reach is the broker's:
+# No [network] table: every connection goes through KeyFence, and the broker's port
+# is the only one this sandbox may reach. That is Scute's default, and the reason
+# it is worth having here is that codex's own credential is then the only one in
+# the sandbox -- anything else a task needs is brokered.
 #
-#     proxy = "http://127.0.0.1:10210"
-#
-# KeyFence must pass codex's own hosts through untouched, since that credential is
-# codex's and not the broker's to swap:
+# KeyFence has to pass codex's own hosts through untouched, since that credential
+# is codex's and not the broker's to swap:
 #
 #     keyfence -passthrough 'chatgpt.com,ab.chatgpt.com,*.chatgpt.com,api.openai.com,auth.openai.com,*.oaiusercontent.com'
-mode = "host"
-connect-tcp = [443, 80, 53]
+#
+# For the host's network with no broker in it, say so:
+#
+#     [network]
+#     mode = "host"
+#     connect-tcp = [443, 80, 53]
 
 [limits]
 memory = "6G"

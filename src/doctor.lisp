@@ -121,26 +121,32 @@ Optional, like limits: a policy that does not ask for one is unaffected."
   "Where a credential broker answers control requests by its own default.")
 
 (defun probe-broker ()
-  "Whether a credential broker is running for Scute to attach to.
+  "Whether the credential broker is there.
 
-Optional, and reported either way: a policy with no [credentials] table never
-looks for one, and a policy that has one will start a broker per run rather than
-fail.  Running it as a service is better than that, which is what this says."
-  (let ((certificate (probe-file (broker-certificate-path))))
+Required rather than optional: a policy that says nothing about the network goes
+through the broker, so this is the difference between \"scute bash\" working and
+refusing on most policies.  A sandbox asking for no network at all needs no broker,
+which is the one case this is not fatal in -- so it is reported as missing rather
+than failing, and the refusal at launch says the rest."
+  (let ((certificate (probe-file (broker-certificate-path)))
+        (installed (ignore-errors (resolve-executable "keyfence"))))
     (cond ((broker-answering-p +default-broker-control-port+)
            (make-probe "credential broker" :ok
                        (format nil "answering on ~D~:[; no CA certificate at ~A~;~]"
                                +default-broker-control-port+
                                certificate (broker-certificate-path))))
-          (certificate
+          (installed
            (make-probe "credential broker" :info
-                       (format nil "not running; its CA is at ~A, so a policy ~
-                                    asking for credentials would start one per run ~
-                                    (see releng/keyfence.service)"
-                               (namestring certificate))))
+                       (format nil "installed at ~A but not running, so Scute will ~
+                                    start one per run.  Better as a service: ~
+                                    systemctl --user enable --now keyfence.socket ~
+                                    keyfence-api.socket"
+                               installed)))
           (t
-           (make-probe "credential broker" :info
-                       "none installed; policies without [credentials] are unaffected")))))
+           (make-probe "credential broker" :missing
+                       "keyfence is not installed, and the default network goes ~
+                        through it: only policies with [network] mode = \"none\" ~
+                        will run.  https://github.com/atgreen/keyfence")))))
 
 (defun probe-audit ()
   "What the host would offer an audit program, without loading one.

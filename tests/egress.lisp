@@ -253,9 +253,15 @@ an allow list beside it would be a second answer to the same question."
   (flet ((policy (text) (ignore-errors
                          (call-scute 'validate-sandbox-policy
                                      (call-scute 'parse-policy-text text)))))
-    (check (null (policy (format nil "[filesystem]~%read = [\"/etc\"]~%~%~
-                                      [network]~%mode = \"proxied\"~%")))
-           "proxied without a proxy was accepted")
+    ;; Proxied with no proxy named is the broker, because repeating the same
+    ;; address in every policy is a thing to forget rather than a decision.
+    (let ((defaulted (policy (format nil "[filesystem]~%read = [\"/etc\"]~%~%~
+                                          [network]~%mode = \"proxied\"~%"))))
+      (check defaulted "proxied without a proxy was refused")
+      (check (string= (scute-value '+default-broker-proxy+)
+                      (call-scute 'sandbox-policy-proxy defaulted))
+             "proxied did not default to the broker: ~S"
+             (call-scute 'sandbox-policy-proxy defaulted)))
     (check (null (policy (format nil "[filesystem]~%read = [\"/etc\"]~%~%~
                                       [network]~%mode = \"proxied\"~%~
                                       proxy = \"http://127.0.0.1:10210\"~%~

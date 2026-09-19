@@ -370,3 +370,74 @@ refused during the run without being able to tie it to anything."
              "the report claims more than it knows: ~S" said)
       (check (search "no keyfence token found" said)
              "the reason a sandbox most often fails was not reported: ~S" said))))
+
+;;── The broker without a credential to broker ──────────────────────────────────
+;;;
+;;; The default network sends every connection to the broker, so a run that asks
+;;; it to hold nothing still needs it: a port to send traffic to, and the public CA
+;;; certificate without which every TLS handshake inside the sandbox fails.
+;;;
+;;; Neither of those is protected by the control key, and requiring it anyway made
+;;; ordinary runs fail wherever this process could not read the key -- a refusal for
+;;; the sake of a secret nobody was sending.
+
+(defun write-keyless-broker (port)
+  "A broker that answers /ca to anyone and demands a key for its token API, which
+is what KeyFence does: a CA certificate is public by definition."
+  (let ((path (format nil "~A.py" (scratch-pathname "keyless"))))
+    (with-open-file (stream path :direction :output :if-exists :supersede)
+      (dolist (line (list
+                     "import http.server"
+                     "class H(http.server.BaseHTTPRequestHandler):"
+                     "    def log_message(self,*a): pass"
+                     "    def do_GET(self):"
+                     "        if self.path.startswith('/ca'):"
+                     "            self.send_response(200)"
+                     "            self.send_header('Content-Type','application/x-pem-file')"
+                     "            self.end_headers()"
+                     "            self.wfile.write(b'-----BEGIN CERTIFICATE-----\\nnot-a-real-ca\\n-----END CERTIFICATE-----\\n')"
+                     "        elif self.path.startswith('/health'):"
+                     "            self.send_response(200); self.end_headers()"
+                     "            self.wfile.write(b'{\"status\":\"ok\"}')"
+                     "        else:"
+                     "            self.send_error(401)"
+                     (format nil "http.server.HTTPServer(('127.0.0.1',~D),H).serve_forever()"
+                             port)))
+        (write-line line stream)))
+    path))
+
+(deftest test-a-run-with-no-credentials-does-not-need-the-control-key
+  (if (plusp (cffi:foreign-funcall "system" :string
+                                  "command -v python3 >/dev/null 2>&1" :int))
+      (format *error-output* "~&SKIP: no python3 to stand in for a broker~%")
+      (let ((helper nil))
+        (unwind-protect
+             (progn
+               (setf helper (call-scute 'start-helper-arguments
+                                        (list "/usr/bin/python3"
+                                              (write-keyless-broker +broker-control-port+))))
+               (check (call-scute 'wait-for-port +broker-control-port+ 10)
+                      "the stand-in broker never answered")
+               ;; A policy with a proxy and no [credentials] table: the default
+               ;; network, written out so the test does not depend on the default.
+               (let* ((text (format nil "~
+[filesystem]~%read-execute = [\"/usr\"]~%read = [\"/etc\"]~%~%~
+[network]~%mode = \"host\"~%proxy = \"http://127.0.0.1:~D\"~%"
+                                    +broker-proxy-port+))
+                      (policy (call-scute 'validate-sandbox-policy
+                                          (call-scute 'parse-policy-text text)))
+                      (plan (call-scute 'compile-launch-plan policy '("/bin/true")))
+                      (given nil))
+                 (check (call-scute 'sandbox-policy-broker policy)
+                        "a policy whose egress goes through the broker got no broker")
+                 (call-scute 'call-with-broker plan
+                             (lambda (revised) (setf given revised)))
+                 (check given "the run was refused for want of a key it did not need")
+                 ;; And the certificate reached the sandbox, which is the whole
+                 ;; reason to talk to the broker at all when holding no secret.
+                 (check (find-if (lambda (entry)
+                                   (and (> (length entry) 14)
+                                        (string= "SSL_CERT_FILE=" entry :end2 14)))
+                                 (call-scute 'launch-plan-environment given))
+                        "the sandbox was given no CA certificate to trust")))
+          (when helper (call-scute 'stop-helper helper))))))

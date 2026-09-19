@@ -36,11 +36,22 @@ Scute is not published yet, so build it. It needs SBCL and
 ```sh
 ocicl install
 make                 # builds ./scute
-sudo install -m 755 scute /usr/local/bin/      # optional
+sudo make install    # /usr/local: the binary, man page, completions, policies
 ```
 
-RPM and Debian packaging live in `releng/` for when there is somewhere to
-publish them.
+`make install PREFIX=~/.local` installs into your own home instead, policies
+included, with no root involved. RPM and Debian packaging live in `releng/`.
+
+It also needs [KeyFence](https://github.com/atgreen/keyfence), which holds the
+credentials a sandbox must not: a policy that says nothing about the network is
+routed through it. Run it as a service, which is where credentials belong:
+
+```sh
+systemctl --user enable --now keyfence.socket keyfence-api.socket
+```
+
+A policy with `[network] mode = "none"` needs no broker, and is the one
+configuration that works without one.
 
 Then check the host can enforce what you will ask of it:
 
@@ -289,10 +300,10 @@ table, an unknown key, a value of the wrong shape or a duplicate key is an error
 | | `read-execute` | array of paths | the same, and execute |
 | | `read-write` | array of paths | read, write, create, delete, rename |
 | | `read-write-execute` | array of paths | the same, and execute |
-| `[network]` | `mode` | `"none"`, `"host"` or `"proxied"` | no network, the host's, or the host's with every web connection sent to the proxy |
+| `[network]` | `mode` | `"none"`, `"host"` or `"proxied"` | no network, the host's, or the host's with every web connection sent to the proxy. Omit the table, or the key, and it is the host's through KeyFence |
 | | `connect-tcp` | array of ports | the only TCP ports the command may connect to |
 | | `bind-tcp` | array of ports | the only TCP ports it may listen on |
-| | `proxy` | URL | set the proxy variables, and permit only its port |
+| | `proxy` | URL | set the proxy variables, and permit only its port (default: KeyFence on 10210, when `mode` is not named or is `"proxied"`) |
 | | `allow` | array of `host:port` | the only addresses it may reach ([needs a privilege](#an-address-allowlist)) |
 | | `unix-sockets` | `true` / `false` | may the command open an AF_UNIX socket (default `false`) |
 | `[credentials.NAME]` | `ref` | name | a credential the broker holds, named rather than read |
@@ -351,9 +362,60 @@ Exit statuses are the shell's, so scripts can read them:
 
 ## Network
 
-`mode = "none"` is the default and gives the command no network at all. When it
-needs one — a build fetching dependencies — there are four widths, narrowest
-last:
+**A policy that says nothing about the network goes through KeyFence.** That is the
+default, and it is the answer to the question Scute exists for: an agent that needs
+a credential should never hold one. The sandbox may reach exactly one port — the
+broker's — and what it can do with that is the broker's to decide: a request with
+no token is refused, a request with one gets the real credential swapped in on the
+way past, and every one of them is a line in an audit trail.
+
+So this policy has network, and the sandbox has no way around the broker:
+
+```toml
+[filesystem]
+read-execute = ["/usr"]
+read = ["/etc", "/proc"]
+read-write = ["."]
+```
+
+```
+$ scute run --policy that.policy -- curl -s -o /dev/null -w '%{http_code}\n' https://api.github.com/
+401
+```
+
+That 401 is KeyFence refusing a request it holds no credential for, and saying so
+in the trail. Name a credential and the same request works, without the key ever
+being inside the sandbox — see [Credentials](#credentials-the-sandbox-cannot-read).
+
+KeyFence is therefore a **requirement**, not a companion: the package depends on
+it, `scute doctor` reports it as missing rather than absent, and a run that needs a
+broker it cannot find refuses with the line that installs one. A sandbox is spawned
+one per run if no service is listening, which works and is worse — credentials
+belong in a process somebody supervises:
+
+```sh
+systemctl --user enable --now keyfence.socket keyfence-api.socket
+```
+
+A run that asks the broker to hold nothing needs no control key: what it wants is a
+port and the public CA certificate, and neither is a secret.
+
+### No network at all
+
+`mode = "none"` is the other end, and needs no broker — a sandbox with no network
+cannot talk to one:
+
+```toml
+[network]
+mode = "none"
+```
+
+That is what `scute bash` uses: a shell that cannot send what it read.
+
+### The widths in between
+
+When a policy wants the host's network rather than the broker's, it says so, and
+there are four widths, narrowest last:
 
 ```toml
 [network]

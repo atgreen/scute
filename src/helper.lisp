@@ -88,12 +88,22 @@ reach this at all."
   "Start TEXT as a process beside the sandbox, and answer it."
   (start-helper-arguments (split-command text) text))
 
-(defun start-helper-arguments (command &optional label)
+(defconstant +o-wronly+ 1)
+(defconstant +o-create+ #o100)
+(defconstant +o-truncate+ #o1000)
+
+(defun start-helper-arguments (command &optional label log)
   "Start COMMAND, an argument vector, as a process beside the sandbox.
 
 Started with the same clone3 the sandbox uses rather than with run-program,
 because the supervisor must stay single-threaded: a thread would prevent it
-creating the user namespace the sandbox needs."
+creating the user namespace the sandbox needs.
+
+LOG, when given, is where the process's output goes instead of the terminal.  A
+helper Scute started is Scute's business, and its startup banner arriving in the
+middle of somebody's shell session reads as though the sandbox were talking.  Kept
+rather than discarded, because when a helper fails to come up its own account of
+why is the only one there is -- and refusals name the file."
   (let* ((program (resolve-executable (first command)))
          (path (cffi:foreign-string-alloc program))
          (argv (foreign-string-vector command))
@@ -102,6 +112,14 @@ creating the user namespace the sandbox needs."
     (finish-output *error-output*)
     (let ((pid (clone3 0)))
       (when (zerop pid)
+        (when log
+          ;; Failure here is not worth dying over: a helper whose output went to
+          ;; the terminal is a blemish, and one that never started is a fault.
+          (let ((fd (%open log (logior +o-wronly+ +o-create+ +o-truncate+) #o600)))
+            (when (>= fd 0)
+              (%dup2 fd 1)
+              (%dup2 fd 2)
+              (unless (or (= fd 1) (= fd 2)) (%close fd)))))
         (%execve path argv envp)
         (%exit 127))
       (%make-helper pid (or label (format nil "~{~A~^ ~}" command))))))

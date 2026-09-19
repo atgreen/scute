@@ -126,8 +126,11 @@ which the policy therefore has to say out loud."
 (defun %chdir (path)
   (cffi:foreign-funcall "chdir" :pointer path :int))
 
-(defun %open (path flags)
-  (cffi:foreign-funcall "open" :string path :int flags :int))
+(defun %open (path flags &optional (mode 0))
+  (cffi:foreign-funcall "open" :string path :int flags :int mode :int))
+
+(defun %dup2 (old new)
+  (cffi:foreign-funcall "dup2" :int old :int new :int))
 
 (defun %access (path mode)
   (cffi:foreign-funcall "access" :string path :int mode :int))

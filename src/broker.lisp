@@ -200,7 +200,42 @@ the caller falls back to looking where brokers usually put it."
             path)))
     (error () nil)))
 
-(defun start-broker (settings &key program (certificate (broker-certificate-path)))
+(defparameter +broker-remedy+
+  "KeyFence is how a sandbox uses a credential without holding it, and Scute's
+default network goes through it.  Install it -- https://github.com/atgreen/keyfence
+-- and run it as a service, which is where credentials belong:
+
+    systemctl --user enable --now keyfence.socket keyfence-api.socket
+
+A sandbox that needs no network at all needs no broker either, and says so:
+
+    [network]
+    mode = \"none\""
+  "What to do about a missing broker.  Said in one place, so every refusal carries
+the same instructions.")
+
+(defun broker-executable (program)
+  "PROGRAM, resolved, or a refusal that says what to install.
+
+\"command not found: keyfence\" is true and useless: it names something the reader
+has never heard of, at a moment when they were running a sandbox and not a broker."
+  (handler-case (resolve-executable program)
+    (scute-error ()
+      (setup-error :start-broker
+                   :detail (format nil "~A is not installed.~%~%~A"
+                                   program +broker-remedy+)))))
+
+(defun broker-log-path ()
+  "Where a broker Scute started writes what it has to say.
+
+Under the runtime directory rather than beside the policy: it is per-boot state
+about a process, and nobody wants it turning up in a repository."
+  (let ((runtime (or (sb-posix:getenv "XDG_RUNTIME_DIR") "/tmp")))
+    (format nil "~A/scute-broker-~D.log" (string-right-trim "/" runtime)
+            (sb-posix:getpid))))
+
+(defun start-broker (settings &key program minting
+                                  (certificate (broker-certificate-path)))
   "Reach the broker SETTINGS names: the one already running, or a new one.
 
 Attaching is the intended path.  Starting one per run works and keeps a machine
@@ -213,6 +248,16 @@ and leaves credentials in a process nobody is supervising."
             (:broker (%make-broker settings nil key
                                    (or (fetch-broker-certificate control) certificate)))
             (:unauthorized
+             ;; Without a credential to hand over there is nothing the control key
+             ;; protects: what this run needs from the broker is the public CA
+             ;; certificate and a port to send traffic to.  Requiring the key here
+             ;; would refuse every ordinary run on a machine where somebody else's
+             ;; broker is listening, or where this process cannot read the key --
+             ;; and refuse it for the sake of a secret nobody is sending.
+             (unless minting
+               (return-from start-broker
+                 (%make-broker settings nil nil
+                               (or (fetch-broker-certificate control) certificate))))
              (setup-error
               :start-broker
               :detail (format nil "a credential broker is running on port ~D but ~
@@ -230,8 +275,9 @@ and leaves credentials in a process nobody is supervising."
                                    not answer a credential broker's control API.  ~
                                    Scute will not hand a credential to it"
                               control)))))
-        (let* ((executable (resolve-executable (or program (broker-program settings))))
+        (let* ((executable (broker-executable (or program (broker-program settings))))
                (control-key (random-hex 16))
+               (log (broker-log-path))
                (helper (start-helper-arguments
                         (list executable
                               "-proxy" (format nil ":~D"
@@ -242,14 +288,16 @@ and leaves credentials in a process nobody is supervising."
                               ;; read it out of /proc -- but never the sandbox,
                               ;; which is permitted the proxy port and no other
                               ;; address at all.
-                              "-api-key" control-key))))
+                              "-api-key" control-key)
+                        nil log)))
           (let ((broker (%make-broker settings helper control-key certificate)))
             (unless (and (wait-for-port control 15) (broker-answering-p control))
               (stop-helper helper)
               (setup-error :start-broker
                            :detail (format nil "~A did not answer on its control ~
-                                                port ~D within fifteen seconds"
-                                           executable control)))
+                                                port ~D within fifteen seconds. ~
+                                                What it said is in ~A"
+                                           executable control log)))
             ;; Checked on this side too: a port can be taken between our looking
             ;; and our starting, and what answers may not be what we started.
             (unless (eq :broker (identify-broker control control-key))
@@ -543,10 +591,17 @@ Everything happens before the sandbox exists: the broker is found or started,
 the secrets are read here in the supervisor, tokens come back, and only then is
 the plan the child will run finally settled.  When the command is over the
 tokens are revoked."
-  (let ((credentials (launch-plan-credentials plan)))
-    (if (null credentials)
+  (let ((credentials (launch-plan-credentials plan))
+        ;; A plan whose egress goes through the broker needs it running whether or
+        ;; not it also needs a secret from it.  Without this, the default network
+        ;; would point every connection at a port with nothing behind it, and the
+        ;; sandbox would fail its TLS handshakes for want of the broker's
+        ;; certificate -- reported by whatever was running as a broken network.
+        (brokered (and (launch-plan-proxy plan) (launch-plan-broker plan))))
+    (if (and (null credentials) (null brokered))
         (funcall function plan)
-        (let* ((broker (start-broker (launch-plan-broker plan) :program program))
+        (let* ((broker (start-broker (launch-plan-broker plan) :program program
+                                     :minting (and credentials t)))
                (*broker* broker)
                (*run-identity* (new-run-identity))
                (*run-started* (rfc3339-now)))
@@ -557,5 +612,8 @@ tokens are revoked."
                                       (mint-token broker request
                                                   (credential-seconds request plan))))
                               credentials)))
+                 ;; With no credentials there are no tokens, and the certificate is
+                 ;; still the point: the sandbox has to trust the broker to speak
+                 ;; TLS through it at all.
                  (funcall function (plan-with-broker plan broker tokens)))
             (stop-broker broker))))))
