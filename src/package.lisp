@@ -135,6 +135,10 @@
            #:read-cgroup-events
            #:delete-sandbox-cgroup
            #:limits-installable-p
+           #:ensure-own-cgroup
+           #:in-own-scope-p
+           #:own-scope-possible-p
+           #:plan-wants-own-cgroup-p
            ;; Learning
            #:learned-rules
            #:write-learned-policy

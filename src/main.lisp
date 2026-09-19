@@ -155,6 +155,13 @@ there is something --explain could find.  SCUTE_NO_HINTS=1 turns it off."
   (let ((command (clingon:command-arguments cmd)))
     (when (null command)
       (usage-error "no command given; see scute run --help"))
+    ;; Before anything is built: a plan needing a cgroup of Scute's own is
+    ;; better re-executed in one than refused with instructions.  This happens
+    ;; first so that the plan is compiled by the process that will enact it --
+    ;; including whether the proxy can be pinned to its address, which the answer
+    ;; to this question changes.
+    (let ((preview (launch-plan-for cmd command)))
+      (ensure-own-cgroup (launch-plan-limits preview) (launch-plan-proxy preview)))
     (let ((plan (plan-with-proxy-bound-by-address
                  (revised-launch-plan
                  (launch-plan-for cmd command)

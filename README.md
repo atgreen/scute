@@ -467,12 +467,12 @@ network      the host's, shared
 — and where either is absent the `allow` line is missing, which is the honest
 report: port-level egress, and a policy to read as such. Automatic narrowing is a
 courtesy, so it is skipped rather than refused where it cannot be enacted; an
-`allow` list you wrote yourself is still refused loudly. To get the address-level
-form for a proxy, give scute a cgroup:
+`allow` list you wrote yourself is still refused loudly.
 
-```sh
-systemd-run --user --scope -p Delegate=yes scute run --policy agent.policy -- claude
-```
+The cgroup half scute arranges for itself: a plan that would be enacted better
+from a cgroup of its own re-executes in a transient delegated scope, so
+`scute run` is the whole command whether or not a policy asks for something a
+cgroup is needed for.
 
 `scute run --dry-run` prints which file a policy would read before it reads it,
 and `scute doctor` says whether a broker is there to attach to. Attaching means
@@ -576,16 +576,17 @@ A command stopped for running too long exits **124**. It is sent `SIGTERM` and
 given five seconds, unless it has no handler for `SIGTERM` — being PID 1 of its
 namespace it would never see it — in which case it is killed immediately.
 
-A wall-clock limit needs nothing of the host. The rest are cgroup v2, which will
-not let a cgroup hold processes and give controllers to its children at the same
-time, so they need scute to have a cgroup of its own:
+A wall-clock limit needs nothing of the host: it is scute's own timer. The rest
+are cgroup v2, which will not let a cgroup hold processes and give controllers to
+its children at the same time — a shell's cgroup holds the shell, so scute
+cannot install limits in it.
 
-```sh
-systemd-run --user --scope -p Delegate=yes scute run --policy scute.policy -- make
-```
-
-Where that is not the case, asking for limits is refused with the remedy in the
-message rather than quietly ignored.
+Nothing to type: scute re-executes itself in a transient delegated scope
+(`systemd-run --user --scope -p Delegate=yes`) when a plan needs one, inheriting
+your terminal and exiting with whatever the command exits with. `SCUTE_NO_OWN_SCOPE=1`
+turns that off, and then asking for limits is refused with the remedy in the
+message rather than quietly ignored — as it is on a host with no systemd user
+manager to ask.
 
 ## Auditing
 
@@ -636,7 +637,7 @@ scute: the broker refused 1 request:
 | `Permission denied` from the command | The policy is missing a path. Re-run with `--explain` and it names them, with the lines to add — scute says so itself when a command fails and you are watching. |
 | `/dev/null: Permission denied` | Nothing is granted implicitly. Name `/dev/null`, and usually `/proc`. |
 | A binary you just built will not run | `read-write` can hold it; running it needs `read-write-execute`. |
-| `This build cannot enforce resource limits` | Scute needs a cgroup of its own: `systemd-run --user --scope -p Delegate=yes scute run ...` |
+| `cannot give controllers to children` | Scute needs a cgroup of its own and normally makes one. This means it could not: no systemd user manager in the session, or `SCUTE_NO_OWN_SCOPE=1`. Run it under `systemd-run --user --scope -p Delegate=yes scute run ...`. |
 | `unix_listener: socket: Operation not permitted` | Something wants a unix-domain socket — often a shell's startup files starting an `ssh-agent`. `--allow-unix-sockets`, or `[network] unix-sockets = true`. |
 | A learned policy is full of your dotfiles | bash sources `~/.bashrc` non-interactively when stdin is a socket, as under CI. Learn with `< /dev/null`, or `bash --norc`. |
 | A tool cannot find its home or cache | The environment is filtered. `--keep-env JAVA_HOME`, or `[environment] keep = [...]`. |

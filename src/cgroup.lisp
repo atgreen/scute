@@ -262,3 +262,130 @@ Answers the question doctor asks, without creating anything."
                                   (if (= 1 (length others)) "process" "processes")))
                   (values t root "Scute can step aside and enable them")))))
     (scute-error (condition) (values nil nil (princ-to-string condition)))))
+
+;;── Getting a cgroup of our own ────────────────────────────────────────────────
+;;;
+;;; The remedy above is a true thing to say and a poor thing to require.  Scute
+;;; knows exactly what has to be run -- it prints it -- so anything it can type
+;;; for itself, it should: a tool that needs a wrapper to do its job is a tool
+;;; that gets used without the wrapper, and then quietly does less.
+;;;
+;;; What happens instead is that Scute re-executes itself inside a transient
+;;; scope of its own, which is the same command the message used to hand over.
+;;; The scope inherits the terminal, so an interactive sandbox stays interactive,
+;;; and the child's exit status is this process's exit status.
+
+(defparameter +own-scope-marker+ "SCUTE_OWN_SCOPE"
+  "Set in the re-executed process, so that it does not do this again.
+
+Recursion here would be a fork bomb wearing a systemd unit, so the marker is
+checked before anything else.")
+
+(defparameter +own-scope-opt-out+ "SCUTE_NO_OWN_SCOPE"
+  "Set by someone who would rather be refused than have a scope made for them.")
+
+(defun in-own-scope-p ()
+  (let ((marker (uiop:getenv +own-scope-marker+)))
+    (and marker (plusp (length marker)))))
+
+(defun own-scope-refused-p ()
+  (let ((opt-out (uiop:getenv +own-scope-opt-out+)))
+    (and opt-out (plusp (length opt-out)))))
+
+(defun systemd-run-program ()
+  "Where systemd-run is, or NIL with a reason."
+  (let ((path (or (find-if (lambda (candidate) (probe-file candidate))
+                           '("/usr/bin/systemd-run" "/bin/systemd-run"))
+                  (let ((found (ignore-errors
+                                (uiop:run-program '("sh" "-c" "command -v systemd-run")
+                                                  :output '(:string :stripped t)
+                                                  :ignore-error-status t))))
+                    (and found (plusp (length found)) found)))))
+    (if path
+        (values path nil)
+        (values nil "systemd-run is not installed"))))
+
+(defun user-manager-reachable-p ()
+  "Whether there is a systemd user manager to ask for a scope.
+
+Without a session bus, systemd-run --user has nothing to talk to, and finding
+that out by running it would mean an error message from a program the caller
+never invoked."
+  (let ((runtime (uiop:getenv "XDG_RUNTIME_DIR")))
+    (cond ((or (null runtime) (zerop (length runtime)))
+           (values nil "XDG_RUNTIME_DIR is unset, so there is no user session to put a scope in"))
+          ((not (probe-file (format nil "~A/systemd/private" (string-right-trim "/" runtime))))
+           (values nil "no systemd user manager is running in this session"))
+          (t t))))
+
+(defun own-scope-possible-p ()
+  "Whether Scute can put itself in a scope, and if not, why not."
+  (cond ((in-own-scope-p)
+         ;; Already tried: the scope exists and still cannot delegate, which is
+         ;; a different problem and needs the honest refusal.
+         (values nil "Scute is already running in a scope of its own"))
+        ((own-scope-refused-p)
+         (values nil (format nil "~A is set" +own-scope-opt-out+)))
+        (t
+         (multiple-value-bind (manager reason) (user-manager-reachable-p)
+           (if manager
+               (multiple-value-bind (program why-not) (systemd-run-program)
+                 (if program (values t program) (values nil why-not)))
+               (values nil reason))))))
+
+(defun own-executable ()
+  "This program, as something that can be executed again.
+
+*runtime-pathname* is the binary for a saved executable, which is what Scute
+ships as.  argv[0] is the fallback, and is what a development image has."
+  (or (ignore-errors
+       (let ((runtime (uiop:native-namestring sb-ext:*runtime-pathname*)))
+         (and runtime (probe-file runtime) runtime)))
+      (first sb-ext:*posix-argv*)))
+
+(defun reexec-in-own-scope (program)
+  "Run this same command again, inside a transient delegated scope, and exit with
+whatever it exits with.
+
+The scope inherits this process's standard streams and terminal, so nothing about
+the sandbox's interactivity changes.  Any failure to start it is answered NIL, so
+that the caller can fall back to explaining what it wanted."
+  (let ((arguments (append (list "--user" "--scope" "--quiet"
+                                 "--property" "Delegate=yes"
+                                 "--")
+                           (list (own-executable))
+                           (rest sb-ext:*posix-argv*))))
+    (handler-case
+        (let ((process (sb-ext:run-program program arguments
+                                           :environment (cons (format nil "~A=1" +own-scope-marker+)
+                                                              (sb-ext:posix-environ))
+                                           :input t :output t :error t
+                                           :wait t)))
+          (uiop:quit (or (sb-ext:process-exit-code process) 1) t))
+      (error (condition)
+        (format *error-output* "scute: could not make a cgroup of its own (~A): ~A~%"
+                program condition)
+        nil))))
+
+(defun plan-wants-own-cgroup-p (limits proxy &optional (guard-available
+                                                       (egress-guard-available-p)))
+  "Whether this plan would be enacted better from a cgroup of Scute's own.
+
+Two reasons, and the second is easy to overlook: resource limits cannot be
+installed without one, and a proxy cannot be pinned to its address without one
+either -- so a run that looked fine would have had port-level egress where
+address-level was available.
+
+A wall-clock limit is not a reason: it is the supervisor's own timer, and making a
+scope for it would be ceremony for nothing."
+  (or (cgroup-limits-p limits)
+      (and proxy guard-available t)))
+
+(defun ensure-own-cgroup (limits proxy)
+  "Put Scute in a cgroup of its own if this plan needs one and this one will not
+do.  Returns, having done nothing, when there is nothing to do."
+  (when (and (plan-wants-own-cgroup-p limits proxy)
+             (not (limits-installable-p)))
+    (multiple-value-bind (possible program) (own-scope-possible-p)
+      (when possible
+        (reexec-in-own-scope program)))))

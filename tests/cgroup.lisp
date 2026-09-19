@@ -227,3 +227,56 @@ demand a delegated cgroup subtree that nothing would use."
     (check (eql 0 (call-scute 'sandbox-result-exit-code
                               (call-scute 'run-launch-plan plan)))
            "a plan with only a time limit would not run")))
+
+;;; Getting a cgroup without being told to.
+;;;
+;;; The remedy Scute used to print -- systemd-run --user --scope -p Delegate=yes
+;;; -- was something it could run itself, and a tool that needs a wrapper gets
+;;; used without the wrapper. These are about when it decides to, which is the
+;;; part that can go wrong quietly: too eager and every run spawns a scope, too
+;;; shy and a policy silently gets weaker egress than it asked for.
+
+(deftest test-limits-are-a-reason-to-make-a-scope
+  "Memory and process caps are cgroup controls, and there is no other way."
+  (let ((limits (call-scute 'make-resource-limits :memory (* 64 1024 1024))))
+    (check (call-scute 'plan-wants-own-cgroup-p limits nil nil)
+           "a memory limit did not ask for a cgroup")))
+
+(deftest test-a-time-limit-is-not-a-reason-to-make-a-scope
+  "The supervisor's own timer needs nothing from the kernel's accounting."
+  (let ((limits (call-scute 'make-resource-limits :wall-clock 5)))
+    (check (not (call-scute 'plan-wants-own-cgroup-p limits nil nil))
+           "a wall-clock limit asked for a cgroup it would not use")))
+
+(deftest test-a-proxy-is-a-reason-only-when-the-guard-could-be-attached
+  "Pinning a proxy to its address is BPF on a cgroup, so it needs both halves.
+
+Without the capability there is nothing to attach and a scope would buy nothing;
+with it, a scope is the difference between port-level and address-level egress,
+which is worth making without being asked."
+  (check (call-scute 'plan-wants-own-cgroup-p nil "http://127.0.0.1:10210" t)
+         "a proxy with the guard available did not ask for a cgroup")
+  (check (not (call-scute 'plan-wants-own-cgroup-p nil "http://127.0.0.1:10210" nil))
+         "a proxy asked for a cgroup that could not hold a guard anyway")
+  (check (not (call-scute 'plan-wants-own-cgroup-p nil nil t))
+         "a plan wanting nothing asked for a cgroup"))
+
+(deftest test-a-scope-is-not-made-twice
+  "Re-executing inside the scope we just made would be a fork bomb in a unit."
+  (sb-posix:setenv scute::+own-scope-marker+ "1" 1)
+  (unwind-protect
+       (multiple-value-bind (possible reason) (call-scute 'own-scope-possible-p)
+         (check (not possible) "a second scope would have been made")
+         (check (search "already" reason)
+                "the reason does not say it is already in one: ~S" reason))
+    (sb-posix:unsetenv scute::+own-scope-marker+)))
+
+(deftest test-a-scope-can-be-refused
+  "Someone who would rather be refused than have a scope made for them."
+  (sb-posix:setenv scute::+own-scope-opt-out+ "1" 1)
+  (unwind-protect
+       (multiple-value-bind (possible reason) (call-scute 'own-scope-possible-p)
+         (check (not possible) "the opt-out was ignored")
+         (check (search scute::+own-scope-opt-out+ reason)
+                "the reason does not name the variable: ~S" reason))
+    (sb-posix:unsetenv scute::+own-scope-opt-out+)))
