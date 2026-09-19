@@ -35,6 +35,7 @@ read-execute = [
   "?/opt",                               # where a distribution or a vendor puts tools
   "?/home/linuxbrew/.linuxbrew",         # homebrew on Linux
   "?~/.local/bin",                       # pip, pipx, cargo install --root
+  "?~/bin",                              # where a hand-installed tool usually goes
   "?~/.nvm",                             # node, when it came from nvm
   "?~/.rustup",
 ]

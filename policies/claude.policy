@@ -33,7 +33,8 @@ read-execute = [
   "/usr",
   "?/opt",
   "?/home/linuxbrew/.linuxbrew",
-  "?~/.local/bin",
+  "?~/.local/bin",                       # pip, pipx, cargo install --root
+  "?~/bin",                              # where a hand-installed tool usually goes
   "?~/.nvm",                             # claude is usually node, and node is usually nvm
   "?~/.volta",
 ]
