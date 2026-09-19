@@ -1,6 +1,6 @@
 # Scute
 
-Run an agent on your machine without giving it your credentials.
+Run an agent in a sandbox on your machine without giving it your credentials.
 
 ```sh
 scute codex               # or: scute claude, scute bash, scute run --policy ...
