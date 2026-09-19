@@ -253,3 +253,34 @@ PR_SET_DUMPABLE(0) puts the process in exactly the same position."
       (scute::%prctl scute::+pr-set-dumpable+ 1 0 0 0))
     (check (eql 11 (call-scute 'sandbox-result-exit-code result))
            "a non-dumpable supervisor could not launch a sandbox: ~S" result)))
+
+(deftest test-the-sandbox-runs-as-you-and-not-as-root
+  "A user namespace is usually demonstrated by mapping yourself to uid 0, and that
+is the wrong choice for running your own tools: the command becomes root as far as
+it can tell, and many programs treat that as a reason to refuse. Claude Code will
+not skip permission prompts when it believes it is root -- which made the shipped
+policy for it fail on the first thing anybody would try.
+
+Nothing is given up: capabilities inside a new user namespace belong to whoever
+created it whatever uid is mapped, and a file the sandbox creates has the same owner
+on disk either way."
+  (let ((report (scratch-pathname "whoami")))
+    (unwind-protect
+         (progn
+           (delete-scratch report)
+           (let ((result (call-scute 'run-namespaced-command
+                                     (list "/bin/sh" "-c"
+                                           (format nil "id -u > ~A; id -g >> ~A"
+                                                   report report)))))
+             (check (eql 0 (call-scute 'sandbox-result-exit-code result))
+                    "id did not run: ~S" result)
+             (let* ((said (read-file-string report))
+                    (lines (remove "" (uiop:split-string said :separator '(#\Newline))
+                                   :test #'string=))
+                    (numbers (mapcar (lambda (line)
+                                       (parse-integer line :junk-allowed t))
+                                     lines)))
+               (check (equal (list (sb-posix:geteuid) (sb-posix:getegid)) numbers)
+                      "the sandbox reported uid/gid ~S, expected ~D/~D"
+                      numbers (sb-posix:geteuid) (sb-posix:getegid)))))
+      (delete-scratch report))))

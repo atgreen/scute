@@ -325,3 +325,29 @@ missing branch rather than a wrong number."
     (check (member 53 connect)
            "TCP resolution is refused, so a truncated answer has no fallback: ~S"
            connect)))
+
+;;── What this binary started with ──────────────────────────────────────────────
+
+(deftest test-the-guard-is-judged-by-what-the-binary-started-with
+  "Scute drops every capability it holds before a sandboxed child exists, which is
+right and destroys the evidence for anyone asking afterwards whether this host
+could install a guard.
+
+doctor asked exactly that, one probe after the one that launches /bin/true -- so a
+packaged Scute carrying cap_bpf reported itself as a Scute without it, and then
+reported the default network as the port-level fallback when the kernel redirect
+was available all along."
+  (let ((scute::*startup-capabilities*
+          ;; CAP_BPF is 39, CAP_NET_ADMIN is 12.
+          (list (cons "CapEff" (logior (ash 1 39) (ash 1 12)))
+                (cons "CapPrm" (logior (ash 1 39) (ash 1 12))))))
+    (check (call-scute 'egress-guard-available-p)
+           "a binary that started with the capabilities was judged not to have them")
+    (let ((scute::*implicit-network-mode* nil))
+      (check (string= "proxied" (call-scute 'implicit-network-mode))
+             "the default network ignored the capabilities the binary started with")))
+  ;; And a process that never had them is still told so, with the remedy.
+  (let ((scute::*startup-capabilities* (list (cons "CapEff" 0) (cons "CapPrm" 0))))
+    (multiple-value-bind (available reason) (call-scute 'egress-guard-available-p)
+      (check (not available) "a binary with no capabilities claimed the guard")
+      (check (search "CAP_BPF" reason) "the reason does not name what is missing"))))

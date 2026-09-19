@@ -570,4 +570,8 @@ codex\", and \"scute policies\" lists what this host has."
 
 (defun main ()
   "The main entrypoint."
+  ;; Before anything else: a launch drops the capabilities this binary was given,
+  ;; and several questions later on are about what it was given rather than what it
+  ;; still holds.
+  (remember-startup-capabilities)
   (clingon:run (make-app) (policy-verb-arguments (rest sb-ext:*posix-argv*))))

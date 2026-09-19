@@ -186,7 +186,10 @@ compiling needs no privileges and happens once per run anyway."
 (defun egress-guard-available-p ()
   "Whether this process could load and attach the guard.
 Answers a second value saying why not."
-  (let ((capabilities (capability-sets)))
+  ;; What this process started with, not what it holds now: by the time doctor
+  ;; asks, its own namespace probe has launched a sandbox, and a launch drops every
+  ;; capability the supervisor held.
+  (let ((capabilities (startup-capabilities)))
     (flet ((held (name bit)
              (let ((set (cdr (assoc name capabilities :test #'string=))))
                (and set (logbitp bit set)))))

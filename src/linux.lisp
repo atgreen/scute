@@ -240,6 +240,26 @@ can fail in ways worth noticing before a sandbox is released."
           do (setup-error :verify-no-capabilities
                           :detail (format nil "~A is still ~(~16,'0X~)" name bits))))
 
+(defvar *startup-capabilities* nil
+  "The capability sets this process had before it dropped any of them.
+
+Scute drops every capability it holds before a sandboxed child exists, which is
+the right thing to do and destroys the evidence for anybody asking afterwards
+whether this host could install a BPF guard.  doctor asked exactly that, after a
+probe that launches /bin/true -- and so reported a host with CAP_BPF as a host
+without it.  Remembered once, at startup, before anything can drop it.")
+
+(defun remember-startup-capabilities ()
+  "Snapshot the capabilities this process started with.  Called first thing."
+  (setf *startup-capabilities* (capability-sets)))
+
+(defun startup-capabilities ()
+  "What this process started with, for the question \"could this host do X\".
+
+Falls back to reading now, so that a caller which never went through main -- a
+test, a REPL -- still gets a truthful answer."
+  (or *startup-capabilities* (capability-sets)))
+
 (defun capability-sets (&optional (pathname "/proc/self/status"))
   "Return an alist of the Cap* lines in PATHNAME as (NAME . INTEGER)."
   (with-open-file (stream pathname :direction :input)
@@ -263,14 +283,31 @@ can fail in ways worth noticing before a sandbox is released."
       (setup-error operation :detail (princ-to-string condition)))))
 
 (defun write-identity-maps (pid)
-  "Map the caller's user and group to root inside PID's user namespace.
-setgroups must be denied first; an unprivileged process may not otherwise
-write a gid map."
-  (write-proc-file (format nil "/proc/~D/setgroups" pid) "deny" :deny-setgroups)
-  (write-proc-file (format nil "/proc/~D/uid_map" pid)
-                   (format nil "0 ~D 1~%" (sb-posix:geteuid)) :write-uid-map)
-  (write-proc-file (format nil "/proc/~D/gid_map" pid)
-                   (format nil "0 ~D 1~%" (sb-posix:getegid)) :write-gid-map))
+  "Map the caller's user and group to themselves inside PID's user namespace.
+
+Themselves, not root.  Mapping to 0 is the usual demonstration of a user
+namespace and the wrong choice for running somebody's own tools: the command
+becomes root as far as it can tell, and a great many programs treat that as a
+reason to behave differently or to refuse outright.  Claude Code will not skip
+permission prompts when it believes it is root, npm warns, and a build script that
+guards against running as root guards against running here.
+
+Nothing is lost by it.  Capabilities inside a new user namespace belong to the
+process that created it whatever uid it maps to, so anything Scute does in the
+namespace still works; a file the sandbox creates has the same owner on disk either
+way, because that owner is this uid in both mappings.  What changes is only what
+the command is told about itself -- and being told the truth is cheaper than every
+tool's idea of what root means.
+
+setgroups must be denied first; an unprivileged process may not otherwise write a
+gid map."
+  (let ((uid (sb-posix:geteuid))
+        (gid (sb-posix:getegid)))
+    (write-proc-file (format nil "/proc/~D/setgroups" pid) "deny" :deny-setgroups)
+    (write-proc-file (format nil "/proc/~D/uid_map" pid)
+                     (format nil "~D ~D 1~%" uid uid) :write-uid-map)
+    (write-proc-file (format nil "/proc/~D/gid_map" pid)
+                     (format nil "~D ~D 1~%" gid gid) :write-gid-map)))
 
 (defun namespace-id (name &optional (pid "self"))
   "The inode identifier of namespace NAME, as reported by /proc."
