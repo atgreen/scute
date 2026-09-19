@@ -538,7 +538,7 @@ a policy that does not name one -- which is most of them."
   "The verbs Scute has of its own.  A policy may not shadow one.")
 
 (defun policy-verb-arguments (arguments)
-  "ARGUMENTS with a leading policy name turned into "run --policy NAME".
+  "ARGUMENTS with a leading policy name turned into \"run --policy NAME\".
 
 Answers ARGUMENTS unchanged when the first one is an option, a command Scute
 already has, or not the name of an installed policy -- so an unknown verb still

@@ -12,31 +12,42 @@ permissions:
 
 jobs:
   # ------------------------------------------------------------------
-  # The suite, on a runner rearranged to look like a workstation.
+  # The suite, in the distribution Scute is packaged for.
   #
-  # Scute's tests are not unit tests around a mock kernel: they make
-  # namespaces, install Landlock rulesets, and put real limits in real
-  # cgroups.  So the job's first act is releng/ci-host.sh, which gives the
-  # runner the two things a hosted one withholds -- unprivileged user
-  # namespaces and a delegated cgroup -- and then gets out of the way.
+  # Not a matter of taste: Scute calls seccomp_export_bpf_mem, which arrived in
+  # libseccomp 2.6, and Ubuntu 24.04 carries 2.5.5.  A runner's own image tests
+  # a configuration the package does not support and cannot run on.
+  #
+  # A container is built to withhold exactly what these tests need -- Landlock,
+  # user namespaces, and a cgroup tree that can be written to -- so it is given
+  # them back and the suite is then run by an ordinary user, because "none of
+  # this needs root" is the claim being tested.
   # ------------------------------------------------------------------
   check:
     runs-on: ubuntu-latest
+    container:
+      image: fedora:latest
+      options: --privileged --cgroupns=private
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install SBCL and the libraries Scute opens by name
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y sbcl libseccomp2 groff-base
-
-      - name: Install ocicl
+      - name: Install SBCL, ocicl and the broker
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download --repo ocicl/ocicl --pattern '*_amd64.deb' --dir /tmp
-          sudo dpkg -i /tmp/ocicl_*_amd64.deb
-          ocicl setup > ~/.sbclrc
+          dnf install -y sbcl libseccomp gcc make git tar gzip findutils \
+            groff procps-ng iproute sudo shadow-utils which jq
+          curl -o /etc/yum.repos.d/ocicl.repo \
+            https://ocicl.github.io/ocicl/rpm-repo/ocicl.repo
+          dnf install -y ocicl
+          # KeyFence from its release asset rather than its repository, which
+          # publishes unsigned repodata while its own .repo file asks dnf to
+          # check the signature -- so "dnf install keyfence" cannot resolve
+          # until that is fixed on the KeyFence side.
+          dnf install -y "$(curl -sH "Authorization: Bearer ${GH_TOKEN}" \
+            https://api.github.com/repos/atgreen/keyfence/releases/latest \
+            | jq -r '.assets[] | select(.name | endswith(".x86_64.rpm"))
+                     | .browser_download_url' | head -1)"
+
+      - uses: actions/checkout@v4
 
       # ocicl.csv pins every dependency, so the key is the whole answer: a
       # changed pin is a changed tree, and an unchanged one need not be fetched.
@@ -44,21 +55,45 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ocicl
-          key: ocicl-${{ runner.os }}-${{ hashFiles('ocicl.csv') }}
+          key: ocicl-fedora-${{ hashFiles('ocicl.csv') }}
+
+      - name: A user to build and test as
+        run: |
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
+          chown -R builder:builder .
 
       - name: Fetch dependencies
-        run: ocicl install
+        run: sudo -u builder -H sh -c 'ocicl setup > ~/.sbclrc && ocicl install'
 
       - name: Build
-        run: make
+        run: sudo -u builder -H make
 
       # Informational, and deliberately before the suite: when a test fails for
       # want of something the host does not have, this is the step that says so.
       - name: What this host can enforce
-        run: ./scute doctor || true
+        run: sudo -u builder -H ./scute doctor || true
+
+      # Two tests want the certificate authority the broker writes on first
+      # start, which on a workstation a user service has already done.  Mint it
+      # and stop again rather than leave one running: Scute starts a broker per
+      # run with a control key of its own, and one already listening is one it
+      # cannot authenticate to.  The broker will not start without a key, which
+      # is why this cannot just be "keyfence &".
+      - name: Mint the broker's certificate authority
+        run: |
+          sudo -u builder -H sh -c '
+            keyfence --api-key ci-only >/tmp/keyfence.log 2>&1 &
+            pid=$!
+            for _ in $(seq 60); do
+              [ -f ~/.keyfence/ca/ca.pem ] && break
+              sleep 1
+            done
+            kill "$pid" 2>/dev/null || true'
+          test -f /home/builder/.keyfence/ca/ca.pem
 
       - name: Test and smoke
-        run: releng/ci-host.sh make check
+        run: sudo -u builder -H releng/ci-host.sh make check
 
   # ------------------------------------------------------------------
   # The package, built the way the release builds it and installed the way a
@@ -90,9 +125,14 @@ jobs:
         run: make rpm
 
       - name: Install it
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          curl -o /etc/yum.repos.d/keyfence.repo \
-            https://atgreen.github.io/keyfence/rpm-repo/keyfence.repo
+          dnf install -y jq
+          dnf install -y "$(curl -sH "Authorization: Bearer ${GH_TOKEN}" \
+            https://api.github.com/repos/atgreen/keyfence/releases/latest \
+            | jq -r '.assets[] | select(.name | endswith(".x86_64.rpm"))
+                     | .browser_download_url' | head -1)"
           dnf install -y ./build/rpm/RPMS/*/*.rpm
           rpm -qlv scute
           scute --version

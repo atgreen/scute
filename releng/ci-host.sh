@@ -47,18 +47,43 @@ if [ -w "$cgroup$own" ]; then
   say "cgroup" "$own is already ours"
 else
   # A controller can only be enabled below a cgroup whose parent enabled it, so
-  # the root has to offer what the delegated cgroup will hand to its children.
+  # the root of the tree we can see has to offer what the delegated cgroup will
+  # hand to its children.
+  want=""
   for controller in cpu memory pids; do
     case " $(cat "$cgroup/cgroup.controllers") " in
-      *" $controller "*)
-        echo "+$controller" | sudo tee -a "$cgroup/cgroup.subtree_control" >/dev/null || true ;;
+      *" $controller "*) want="$want +$controller" ;;
     esac
   done
+
+  # Inside a container the visible root is not the kernel's, so the rule that a
+  # cgroup holding processes may not give controllers to its children applies to
+  # it -- and it holds every process in the container, this one included.  Move
+  # them aside and the root becomes an ordinary empty parent.  On a real host the
+  # first write succeeds and nothing is rearranged.
+  if ! echo "$want" | sudo tee "$cgroup/cgroup.subtree_control" >/dev/null 2>&1; then
+    sudo mkdir -p "$cgroup/init"
+    # Until it is empty rather than once through: cgroup.procs is generated as
+    # it is read, so moving a process partway through a pass hides the ones
+    # behind it.  A pass that moves nothing is as empty as it is going to get.
+    while pids=$(cat "$cgroup/cgroup.procs"); [ -n "$pids" ]; do
+      moved=no
+      for pid in $pids; do
+        if echo "$pid" | sudo tee "$cgroup/init/cgroup.procs" >/dev/null 2>&1; then
+          moved=yes
+        fi
+      done
+      [ "$moved" = yes ] || break
+    done
+    echo "$want" | sudo tee "$cgroup/cgroup.subtree_control" >/dev/null
+    say "cgroup root" "emptied into /init so it can hand out$want"
+  fi
+
   scope=$cgroup/scute-ci.scope
   sudo mkdir -p "$scope"
-  # Ownership of the directory and of these three files is exactly what
-  # delegation means: the owner may make cgroups, move processes, and decide
-  # which controllers its children get.
+  # Ownership of the directory and of these files is exactly what delegation
+  # means: the owner may make cgroups, move processes, and decide which
+  # controllers its children get.
   sudo chown -R "$(id -u):$(id -g)" "$scope"
   echo $$ | sudo tee "$scope/cgroup.procs" >/dev/null
   say "cgroup" "delegated /scute-ci.scope (controllers: $(cat "$scope/cgroup.controllers"))"
