@@ -468,3 +468,109 @@ destinations = [\"api.anthropic.com\"]~%env = \"ANTHROPIC_API_KEY\"~%")))))
 destinations = [\"api.anthropic.com\"]~%env = \"ANTHROPIC_API_KEY\"~%")))))
                 'scute:policy-error)
          "a credential was accepted beside a network that goes around the broker"))
+
+;;── A credential written where a program will look for it ──────────────────────
+;;;
+;;; An environment variable is how most programs take a credential, and not all of
+;;; them. Codex reads CODEX_HOME/auth.json, decodes the token it finds there, and
+;;; refreshes anything it cannot parse -- so an opaque token cannot reach it at
+;;; all, and what it is handed has to be shaped like a token with the broker's one
+;;; inside it.
+
+(deftest test-a-template-and-a-file-are-a-pair
+  (flet ((refused (text)
+           (typep (nth-value 1 (ignore-errors
+                                (call-scute 'validate-sandbox-policy
+                                            (call-scute 'parse-policy-text text))))
+                  'scute:policy-error)))
+    (check (refused (format nil "~
+[filesystem]~%read = [\"/etc\"]~%~%[credentials.x]~%ref = \"x\"~%~
+destinations = [\"api.example.test\"]~%file = \"/tmp/x.json\"~%"))
+           "a file with no template was accepted")
+    (check (refused (format nil "~
+[filesystem]~%read = [\"/etc\"]~%~%[credentials.x]~%ref = \"x\"~%~
+destinations = [\"api.example.test\"]~%template = \"/tmp/x.tmpl\"~%"))
+           "a template with no file was accepted")
+    (check (refused (format nil "~
+[filesystem]~%read = [\"/etc\"]~%~%[credentials.x]~%ref = \"x\"~%~
+destinations = [\"api.example.test\"]~%"))
+           "a credential with neither env nor file was accepted")
+    (check (refused (format nil "~
+[filesystem]~%read = [\"/etc\"]~%~%[credentials.x]~%ref = \"x\"~%~
+destinations = [\"api.example.test\"]~%file = \"/tmp/x.json\"~%~
+template = \"/tmp/definitely-not-a-template\"~%"))
+           "a template that does not exist was accepted")))
+
+(deftest test-a-credential-can-arrive-as-a-file-instead-of-a-variable
+  "env is not required when a file is named: the programs this exists for do not
+read an environment variable at all."
+  (let ((template (scratch-pathname "template")))
+    (unwind-protect
+         (progn
+           (with-open-file (stream template :direction :output :if-exists :supersede)
+             (write-string "{\"token\": \"header.payload.${token}\"}" stream))
+           (let* ((text (format nil "~
+[filesystem]~%read = [\"/etc\"]~%~%[credentials.model]~%ref = \"model\"~%~
+destinations = [\"api.example.test\"]~%file = \"~A.out\"~%template = \"~A\"~%"
+                                template template))
+                  (policy (call-scute 'validate-sandbox-policy
+                                      (call-scute 'parse-policy-text text)))
+                  (request (first (call-scute 'sandbox-policy-credentials policy))))
+             (check (null (call-scute 'credential-request-variable request))
+                    "a variable appeared where the policy named none")
+             (check (string= (format nil "~A.out" template)
+                             (call-scute 'credential-request-file request))
+                    "the file was lost")))
+      (delete-scratch template))))
+
+(deftest test-the-token-is-rendered-into-the-file-and-nothing-else-is
+  (let* ((template (scratch-pathname "render-template"))
+         (destination (format nil "~A.json" (scratch-pathname "render-out"))))
+    (unwind-protect
+         (progn
+           (with-open-file (stream template :direction :output :if-exists :supersede)
+             (write-string "{\"access_token\": \"head.body.${token}\", \"refresh_token\": \"none\"}"
+                           stream))
+           (let* ((text (format nil "~
+[filesystem]~%read = [\"/etc\"]~%~%[credentials.model]~%ref = \"model\"~%~
+destinations = [\"api.example.test\"]~%file = \"~A\"~%template = \"~A\"~%"
+                                destination template))
+                  (policy (call-scute 'validate-sandbox-policy
+                                      (call-scute 'parse-policy-text text)))
+                  (request (first (call-scute 'sandbox-policy-credentials policy)))
+                  (written (call-scute 'render-credential-file request "kf_written")))
+             (let ((contents (read-file-string written)))
+               (check (search "head.body.kf_written" contents)
+                      "the token is not where the template put it: ~S" contents)
+               (check (not (search "${token}" contents))
+                      "the placeholder survived: ~S" contents)
+               (check (search "\"refresh_token\": \"none\"" contents)
+                      "the rest of the template was lost: ~S" contents))
+             ;; Nobody else's business, even though what it holds is only a token.
+             (check (= #o600 (logand #o777 (sb-posix:stat-mode (sb-posix:stat written))))
+                    "the rendered file is readable by others")))
+      (delete-scratch template destination))))
+
+(deftest test-a-template-with-nowhere-for-the-token-is-refused
+  "Rendering it would hand the sandbox a file that looks right and authenticates
+nothing, which is a worse failure than saying so."
+  (let* ((template (scratch-pathname "empty-template"))
+         (destination (format nil "~A.json" (scratch-pathname "empty-out"))))
+    (unwind-protect
+         (progn
+           (with-open-file (stream template :direction :output :if-exists :supersede)
+             (write-string "{\"nothing\": \"here\"}" stream))
+           (let* ((text (format nil "~
+[filesystem]~%read = [\"/etc\"]~%~%[credentials.model]~%ref = \"model\"~%~
+destinations = [\"api.example.test\"]~%file = \"~A\"~%template = \"~A\"~%"
+                                destination template))
+                  (policy (call-scute 'validate-sandbox-policy
+                                      (call-scute 'parse-policy-text text)))
+                  (request (first (call-scute 'sandbox-policy-credentials policy)))
+                  (refusal (nth-value 1 (ignore-errors
+                                         (call-scute 'render-credential-file
+                                                     request "kf_unused")))))
+             (check refusal "a template with no ${token} in it was rendered anyway")
+             (check (not (probe-file destination))
+                    "a file was written for a template that could not work")))
+      (delete-scratch template destination))))

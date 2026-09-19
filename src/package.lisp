@@ -161,6 +161,9 @@
            #:credential-request
            #:make-credential-request
            #:credential-request-name
+           #:credential-request-file
+           #:credential-request-template
+           #:render-credential-file
            #:credential-request-secret-file
            #:credential-request-reference
            #:credential-request-destinations

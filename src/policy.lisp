@@ -249,14 +249,21 @@ and the refusal messages all see the path the policy meant."
 
 (defstruct (credential-request (:constructor make-credential-request
                                    (name secret-file destinations variable ttl
-                                    &optional reference)))
+                                    &optional reference file template)))
   "One credential the sandbox needs, and what the sandbox is given instead."
   (name nil :read-only t)
   (secret-file nil :read-only t)   ; read by the supervisor, never by the sandbox
   (reference nil :read-only t)     ; or held by the broker, read by nobody here
   (destinations nil :read-only t)  ; hosts the token is locked to
   (variable nil :read-only t)      ; the environment variable the token lands in
-  (ttl nil :read-only t))          ; seconds, or NIL for the run's own limit
+  (ttl nil :read-only t)           ; seconds, or NIL for the run's own limit
+  ;; Some programs do not read an environment variable.  Codex reads
+  ;; CODEX_HOME/auth.json and takes its credential out of a field there, and the
+  ;; programs that keep a credential in a file are exactly the ones whose
+  ;; credentials are most worth brokering -- a file is where a credential
+  ;; otherwise sits on disk for ever.
+  (file nil :read-only t)          ; where to write the token, inside the sandbox
+  (template nil :read-only t))     ; what to write there, with ${token} in it
 
 (defstruct (broker-settings (:constructor make-broker-settings
                                 (name proxy-port control-port)))
@@ -584,7 +591,8 @@ goes double for a policy Scute ships: /home/green is nobody else's path."
 (defun validate-credential (name value pathname)
   "One [credentials.NAME] table: a secret to hold, and where its token goes."
   (let ((entries (table-entries value (format nil "credentials.~A" name) pathname)))
-    (check-known-keys entries '("secret-file" "ref" "destinations" "env" "ttl")
+    (check-known-keys entries '("secret-file" "ref" "destinations" "env" "ttl"
+                                "file" "template")
                       (format nil "[credentials.~A]" name) pathname)
     (flet ((entry (key) (cdr (assoc key entries :test #'string=))))
       (let ((secret-file (let ((raw (entry "secret-file")))
@@ -594,7 +602,11 @@ goes double for a policy Scute ships: /home/green is nobody else's path."
             (variable (let ((raw (entry "env")))
                         (when raw (scalar-string raw "env" pathname))))
             (destinations (let ((raw (entry "destinations")))
-                            (when raw (string-array raw "destinations" pathname)))))
+                            (when raw (string-array raw "destinations" pathname))))
+            (file (let ((raw (entry "file")))
+                    (when raw (expand-home (scalar-string raw "file" pathname)))))
+            (template (let ((raw (entry "template")))
+                        (when raw (expand-home (scalar-string raw "template" pathname))))))
         (when (and secret-file reference)
           (policy-error (format nil "[credentials.~A] gives both secret-file and ~
                                      ref; they are alternatives -- a secret Scute ~
@@ -607,10 +619,22 @@ goes double for a policy Scute ships: /home/green is nobody else's path."
                                      it is registered with the broker under"
                                 name)
                         pathname))
-        (unless variable
-          (policy-error (format nil "[credentials.~A] must say which env variable ~
-                                     the sandbox receives its token in"
+        (when (and (or file template) (not (and file template)))
+          (policy-error (format nil "[credentials.~A] gives ~:[template~;file~] ~
+                                     without the other; a file needs something to ~
+                                     write and a template needs somewhere to go"
+                                name file)
+                        pathname))
+        (unless (or variable file)
+          (policy-error (format nil "[credentials.~A] must say where the sandbox ~
+                                     receives its token: env, for the programs that ~
+                                     read one, or file and template for the ~
+                                     programs that read a file"
                                 name)
+                        pathname))
+        (when (and template (not (probe-file template)))
+          (policy-error (format nil "[credentials.~A] template ~S does not exist"
+                                name template)
                         pathname))
         (unless destinations
           (policy-error (format nil "[credentials.~A] must name the destinations ~
@@ -628,7 +652,7 @@ goes double for a policy Scute ships: /home/green is nobody else's path."
         (make-credential-request
          name (and secret-file (expand-home secret-file)) destinations variable
          (let ((ttl (entry "ttl"))) (when ttl (parse-duration ttl pathname)))
-         reference)))))
+         reference file template)))))
 
 (defparameter +default-control-port-offset+ 2
   "How far the broker's control API sits from its proxy port, by its own default
@@ -1294,8 +1318,16 @@ compiles being a plan that runs."
         (format stream "~13Tthe broker holds it, registered as ~A~%"
                 (credential-request-reference request))
         (format stream "~13Tholds ~A~%" (credential-request-secret-file request)))
-    (format stream "~13Tthe sandbox gets a token in ~A~%"
-            (credential-request-variable request))
+    (let ((variable (credential-request-variable request))
+          (file (credential-request-file request)))
+      (when variable
+        (format stream "~13Tthe sandbox gets a token in ~A~%" variable))
+      (when file
+        ;; Named because it is a file Scute writes into the sandbox's reach, and
+        ;; whoever reviews a plan should see every one of those before it exists.
+        (format stream "~13Tthe sandbox gets a token written into ~A~%" file)
+        (format stream "~13Tfrom the template ~A~%"
+                (credential-request-template request))))
     (format stream "~13Tusable only at ~{~A~^, ~}~%"
             (credential-request-destinations request)))
   (let ((broker (launch-plan-broker plan)))

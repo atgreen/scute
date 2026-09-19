@@ -554,7 +554,7 @@ to run it and watch an agent fail."
                         (:unknown reason)))))
           missing)))))
 
-(defun plan-with-broker (plan broker tokens)
+(defun plan-with-broker (plan broker tokens &optional rendered)
   "PLAN as the sandbox will see it once the broker is running: the tokens in its
 environment, and read access to the one certificate it has to trust.
 
@@ -571,7 +571,76 @@ it, and a sandbox that could read that could sign for anything."
                                         :detail (format nil "the broker's CA ~
                                                              certificate is not at ~A"
                                                         (broker-certificate broker))))
-                         (list (make-path-rule :read (namestring certificate) nil))))))
+                         (cons (make-path-rule :read (namestring certificate) nil)
+                               ;; And whatever was written for a program that reads
+                               ;; its credential from a file rather than from the
+                               ;; environment.  Read-only: the sandbox has no reason
+                               ;; to rewrite what it was handed.
+                               (mapcar (lambda (path)
+                                         (make-path-rule :read (namestring path) nil))
+                                       rendered))))))
+
+;;── A token written where a program will look for it ───────────────────────────
+;;;
+;;; An environment variable is how most programs take a credential, and not all of
+;;; them.  Codex reads CODEX_HOME/auth.json and takes its token from a field there,
+;;; having first decoded it and checked the expiry -- so it cannot be handed an
+;;; opaque string at all, and has to be handed something shaped like what it
+;;; expects with the token inside it.  KeyFence finds a token in the third segment
+;;; of a dotted value, which is what makes that work.
+;;;
+;;; The rendered file is not a secret.  What goes into it is the run's token, which
+;;; is worth nothing except through the broker and is revoked when the run ends.
+;;; It is still written 0600 and removed afterwards, because a file nobody meant to
+;;; keep should not outlive its reason.
+
+(defparameter +token-placeholder+ "${token}"
+  "What a template has where the token goes.")
+
+(defun render-credential-file (request token)
+  "Write REQUEST's file, with TOKEN in place of the placeholder.
+Answers the path written, for the plan to grant and the run to clean up."
+  (let* ((template (credential-request-template request))
+         (destination (credential-request-file request))
+         (text (handler-case
+                   (with-open-file (stream template :direction :input
+                                                    :external-format :utf-8)
+                     (let ((buffer (make-string (file-length stream))))
+                       (subseq buffer 0 (read-sequence buffer stream))))
+                 (error (condition)
+                   (setup-error :render-credential-file
+                                :detail (format nil "template ~A: ~A"
+                                                template condition))))))
+    (unless (search +token-placeholder+ text)
+      (setup-error :render-credential-file
+                   :detail (format nil "template ~A has no ~A in it, so the token ~
+                                        would not appear in what the sandbox reads"
+                                   template +token-placeholder+)))
+    (let ((rendered (with-output-to-string (out)
+                      (loop with start = 0
+                            for found = (search +token-placeholder+ text :start2 start)
+                            while found
+                            do (write-string text out :start start :end found)
+                               (write-string token out)
+                               (setf start (+ found (length +token-placeholder+)))
+                            finally (write-string text out :start start)))))
+      (ensure-directories-exist destination)
+      (handler-case
+          (with-open-file (stream destination :direction :output
+                                              :if-exists :supersede
+                                              :external-format :utf-8)
+            (write-string rendered stream))
+        (error (condition)
+          (setup-error :render-credential-file
+                       :detail (format nil "~A: ~A" destination condition))))
+      (sb-posix:chmod destination #o600)
+      destination)))
+
+(defun remove-credential-files (paths)
+  "Delete what was rendered for this run.  Failure here is not worth an error:
+the file holds a token that has just been revoked."
+  (dolist (path paths)
+    (ignore-errors (delete-file path))))
 
 (defun credential-seconds (request plan)
   "How long REQUEST's token should live.
@@ -597,7 +666,10 @@ tokens are revoked."
         ;; would point every connection at a port with nothing behind it, and the
         ;; sandbox would fail its TLS handshakes for want of the broker's
         ;; certificate -- reported by whatever was running as a broken network.
-        (brokered (and (launch-plan-proxy plan) (launch-plan-broker plan))))
+        (brokered (and (launch-plan-proxy plan) (launch-plan-broker plan)))
+        ;; What was written for this run, so that it can be removed even when the
+        ;; command ends badly.
+        (written '()))
     (if (and (null credentials) (null brokered))
         (funcall function plan)
         (let* ((broker (start-broker (launch-plan-broker plan) :program program
@@ -606,14 +678,25 @@ tokens are revoked."
                (*run-identity* (new-run-identity))
                (*run-started* (rfc3339-now)))
           (unwind-protect
-               (let ((tokens (mapcar
-                              (lambda (request)
-                                (cons (credential-request-variable request)
-                                      (mint-token broker request
-                                                  (credential-seconds request plan))))
-                              credentials)))
+               (let* ((minted (mapcar
+                               (lambda (request)
+                                 (cons request
+                                       (mint-token broker request
+                                                   (credential-seconds request plan))))
+                               credentials))
+                      ;; A program that reads a variable is given one; a program
+                      ;; that reads a file has one written for it.  A credential
+                      ;; may ask for both, and some need only the file.
+                      (rendered (loop for (request . token) in minted
+                                      when (credential-request-file request)
+                                        collect (render-credential-file request token)))
+                      (tokens (loop for (request . token) in minted
+                                    for variable = (credential-request-variable request)
+                                    when variable collect (cons variable token))))
+                 (setf written rendered)
                  ;; With no credentials there are no tokens, and the certificate is
                  ;; still the point: the sandbox has to trust the broker to speak
                  ;; TLS through it at all.
-                 (funcall function (plan-with-broker plan broker tokens)))
+                 (funcall function (plan-with-broker plan broker tokens rendered)))
+            (remove-credential-files written)
             (stop-broker broker))))))
