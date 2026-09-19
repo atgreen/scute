@@ -1,18 +1,42 @@
 # Scute
 
-Run one command inside a deny-by-default Linux sandbox.
+Run an agent on your machine without giving it your credentials.
 
 ```sh
-scute run --policy scute.policy -- command ...
+scute codex               # or: scute claude, scute bash, scute run --policy ...
 ```
 
-Scute confines a single command to the files, the network, the resources and the
-system calls a policy names. It is a native sandbox — one process tree on your
-own kernel, no container, no virtual machine, no daemon, and no root. A build
-script from a repository you just cloned, a dependency's install hook, an agent
-acting on your behalf: things you have reason to run and reason to distrust.
+An agent needs your GitHub token, your API keys, your forge login — and an agent
+is a program that reads the internet and does what it is told. Scute's answer is
+that it never holds any of them. It runs with **opaque tokens that are worth
+nothing anywhere but a broker**, which swaps in the real credential on the way
+past, records what was spent, and revokes the token when the run ends. A token
+taken out of the sandbox authenticates nothing.
+
+Nothing routes around that, because routing is not left to the program. An **eBPF
+program attached to the sandbox's cgroup rewrites the destination of every
+outbound connection** to the broker, so a client that ignores the proxy variables
+arrives there anyway, and Landlock permits no other port to leave by.
 
 ![scute](docs/demo.gif)
+
+Underneath is an ordinary deny-by-default sandbox for one command, and the
+credential story only means anything because that part holds:
+
+- **Landlock** decides the filesystem. A path the policy did not name does not
+  exist for the command — including the file your real credentials sit in.
+- **seccomp** denies the system calls a sandboxed program has no business making,
+  `unshare` and `mount` among them, so it cannot build itself somewhere else to
+  stand.
+- **Namespaces** — user, mount, pid, uts, net — give it its own view, so it
+  cannot see or signal your processes, and has no network but the one it was
+  given.
+- **cgroup v2** bounds what it can consume: memory, processes, CPU, and a wall
+  clock that stops it.
+
+Native, all of it — one process tree on your own kernel, no container, no virtual
+machine, no daemon, and no root. Good for a build script from a repository you
+just cloned or a dependency's install hook, as well as for the agent.
 
 Nothing degrades quietly. A host missing anything the policy asks for —
 Landlock, user namespaces, cgroup delegation, libseccomp — gets an error before
@@ -285,7 +309,12 @@ names of the environment variables it will carry.
 ### When a policy is wrong
 
 A refused command reports its own confusion — `Permission denied`, from
-somewhere deep inside a library. Ask scute instead:
+somewhere deep inside a library, naming a path you never wrote down.
+
+Most of the time the answer is `scute learn`, above: run the command once and
+read what it actually needed. For a command you would rather not run unrestricted
+even once, `--explain` reports the same thing from inside the sandbox, enforcing
+the policy exactly as usual and watching as well:
 
 ```sh
 $ scute run --policy scute.policy --explain -- ./build.sh
@@ -302,12 +331,10 @@ read = ["/etc"]
 read-write = [".", "/dev/tty"]
 ```
 
-`--explain` enforces the policy exactly as usual; it only watches as well, at the
-cost of a round trip per path. That is why it is a flag rather than the default:
-on a command touching 189,000 paths it took 1.57s against 0.19s, while for a small
-one the difference is invisible. When a command fails and someone is watching,
-scute says that `--explain` would answer why; in a script it stays quiet, and
-`SCUTE_NO_HINTS=1` silences it everywhere.
+It costs a round trip per path, which is why it is a flag rather than the
+default: on a command touching 189,000 paths it took 1.57s against 0.19s. When a
+command fails and someone is watching, scute mentions it; in a script it stays
+quiet, and `SCUTE_NO_HINTS=1` silences that everywhere.
 
 ## Policy reference
 

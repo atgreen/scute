@@ -491,8 +491,10 @@ filesystem."
               for key = (cons destination reason)
               unless (member key seen :test #'equal)
                 do (push key seen)
-                   (format stream "~&  ~A~30T~A~%" destination reason))))
-    (length refusals)))
+                   (format stream "~&  ~A~30T~A~%" destination reason)))
+      ;; Answered, so that a caller can stop offering a second explanation of a
+      ;; failure that has just been explained.
+      (length refusals))))
 
 (defun registered-credentials (settings)
   "The credential names the broker knows, or NIL if it cannot be asked.

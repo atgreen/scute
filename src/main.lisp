@@ -131,7 +131,7 @@ argument gets you.")
   "Whether somebody is reading stderr, rather than a file or a pipe."
   (plusp (cffi:foreign-funcall "isatty" :int 2 :int)))
 
-(defun offer-explanation (plan result)
+(defun offer-explanation (plan result &optional already-explained)
   "Say how to find out which paths a failing command was refused.
 
 A sandboxed command reports its own confusion -- \"Permission denied\", from
@@ -145,6 +145,11 @@ and this would be noise there.  Only when the policy restricts the filesystem, s
 there is something --explain could find.  SCUTE_NO_HINTS=1 turns it off."
   (when (and (launch-plan-filesystem plan)
              (not (zerop (command-exit-status result)))
+             ;; Not when the failure has already been accounted for.  A command
+             ;; refused a credential fails for a reason the broker just printed,
+             ;; and following that with "if a path was refused" sends somebody to
+             ;; look at the filesystem for a network answer.
+             (not already-explained)
              (interactive-error-output-p)
              (not (sb-posix:getenv "SCUTE_NO_HINTS")))
     (format *error-output*
@@ -258,9 +263,10 @@ a policy that does not name one -- which is most of them."
                ;; its credential -- git does exactly that, and reporting the first
                ;; half as a refusal of a run that worked is noise.  The audit trail
                ;; keeps everything either way.
-               (when (and *broker* (not (zerop (command-exit-status result))))
-                 (report-broker-refusals (broker-events *broker*)))
-               (offer-explanation plan result)
+               (let ((explained (and *broker*
+                                     (not (zerop (command-exit-status result)))
+                                     (report-broker-refusals (broker-events *broker*)))))
+                 (offer-explanation plan result explained))
                (uiop:quit (command-exit-status result) t)))))
          :program (clingon:getopt cmd :broker-path)))))))
 
