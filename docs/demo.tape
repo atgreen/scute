@@ -6,9 +6,23 @@
 # screen -- so that re-recording after a change produces a comparable GIF rather
 # than a different one.
 #
-# It needs KeyFence running with a credential registered as "github", because
-# that is what the recording is about: the agent holds a token, the broker holds
-# the credential, and a token taken out of the sandbox is worth nothing.
+# The recording is one Claude Code session, because that is the thing Scute is
+# for: the agent is handed tokens that are worth nothing away from the broker,
+# and a home directory it cannot read.  What it needs to run:
+#
+#   - claude on PATH, and KeyFence holding "anthropic"
+#   - a "github" credential reaching the session as GH_TOKEN, which the shipped
+#     claude policy does not ask for -- the machine this was recorded on adds it
+#     with ~/.config/scute/policies/claude.d/10-github.policy:
+#
+#         [credentials.github]
+#         ref = "github"
+#         destinations = ["api.github.com"]
+#         env = "GH_TOKEN"
+#
+# The tokens are on screen on purpose.  They are KeyFence's, minted for that run
+# and revoked when it ended; the credentials they stand in for never leave the
+# broker and are not in the recording.
 
 Output demo.gif
 Set Shell bash
@@ -27,73 +41,76 @@ Type "export PATH=$PWD/..:$PATH" Enter
 Type "cd $(mktemp -d) && export PS1='$ ' && clear" Enter
 Show
 
-Type "# An agent, confined, in one command -- with KeyFence holding its keys." Enter
-Sleep 600ms
-Type "scute policies" Enter
-Sleep 3s
-Type "# scute claude. scute codex. Each name is a policy you can read." Enter
-Sleep 2500ms
-
-Type "clear" Enter
-Type "# Here is what one says. Nothing implicit, and no key in it." Enter
-Sleep 600ms
-Type "cat > agent.policy <<'EOF'" Enter
-Type '[filesystem]' Enter
-Type 'read-execute = ["/usr"]' Enter
-Type 'read = ["/etc", "/proc"]' Enter
-Type 'read-write = [".", "/dev/null"]' Enter
-Type '' Enter
-Type '[credentials.github]' Enter
-Type 'ref = "github"                    # the name KeyFence holds it under' Enter
-Type 'destinations = ["api.github.com"]' Enter
-Type 'env = "GH_TOKEN"' Enter
-Type "EOF" Enter
-Sleep 2500ms
-
-Type "clear" Enter
-Type "# No [network] table, so every connection goes through KeyFence -- and" Enter
-Type "# the kernel puts it there: an eBPF program rewrites the destination, so a" Enter
-Type "# client that ignores the proxy variables still arrives at the broker." Enter
-Sleep 2500ms
-Type "# So what does the agent hold?" Enter
-Sleep 600ms
-Type "scute run --policy agent.policy -- printenv GH_TOKEN" Enter
-Sleep 3s
-
-Type "# Not your credential. It still works, because the broker swaps the real" Enter
-Type "# one in on the way past:" Enter
-Sleep 600ms
-Type "cat > whoami.sh <<'EOF'" Enter
-Type '/usr/bin/curl -s -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/user | grep login' Enter
-Type "EOF" Enter
-Type "scute run --policy agent.policy -- /usr/bin/sh whoami.sh" Enter
-Sleep 5s
-
-Type "clear" Enter
-Type "# The credential is half of it. The other half is an ordinary sandbox." Enter
-Sleep 1s
-Type "# Landlock: a path the policy never named does not exist for it." Enter
-Sleep 600ms
-Type "scute run --policy agent.policy -- cat ~/.ssh/id_ed25519" Enter
-Sleep 2500ms
-Type "# seccomp: it cannot build itself a sandbox to escape into, either." Enter
-Sleep 600ms
-Type "scute run --policy agent.policy -- unshare --user true" Enter
-Sleep 2500ms
-Type "# Namespaces of its own -- user, mount, pid, uts, net -- and cgroup limits" Enter
-Type "# the policy can set: memory, processes, CPU, wall clock." Enter
-Sleep 2500ms
-
-Type "clear" Enter
-Type "# Now steal it. Take the token out of the sandbox and use it yourself." Enter
-Sleep 1s
-Type "cat > print-token.sh <<'EOF'" Enter
-Type 'printf %s "$GH_TOKEN"' Enter
-Type "EOF" Enter
-Type "STOLEN=$(scute run --policy agent.policy -- /usr/bin/sh print-token.sh)" Enter
-Sleep 3s
-Type 'curl -s -o /dev/null -w "github says %{http_code}\n" -H "Authorization: Bearer $STOLEN" https://api.github.com/user' Enter
+Type "# Claude Code, confined to this directory, with its keys held by a broker." Enter
+Sleep 2s
+Type "# It gets no network of its own. An eBPF program on the sandbox's cgroup" Enter
+Type "# rewrites every outbound connection to KeyFence, so a client that ignores" Enter
+Type "# the proxy variables arrives there anyway -- and Landlock leaves no other" Enter
+Type "# port to leave by." Enter
 Sleep 4s
-Type "# 401. Locked to one destination through the broker, and revoked when the" Enter
-Type "# run ended. An exfiltrated token is worth nothing." Enter
-Sleep 4s
+Type "scute claude" Enter
+
+Hide
+# Startup is hidden: several dull seconds, and possibly a question. Claude asks
+# whether it trusts a directory it has not seen before, and it remembers the
+# answer against /tmp rather than the temporary directory -- so the prompt comes
+# once per machine and never again, which is why the wait accepts either screen.
+# The Enter answers "Yes, I trust this folder" if it is up, and does nothing at
+# an empty prompt if it is not.
+#
+# Ready is the permission-mode line under the input box rather than the
+# "? for shortcuts" hint: this policy passes --dangerously-skip-permissions, and
+# that line says so instead. The Escape is insurance against a tip overlay
+# opening over the prompt; on an empty prompt it does nothing.
+Wait+Screen@90s /Yes, I trust this folder|bypass permissions on/
+Enter
+Wait+Screen@90s /bypass permissions on/
+Escape
+Sleep 1s
+Show
+Sleep 2s
+
+# Everything from here is typed into the agent's own session: "!" is Claude Code's
+# shell prefix, so these run inside the sandbox, with the agent's environment,
+# exactly as the agent's own commands do.
+
+# What the agent holds.
+Type "!"
+Sleep 500ms
+Type "env | grep TOKEN"
+Sleep 800ms
+Enter
+Wait+Screen@30s /kf_/
+Sleep 7s
+
+# Not a credential -- and still enough to work. The request goes to the broker
+# because the kernel sends it there, and the broker swaps the real token into the
+# Authorization header on the way to api.github.com. The agent never holds it.
+Type "!"
+Sleep 500ms
+Type "gh api user --jq .login"
+Sleep 800ms
+Enter
+Sleep 9s
+
+# The other half: an ordinary deny-by-default sandbox.  The policy grants this
+# directory, so the rest of the home directory is not there to read.
+Type "!"
+Sleep 500ms
+Type "ls -l ~/.ssh"
+Sleep 800ms
+Enter
+# The refusal is the last thing on screen and the point of the whole recording,
+# so it stays up long enough to read twice before the session goes.
+Sleep 11s
+
+# Out of the session: two interrupts, which is how Claude Code exits.
+Ctrl+C
+Sleep 700ms
+Ctrl+C
+Sleep 2s
+
+Type "# Tokens, not keys. Every request went through the proxy that holds the" Enter
+Type "# real credential, logged what was spent, and revoked both tokens when the" Enter
+Type "# run ended. What was on screen authenticates nothing." Enter
+Sleep 6s
