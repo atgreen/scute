@@ -20,7 +20,7 @@ arrives there anyway, and Landlock permits no other port to leave by.
 
 ![scute](docs/demo.gif)
 
-Underneath is an ordinary deny-by-default sandbox for one command, and the
+Underneath is an ordinary deny-by-default sandbox for one command, and the 
 credential story only means anything because that part holds:
 
 - **Landlock** decides the filesystem. A path the policy did not name does not
