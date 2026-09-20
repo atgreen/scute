@@ -149,9 +149,6 @@ Optional, like limits: a policy that does not ask for one is unaffected."
         (make-probe "address egress" :ok "CAP_BPF and CAP_NET_ADMIN are held")
         (make-probe "address egress" :info reason))))
 
-(defparameter +default-broker-control-port+ 10212
-  "Where a credential broker answers control requests by its own default.")
-
 (defun probe-broker ()
   "Whether the credential broker is there.
 
@@ -162,17 +159,17 @@ which is the one case this is not fatal in -- so it is reported as missing rathe
 than failing, and the refusal at launch says the rest."
   (let ((certificate (probe-file (broker-certificate-path)))
         (installed (ignore-errors (resolve-executable "keyfence"))))
-    (cond ((broker-answering-p +default-broker-control-port+)
+    (cond ((broker-answering-p (default-broker-control-socket))
            (make-probe "credential broker" :ok
-                       (format nil "answering on ~D~:[; no CA certificate at ~A~;~]"
-                               +default-broker-control-port+
+                       (format nil "answering at ~A~:[; no CA certificate at ~A~;~]"
+                               (default-broker-control-socket)
                                certificate (broker-certificate-path))))
           (installed
            (make-probe "credential broker" :info
                        (format nil "installed at ~A but not running, so Scute will ~
                                     start one per run.  Better as a service: ~
                                     systemctl --user enable --now keyfence.socket ~
-                                    keyfence-api.socket"
+                                    keyfence-control.socket"
                                installed)))
           (t
            (make-probe "credential broker" :missing

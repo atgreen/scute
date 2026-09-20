@@ -58,10 +58,10 @@ token minted for a run carries the same task id, and every event about those
 tokens carries it back.")
 
 (defstruct (broker (:constructor %make-broker
-                       (settings helper control-key certificate)))
+                       (settings helper certificate &optional directory)))
   (settings nil :read-only t)
   (helper nil :read-only t)        ; NIL when we attached to one already running
-  (control-key nil :read-only t)   ; authorises control API requests
+  (directory nil :read-only t)     ; private runtime directory owned by this run
   (certificate nil :read-only t)   ; the CA the sandbox has to trust
   (tokens nil))                    ; minted here, revoked when the run ends
 
@@ -128,51 +128,32 @@ than being exported per run, which is the other reason a long-lived broker is
 nicer to live with: the trust stays put between runs."
   (expand-home (concatenate 'string +broker-data-directory+ "ca/ca.pem")))
 
-(defun broker-control-key-from-host ()
-  "The control API key for a broker already running on this machine.
-
-From the environment when the operator put it there, and otherwise from a file
-beside the CA, which is where the shipped service unit writes it.  A broker
-started without a key accepts unauthenticated control requests, so finding none
-is not an error here -- whether one was needed is the broker's answer to give."
-  (or (sb-posix:getenv "KEYFENCE_API_KEY")
-      (let ((path (expand-home (concatenate 'string +broker-data-directory+ "api-key"))))
-        (when (probe-file path)
-          (let ((key (string-trim '(#\Space #\Tab #\Newline #\Return)
-                                  (with-open-file (stream path)
-                                    (or (read-line stream nil "") "")))))
-            (when (plusp (length key)) key))))))
-
-(defun broker-answering-p (port)
-  "Whether anything is listening on PORT and calls itself healthy."
+(defun broker-answering-p (socket)
   (handler-case (= 200 (http-response-status
-                        (loopback-request port "GET" "/health" :seconds 2)))
+                        (unix-control-request socket "GET" "/health" :seconds 2)))
     (error () nil)))
 
-(defun identify-broker (port key)
-  "What is answering on PORT: :BROKER, :UNAUTHORIZED, or NIL for anything else.
+(defun identify-broker (socket)
+  "Check API compatibility after the transport authenticated the peer."
+  (let ((response (unix-control-request socket "GET" "/tokens" :seconds 2)))
+    (unless (= 200 (http-response-status response))
+      (broker-error "broker control at ~A refused access; configure --api-allow-uid ~D"
+                    socket (sb-posix:geteuid)))
+    (let ((body (string-left-trim '(#\Space #\Tab #\Newline #\Return)
+                                  (http-response-body response))))
+      (unless (and (plusp (length body)) (char= #\[ (char body 0)))
+        (broker-error "the authenticated peer at ~A does not answer the broker API" socket)))
+    t))
 
-Health is not identity.  Attaching means posting the operator's plaintext
-credential to whatever is on that port, so it is not enough that something there
-answers 200 -- plenty of things would.  A broker is recognised by its control
-API: listing tokens is a request only a broker understands, and it answers with
-a JSON array.  Anything that does not is left alone, with the secret unsent."
-  (handler-case
-      (let ((response (loopback-request port "GET" "/tokens" :seconds 2
-                                        :headers (when key
-                                                   (list (cons "Authorization"
-                                                               (format nil "Bearer ~A"
-                                                                       key)))))))
-        (case (http-response-status response)
-          ((200) (let ((body (string-left-trim '(#\Space #\Tab #\Newline #\Return)
-                                               (http-response-body response))))
-                   (when (and (plusp (length body)) (char= #\[ (char body 0)))
-                     :broker)))
-          ((401 403) :unauthorized)
-          (t nil)))
-    (error () nil)))
+(defun create-broker-runtime-directory ()
+  "An exclusively created private directory; a preexisting path is never reused."
+  (let ((path (format nil "~A/scute-broker-~A"
+                      (string-right-trim "/" (or (sb-posix:getenv "XDG_RUNTIME_DIR") "/tmp"))
+                      (random-hex 16))))
+    (sb-posix:mkdir path #o700)
+    (concatenate 'string path "/")))
 
-(defun fetch-broker-certificate (port)
+(defun fetch-broker-certificate (socket)
   "Ask the broker for its CA certificate and write it where the sandbox can read.
 
 Better than assuming where the broker keeps its data directory, which is the sort
@@ -184,12 +165,10 @@ the control API costs nothing.
 Answers the path written, or NIL if this broker does not serve one, in which case
 the caller falls back to looking where brokers usually put it."
   (handler-case
-      (let ((response (loopback-request port "GET" "/ca" :seconds 5)))
+      (let ((response (unix-control-request socket "GET" "/ca" :seconds 5)))
         (when (and (= 200 (http-response-status response))
                    (search "BEGIN CERTIFICATE" (http-response-body response)))
-          (let* ((directory (format nil "~A/scute-broker-~D/"
-                                    (or (sb-posix:getenv "XDG_RUNTIME_DIR") "/tmp")
-                                    (sb-posix:getpid)))
+          (let* ((directory (create-broker-runtime-directory))
                  (path (concatenate 'string directory "ca.pem")))
             (ensure-directories-exist directory)
             (sb-posix:chmod (string-right-trim "/" directory) #o755)
@@ -205,7 +184,7 @@ the caller falls back to looking where brokers usually put it."
 default network goes through it.  Install it -- https://github.com/atgreen/keyfence
 -- and run it as a service, which is where credentials belong:
 
-    systemctl --user enable --now keyfence.socket keyfence-api.socket
+    systemctl --user enable --now keyfence.socket keyfence-control.socket
 
 A sandbox that needs no network at all needs no broker either, and says so:
 
@@ -225,91 +204,46 @@ has never heard of, at a moment when they were running a sandbox and not a broke
                    :detail (format nil "~A is not installed.~%~%~A"
                                    program +broker-remedy+)))))
 
-(defun broker-log-path ()
-  "Where a broker Scute started writes what it has to say.
-
-Under the runtime directory rather than beside the policy: it is per-boot state
-about a process, and nobody wants it turning up in a repository."
-  (let ((runtime (or (sb-posix:getenv "XDG_RUNTIME_DIR") "/tmp")))
-    (format nil "~A/scute-broker-~D.log" (string-right-trim "/" runtime)
-            (sb-posix:getpid))))
-
-(defun start-broker (settings &key program minting
+(defun start-broker (settings &key program
                                   (certificate (broker-certificate-path)))
-  "Reach the broker SETTINGS names: the one already running, or a new one.
-
-Attaching is the intended path.  Starting one per run works and keeps a machine
-without the service usable, but it pays the broker's startup on every sandbox
-and leaves credentials in a process nobody is supervising."
-  (let ((control (broker-settings-control-port settings)))
-    (if (broker-answering-p control)
-        (let ((key (broker-control-key-from-host)))
-          (ecase (identify-broker control key)
-            (:broker (%make-broker settings nil key
-                                   (or (fetch-broker-certificate control) certificate)))
-            (:unauthorized
-             ;; Without a credential to hand over there is nothing the control key
-             ;; protects: what this run needs from the broker is the public CA
-             ;; certificate and a port to send traffic to.  Requiring the key here
-             ;; would refuse every ordinary run on a machine where somebody else's
-             ;; broker is listening, or where this process cannot read the key --
-             ;; and refuse it for the sake of a secret nobody is sending.
-             (unless minting
-               (return-from start-broker
-                 (%make-broker settings nil nil
-                               (or (fetch-broker-certificate control) certificate))))
-             (setup-error
-              :start-broker
-              :detail (format nil "a credential broker is running on port ~D but ~
-                                   will not accept the control key ~:[Scute could ~
-                                   not find~;Scute has~].  Put the right one in ~
-                                   KEYFENCE_API_KEY or in ~A"
-                              control key
-                              (expand-home (concatenate 'string
-                                                        +broker-data-directory+
-                                                        "api-key")))))
-            ((nil)
-             (setup-error
-              :start-broker
-              :detail (format nil "something is listening on port ~D, but it does ~
-                                   not answer a credential broker's control API.  ~
-                                   Scute will not hand a credential to it"
-                              control)))))
-        (let* ((executable (broker-executable (or program (broker-program settings))))
-               (control-key (random-hex 16))
-               (log (broker-log-path))
-               (helper (start-helper-arguments
-                        (list executable
-                              "-proxy" (format nil ":~D"
-                                               (broker-settings-proxy-port settings))
-                              "-api" (format nil ":~D" control)
-                              ;; Generated per run and gone with it.  It is on a
-                              ;; command line, so this user's own processes can
-                              ;; read it out of /proc -- but never the sandbox,
-                              ;; which is permitted the proxy port and no other
-                              ;; address at all.
-                              "-api-key" control-key)
-                        nil log)))
-          (let ((broker (%make-broker settings helper control-key certificate)))
-            (unless (and (wait-for-port control 15) (broker-answering-p control))
-              (stop-helper helper)
-              (setup-error :start-broker
-                           :detail (format nil "~A did not answer on its control ~
-                                                port ~D within fifteen seconds. ~
-                                                What it said is in ~A"
-                                           executable control log)))
-            ;; Checked on this side too: a port can be taken between our looking
-            ;; and our starting, and what answers may not be what we started.
-            (unless (eq :broker (identify-broker control control-key))
-              (stop-helper helper)
-              (setup-error :start-broker
-                           :detail (format nil "what is answering on port ~D is ~
-                                                not the broker ~A was started to be"
-                                           control executable)))
-            (let ((served (fetch-broker-certificate control)))
-              (if served
-                  (%make-broker settings helper control-key served)
-                  broker)))))))
+  "Attach through Unix peer authentication, or start a broker in a private directory."
+  (let ((control (broker-settings-control-socket settings)))
+    (when (probe-file control)
+      (identify-broker control)
+      (return-from start-broker
+        (%make-broker settings nil (or (fetch-broker-certificate control) certificate))))
+    (let* ((executable (broker-executable (or program (broker-program settings))))
+           (directory (create-broker-runtime-directory))
+           (control (concatenate 'string directory "control.sock"))
+           (settings (make-broker-settings (broker-settings-name settings)
+                                          (broker-settings-proxy-port settings) control))
+           (log (concatenate 'string directory "broker.log"))
+           (helper nil)
+           (completed nil))
+      (unwind-protect
+           (progn
+             (setf helper (start-helper-arguments
+                            (list executable
+                                  "-proxy" (format nil "127.0.0.1:~D" (broker-settings-proxy-port settings))
+                                  "-api" (concatenate 'string "unix:" control)
+                                  "-api-allow-uid" (write-to-string (sb-posix:geteuid)))
+                            nil log))
+             (unless (loop repeat 150
+                           thereis (and (probe-file control) (broker-answering-p control))
+                           do (sleep 1/10))
+               (setup-error :start-broker
+                            :detail (format nil "broker did not answer at ~A; Unix control requires a recent KeyFence. See ~A"
+                                            control log)))
+             (identify-broker control)
+             (let ((broker (%make-broker settings helper
+                                         (or (fetch-broker-certificate control) certificate)
+                                         directory)))
+               (setf completed t)
+               broker))
+        (unless completed
+          (when helper (stop-helper helper))
+          ;; Keep the log for the startup error, but never a stale control socket.
+          (ignore-errors (delete-file control)))))))
 
 (defun stop-broker (broker)
   "Revoke what this run minted, and stop the broker if this run started it.
@@ -318,6 +252,10 @@ its tokens are still ours to revoke."
   (revoke-tokens broker)
   (when (broker-helper broker)
     (stop-helper (broker-helper broker)))
+  (when (broker-directory broker)
+    (dolist (name '("control.sock" "broker.log"))
+      (ignore-errors (delete-file (concatenate 'string (broker-directory broker) name))))
+    (ignore-errors (sb-posix:rmdir (broker-directory broker))))
   ;; A certificate fetched for this run goes with it. One found where the broker
   ;; keeps it belongs to the broker, and is left alone.
   (let ((certificate (namestring (broker-certificate broker))))
@@ -329,15 +267,9 @@ its tokens are still ours to revoke."
 ;;── Tokens ─────────────────────────────────────────────────────────────────────
 
 (defun control-request (broker method path &key body (seconds 10))
-  "One request to the broker's control API, authorised if we have a key."
-  (loopback-request (broker-settings-control-port (broker-settings broker))
-                    method path
-                    :body body
-                    :seconds seconds
-                    :headers (let ((key (broker-control-key broker)))
-                               (when key
-                                 (list (cons "Authorization"
-                                             (format nil "Bearer ~A" key)))))))
+  "Authenticate each new connection, including revocation and audit requests."
+  (unix-control-request (broker-settings-control-socket (broker-settings broker))
+                        method path :body body :seconds seconds))
 
 (defparameter *run-started* nil
   "When this run began, in the form the broker stamps its entries with.
@@ -502,18 +434,18 @@ filesystem."
 Answers a second value explaining why not, so that a report can say \"the broker
 is not running\" rather than \"the credential is missing\" -- two problems that
 look identical from here and call for different fixes."
-  (let ((control (broker-settings-control-port settings)))
+  (let ((control (broker-settings-control-socket settings)))
     (if (not (broker-answering-p control))
-        (values nil (format nil "no broker is answering on port ~D" control))
+        (values nil (format nil "no broker is answering at ~A" control))
         (handler-case
             (let ((response (control-request
-                             (%make-broker settings nil (broker-control-key-from-host) nil)
+                             (%make-broker settings nil nil)
                              "GET" "/credentials" :seconds 5)))
               (case (http-response-status response)
                 ((200) (values (json-string-list (http-response-body response)
                                                  "credentials")
                                nil))
-                ((401 403) (values nil "the broker will not accept the control key"))
+                ((401 403) (values nil "the broker does not authorize this Unix peer"))
                 (t (values nil (format nil "the broker answered ~D"
                                        (http-response-status response))))))
           (error (condition) (values nil (princ-to-string condition)))))))
@@ -578,8 +510,8 @@ it, and a sandbox that could read that could sign for anything."
                                ;; its credential from a file rather than from the
                                ;; environment.  Read-only: the sandbox has no reason
                                ;; to rewrite what it was handed.
-                               (mapcar (lambda (path)
-                                         (make-path-rule :read (namestring path) nil))
+                               (mapcar (lambda (file)
+                                         (make-path-rule :read (rendered-credential-rule-path file) nil))
                                        rendered))))))
 
 ;;── A token written where a program will look for it ───────────────────────────
@@ -599,9 +531,78 @@ it, and a sandbox that could read that could sign for anything."
 (defparameter +token-placeholder+ "${token}"
   "What a template has where the token goes.")
 
+(defstruct rendered-credential path file-fd directory-fd basename)
+
+(defun rendered-credential-rule-path (file)
+  "Landlock must grant the created inode, even if its pathname was replaced."
+  (format nil "/proc/self/fd/~D" (rendered-credential-file-fd file)))
+
+(defun open-output-directory (destination)
+  "Pin DESTINATION's parent, creating missing directories without following links.
+Every component is opened relative to the previous descriptor, so renames cannot
+redirect later operations through a different pathname."
+  (let* ((absolute (if (uiop:absolute-pathname-p destination)
+                       destination
+                       (concatenate 'string (sb-posix:getcwd) "/" destination)))
+         (parts (remove "" (uiop:split-string absolute :separator "/") :test #'string=))
+         (fd (%open "/" (logior +o-path+ +o-directory+ +o-cloexec+))))
+    (unless (and parts (not (member ".." parts :test #'string=))
+                 (not (member "." parts :test #'string=))
+                 (not (char= #\/ (char absolute (1- (length absolute))))))
+      (when (>= fd 0) (%close fd))
+      (setup-error :render-credential-file :detail "output must name a file without . or .. components"))
+    (when (minusp fd)
+      (setup-error :render-credential-file :errno (errno)))
+    (handler-case
+        (progn
+          (dolist (part (butlast parts))
+            (let ((next (cffi:foreign-funcall "openat" :int fd :string part
+                          :int (logior +o-path+ +o-directory+ +o-cloexec+ #o400000) :int))) ; O_NOFOLLOW
+              (when (and (minusp next) (= (errno) +enoent+))
+                (cffi:foreign-funcall "mkdirat" :int fd :string part :unsigned-int #o700 :int)
+                (setf next (cffi:foreign-funcall "openat" :int fd :string part
+                             :int (logior +o-path+ +o-directory+ +o-cloexec+ #o400000) :int)))
+              (when (minusp next)
+                (setup-error :render-credential-file :errno (errno) :detail destination))
+              (%close fd)
+              (setf fd next)))
+          (values fd (car (last parts))))
+      (error (condition) (%close fd) (error condition)))))
+
+(defun write-credential-output (destination text)
+  "Create one new 0600 file, retaining its parent descriptor for safe cleanup."
+  (multiple-value-bind (directory basename) (open-output-directory destination)
+    (let ((fd nil) (pinned nil) (created nil) (completed nil))
+      (unwind-protect
+           (progn
+             (setf fd (cffi:foreign-funcall "openat" :int directory :string basename
+                        :int (logior +o-wronly+ +o-create+ +o-cloexec+ #o200 #o400000)
+                        :unsigned-int #o600 :int)) ; O_EXCL | O_NOFOLLOW
+             (when (minusp fd)
+               (setup-error :render-credential-file :errno (errno)
+                            :detail (format nil "~A must be a new file, not an existing file or symlink"
+                                            destination)))
+             (setf created t
+                   pinned (cffi:foreign-funcall "fcntl" :int fd :int 1030 :int 3 :int)) ; F_DUPFD_CLOEXEC
+             (when (minusp pinned)
+               (setup-error :render-credential-file :errno (errno)))
+             (with-open-stream (stream (sb-sys:make-fd-stream fd :output t
+                                       :element-type 'character :external-format :utf-8))
+               (setf fd nil) ; stream owns it now
+               (write-string text stream))
+             (setf completed t)
+             (make-rendered-credential :path destination :file-fd pinned
+                                       :directory-fd directory :basename basename))
+        (when (and fd (>= fd 0)) (%close fd))
+        (unless completed
+          (when (and pinned (>= pinned 0)) (%close pinned))
+          (when created
+            (cffi:foreign-funcall "unlinkat" :int directory :string basename :int 0 :int))
+          (%close directory))))))
+
 (defun render-credential-file (request token)
   "Write REQUEST's file, with TOKEN in place of the placeholder.
-Answers the path written, for the plan to grant and the run to clean up."
+Answer the pinned file and parent descriptors for registration and cleanup."
   (let* ((template (credential-request-template request))
          (destination (credential-request-file request))
          (text (handler-case
@@ -626,23 +627,20 @@ Answers the path written, for the plan to grant and the run to clean up."
                                (write-string token out)
                                (setf start (+ found (length +token-placeholder+)))
                             finally (write-string text out :start start)))))
-      (ensure-directories-exist destination)
-      (handler-case
-          (with-open-file (stream destination :direction :output
-                                              :if-exists :supersede
-                                              :external-format :utf-8)
-            (write-string rendered stream))
-        (error (condition)
-          (setup-error :render-credential-file
-                       :detail (format nil "~A: ~A" destination condition))))
-      (sb-posix:chmod destination #o600)
-      destination)))
+      (write-credential-output destination rendered))))
 
-(defun remove-credential-files (paths)
-  "Delete what was rendered for this run.  Failure here is not worth an error:
-the file holds a token that has just been revoked."
-  (dolist (path paths)
-    (ignore-errors (delete-file path))))
+(defun remove-credential-files (files)
+  "Unlink relative to the pinned parent, even if a sandbox renamed an ancestor."
+  (dolist (file files)
+    (let ((fd (rendered-credential-directory-fd file)))
+      (when fd
+        (unwind-protect
+             (cffi:foreign-funcall "unlinkat" :int fd
+                                   :string (rendered-credential-basename file) :int 0 :int)
+          (%close fd)
+          (%close (rendered-credential-file-fd file))
+          (setf (rendered-credential-directory-fd file) nil
+                (rendered-credential-file-fd file) nil))))))
 
 (defun credential-seconds (request plan)
   "How long REQUEST's token should live.
@@ -674,8 +672,7 @@ tokens are revoked."
         (written '()))
     (if (and (null credentials) (null brokered))
         (funcall function plan)
-        (let* ((broker (start-broker (launch-plan-broker plan) :program program
-                                     :minting (and credentials t)))
+        (let* ((broker (start-broker (launch-plan-broker plan) :program program))
                (*broker* broker)
                (*run-identity* (new-run-identity))
                (*run-started* (rfc3339-now)))
@@ -691,11 +688,12 @@ tokens are revoked."
                       ;; may ask for both, and some need only the file.
                       (rendered (loop for (request . token) in minted
                                       when (credential-request-file request)
-                                        collect (render-credential-file request token)))
+                                        collect (let ((file (render-credential-file request token)))
+                                                  (push file written)
+                                                  file)))
                       (tokens (loop for (request . token) in minted
                                     for variable = (credential-request-variable request)
                                     when variable collect (cons variable token))))
-                 (setf written rendered)
                  ;; With no credentials there are no tokens, and the certificate is
                  ;; still the point: the sandbox has to trust the broker to speak
                  ;; TLS through it at all.

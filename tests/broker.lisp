@@ -10,20 +10,33 @@
 (in-package #:scute/tests)
 
 (defparameter +broker-proxy-port+ 18810)
-(defparameter +broker-control-port+ 18812)
+(defun broker-test-socket ()
+  (format nil "~A/control.sock" (scratch-pathname "broker-control")))
 
-(defun write-fake-broker (control-port record)
+(defun prepare-broker-test-socket ()
+  (let ((path (broker-test-socket)))
+    (ensure-directories-exist path)
+    (sb-posix:chmod (directory-namestring path) #o700)
+    (delete-scratch path)
+    path))
+
+(defun wait-for-broker-test-socket ()
+  (wait-until (lambda () (call-scute 'broker-answering-p (broker-test-socket))) 100))
+
+(defun write-fake-broker (control-socket record)
   "A script answering the control API KeyFence answers, writing what it saw."
   (let ((path (format nil "~A.py" (scratch-pathname "broker"))))
     (with-open-file (stream path :direction :output :if-exists :supersede)
       (dolist (line (list
-                     "import json,http.server"
+                     "import json,http.server,socketserver"
                      "class H(http.server.BaseHTTPRequestHandler):"
                      "    def log_message(self,*a): pass"
                      "    def do_GET(self):"
                      "        self.send_response(200); self.end_headers()"
                      "        if self.path.startswith('/tokens'):"
                      "            self.wfile.write(b'[]')"
+                     "        elif self.path.startswith('/ca'):"
+                     "            self.wfile.write(b'-----BEGIN CERTIFICATE-----\\nfixture\\n-----END CERTIFICATE-----\\n')"
                      "        elif self.path.startswith('/credentials'):"
                      "            self.wfile.write(b'{\"credentials\":[]}')"
                      "        else:"
@@ -42,16 +55,16 @@
                      (format nil "        open(~S,'a').write(json.dumps({'revoked':self.path})+chr(10))"
                              record)
                      "        self.send_response(204); self.end_headers()"
-                     (format nil "http.server.HTTPServer(('127.0.0.1',~D),H).serve_forever()"
-                             control-port)))
+                     "class Server(socketserver.UnixStreamServer): allow_reuse_address=True"
+                     (format nil "Server(~S,H).serve_forever()" control-socket)))
         (write-line line stream)))
     path))
 
 (defun start-fake-broker (record)
-  (let ((script (write-fake-broker +broker-control-port+ record)))
+  (let ((script (write-fake-broker (prepare-broker-test-socket) record)))
     (let ((helper (call-scute 'start-helper-arguments
                               (list "/usr/bin/python3" script))))
-      (unless (call-scute 'wait-for-port +broker-control-port+ 10)
+      (unless (wait-for-broker-test-socket)
         (call-scute 'stop-helper helper)
         (error "the stand-in broker never answered"))
       helper)))
@@ -60,10 +73,10 @@
   (format nil "~
 [filesystem]~%read-execute = [\"/usr\"]~%read = [\"/etc\"]~%~%~
 [network]~%mode = \"host\"~%proxy = \"http://127.0.0.1:~D\"~%~%~
-[credentials]~%broker = \"keyfence\"~%control-port = ~D~%~%~
+[credentials]~%broker = \"keyfence\"~%control-socket = ~S~%~%~
 [credentials.anthropic]~%secret-file = ~S~%destinations = [\"api.anthropic.com\"]~%~
 env = \"ANTHROPIC_API_KEY\"~%"
-          +broker-proxy-port+ +broker-control-port+
+          +broker-proxy-port+ (broker-test-socket)
           (format nil "~A.secret" (scratch-pathname "broker"))))
 
 (deftest test-a-policy-says-which-credential-the-sandbox-never-holds
@@ -87,8 +100,8 @@ dry run has to show both without reading anything."
                "the token would not be locked to the destination the policy named"))
       (check (= +broker-proxy-port+ (call-scute 'broker-settings-proxy-port broker))
              "the broker would not listen where the proxy is")
-      (check (= +broker-control-port+ (call-scute 'broker-settings-control-port broker))
-             "the control port was not read from the policy"))))
+      (check (equal (broker-test-socket) (call-scute 'broker-settings-control-socket broker))
+             "the control socket was not read from the policy"))))
 
 (deftest test-credentials-need-a-proxy-to-be-swapped-behind
   "A swap nothing routes through is not containment.  A policy asking for
@@ -148,14 +161,16 @@ the broker gets it, and what the sandbox is handed is the token."
                    (check (find-if (lambda (line) (search "revoked" line)) lines)
                           "the token outlived the run that minted it"))))
           (when helper (call-scute 'stop-helper helper))
+          (delete-scratch (broker-test-socket))
+          (ignore-errors (sb-posix:rmdir (directory-namestring (broker-test-socket))))
           (delete-scratch record secret-file)))))
 
-(defun write-healthy-stranger (port)
+(defun write-healthy-stranger (socket)
   "Something that is not a broker, answering 200 on /health as many things do."
   (let ((path (format nil "~A.py" (scratch-pathname "stranger"))))
     (with-open-file (stream path :direction :output :if-exists :supersede)
       (dolist (line (list
-                     "import http.server"
+                     "import http.server,socketserver"
                      "class H(http.server.BaseHTTPRequestHandler):"
                      "    def log_message(self,*a): pass"
                      "    def do_GET(self):"
@@ -168,8 +183,7 @@ the broker gets it, and what the sandbox is handed is the token."
                      (format nil "        open(~S,'a').write(self.rfile.read(int(self.headers['Content-Length'])).decode())"
                              (format nil "~A.received" (scratch-pathname "stranger")))
                      "        self.send_response(200); self.end_headers()"
-                     (format nil "http.server.HTTPServer(('127.0.0.1',~D),H).serve_forever()"
-                             port)))
+                     (format nil "socketserver.UnixStreamServer(~S,H).serve_forever()" socket)))
         (write-line line stream)))
     path))
 
@@ -191,8 +205,8 @@ port that cannot answer a broker's control API gets nothing."
                (setf helper (call-scute 'start-helper-arguments
                                         (list "/usr/bin/python3"
                                               (write-healthy-stranger
-                                               +broker-control-port+))))
-               (check (call-scute 'wait-for-port +broker-control-port+ 10)
+                                               (prepare-broker-test-socket)))))
+               (check (wait-for-broker-test-socket)
                       "the stand-in stranger never answered")
                (let* ((policy (call-scute 'validate-sandbox-policy
                                           (call-scute 'parse-policy-text
@@ -209,16 +223,18 @@ port that cannot answer a broker's control API gets nothing."
                  (check (not (probe-file received))
                         "the credential was posted to something that is not a broker")))
           (when helper (call-scute 'stop-helper helper))
+          (delete-scratch (broker-test-socket))
+          (ignore-errors (sb-posix:rmdir (directory-namestring (broker-test-socket))))
           (delete-scratch received secret-file)))))
 
 (defun referencing-policy-text ()
   (format nil "~
 [filesystem]~%read-execute = [\"/usr\"]~%read = [\"/etc\"]~%~%~
 [network]~%mode = \"host\"~%proxy = \"http://127.0.0.1:~D\"~%~%~
-[credentials]~%control-port = ~D~%~%~
+[credentials]~%control-socket = ~S~%~%~
 [credentials.anthropic]~%ref = \"anthropic\"~%destinations = [\"api.anthropic.com\"]~%~
 env = \"ANTHROPIC_API_KEY\"~%"
-          +broker-proxy-port+ +broker-control-port+))
+          +broker-proxy-port+ (broker-test-socket)))
 
 (deftest test-a-referenced-credential-is-never-read-by-scute
   "The broker already holds the secret, so Scute names it instead of reading it:
@@ -251,6 +267,8 @@ through this process at all."
                                  (call-scute 'launch-plan-environment seen))
                         "the sandbox was not given a token")))
           (when helper (call-scute 'stop-helper helper))
+          (delete-scratch (broker-test-socket))
+          (ignore-errors (sb-posix:rmdir (directory-namestring (broker-test-socket))))
           (delete-scratch record)))))
 
 (deftest test-a-credential-needs-a-secret-file-or-a-ref-and-not-both
@@ -307,6 +325,8 @@ fact about the host and does not."
                    (check (search "anthropic" said)
                           "the report does not name the credential: ~S" said))))
           (when helper (call-scute 'stop-helper helper))
+          (delete-scratch (broker-test-socket))
+          (ignore-errors (sb-posix:rmdir (directory-namestring (broker-test-socket))))
           (delete-scratch record)))))
 
 (deftest test-json-object-list-splits-without-parsing
@@ -381,13 +401,13 @@ refused during the run without being able to tie it to anything."
 ;;; ordinary runs fail wherever this process could not read the key -- a refusal for
 ;;; the sake of a secret nobody was sending.
 
-(defun write-keyless-broker (port)
+(defun write-keyless-broker (socket)
   "A broker that answers /ca to anyone and demands a key for its token API, which
 is what KeyFence does: a CA certificate is public by definition."
   (let ((path (format nil "~A.py" (scratch-pathname "keyless"))))
     (with-open-file (stream path :direction :output :if-exists :supersede)
       (dolist (line (list
-                     "import http.server"
+                     "import http.server,socketserver"
                      "class H(http.server.BaseHTTPRequestHandler):"
                      "    def log_message(self,*a): pass"
                      "    def do_GET(self):"
@@ -400,9 +420,9 @@ is what KeyFence does: a CA certificate is public by definition."
                      "            self.send_response(200); self.end_headers()"
                      "            self.wfile.write(b'{\"status\":\"ok\"}')"
                      "        else:"
-                     "            self.send_error(401)"
-                     (format nil "http.server.HTTPServer(('127.0.0.1',~D),H).serve_forever()"
-                             port)))
+                     "            self.send_response(200); self.end_headers()"
+                     "            self.wfile.write(b'[]')"
+                     (format nil "socketserver.UnixStreamServer(~S,H).serve_forever()" socket)))
         (write-line line stream)))
     path))
 
@@ -410,13 +430,14 @@ is what KeyFence does: a CA certificate is public by definition."
   (if (plusp (cffi:foreign-funcall "system" :string
                                   "command -v python3 >/dev/null 2>&1" :int))
       (format *error-output* "~&SKIP: no python3 to stand in for a broker~%")
-      (let ((helper nil))
+      (let ((helper nil)
+            (scute::*broker-control-socket* (broker-test-socket)))
         (unwind-protect
              (progn
                (setf helper (call-scute 'start-helper-arguments
                                         (list "/usr/bin/python3"
-                                              (write-keyless-broker +broker-control-port+))))
-               (check (call-scute 'wait-for-port +broker-control-port+ 10)
+                                              (write-keyless-broker (prepare-broker-test-socket)))))
+               (check (wait-for-broker-test-socket)
                       "the stand-in broker never answered")
                ;; A policy with a proxy and no [credentials] table: the default
                ;; network, written out so the test does not depend on the default.
@@ -440,7 +461,9 @@ is what KeyFence does: a CA certificate is public by definition."
                                         (string= "SSL_CERT_FILE=" entry :end2 14)))
                                  (call-scute 'launch-plan-environment given))
                         "the sandbox was given no CA certificate to trust")))
-          (when helper (call-scute 'stop-helper helper))))))
+          (when helper (call-scute 'stop-helper helper))
+          (delete-scratch (broker-test-socket))
+          (ignore-errors (sb-posix:rmdir (directory-namestring (broker-test-socket))))))))
 
 (deftest test-credentials-need-no-proxy-named-now-that-one-is-the-default
   "A policy asking for a credential is already routed through the broker, so
@@ -539,7 +562,7 @@ destinations = [\"api.example.test\"]~%file = \"~A\"~%template = \"~A\"~%"
                                       (call-scute 'parse-policy-text text)))
                   (request (first (call-scute 'sandbox-policy-credentials policy)))
                   (written (call-scute 'render-credential-file request "kf_written")))
-             (let ((contents (read-file-string written)))
+             (let ((contents (read-file-string (call-scute 'rendered-credential-path written))))
                (check (search "head.body.kf_written" contents)
                       "the token is not where the template put it: ~S" contents)
                (check (not (search "${token}" contents))
@@ -547,8 +570,9 @@ destinations = [\"api.example.test\"]~%file = \"~A\"~%template = \"~A\"~%"
                (check (search "\"refresh_token\": \"none\"" contents)
                       "the rest of the template was lost: ~S" contents))
              ;; Nobody else's business, even though what it holds is only a token.
-             (check (= #o600 (logand #o777 (sb-posix:stat-mode (sb-posix:stat written))))
-                    "the rendered file is readable by others")))
+             (check (= #o600 (logand #o777 (sb-posix:stat-mode (sb-posix:stat (call-scute 'rendered-credential-path written)))))
+                    "the rendered file is readable by others")
+             (call-scute 'remove-credential-files (list written))))
       (delete-scratch template destination))))
 
 (deftest test-a-template-with-nowhere-for-the-token-is-refused
@@ -574,3 +598,124 @@ destinations = [\"api.example.test\"]~%file = \"~A\"~%template = \"~A\"~%"
              (check (not (probe-file destination))
                     "a file was written for a template that could not work")))
       (delete-scratch template destination))))
+
+(deftest test-security-credential-output-never-follows-symlinks
+  (let* ((directory (format nil "~A/" (scratch-pathname "safe-render")))
+         (template (concatenate 'string directory "template"))
+         (victim (concatenate 'string directory "victim"))
+         (link (concatenate 'string directory "link")))
+    (ensure-directories-exist template)
+    (unwind-protect
+         (progn
+           (with-open-file (out template :direction :output :if-exists :supersede)
+             (write-string "changed ${token}" out))
+           (with-open-file (out victim :direction :output :if-exists :supersede)
+             (write-string "original" out))
+           (sb-posix:symlink victim link)
+           (dolist (destination (list link victim))
+             (let* ((request (call-scute 'make-credential-request "x" nil '("example.test")
+                                         nil nil "ref" destination template))
+                    (refusal (nth-value 1 (ignore-errors
+                                           (call-scute 'render-credential-file request "dummy")))))
+               (check refusal "credential output replaced existing path ~A" destination)
+               (check (equal "original" (read-file-string victim))
+                      "credential output overwrote the host file")))
+           (delete-file link)
+           (sb-posix:symlink directory link)
+           (let* ((destination (concatenate 'string link "/new-file"))
+                  (request (call-scute 'make-credential-request "x" nil '("example.test")
+                                      nil nil "ref" destination template)))
+             (check (nth-value 1 (ignore-errors
+                                  (call-scute 'render-credential-file request "dummy")))
+                    "credential output followed a symlink ancestor")))
+      (delete-scratch link victim template (concatenate 'string directory "new-file"))
+      (ignore-errors (sb-posix:rmdir directory)))))
+
+(deftest test-security-control-never-falls-back-to-tcp
+  (let* ((name (find-symbol "LOOPBACK-REQUEST" :scute))
+         (original (symbol-function name))
+         (sent nil)
+         (settings (call-scute 'make-broker-settings :keyfence 18810 "/tmp/scute-no-control-393fd9.sock"))
+         (broker (call-scute '%make-broker settings nil nil)))
+    (unwind-protect
+         (progn
+           (setf (symbol-function name)
+                 (lambda (&rest arguments)
+                   (declare (ignore arguments))
+                   (setf sent t)
+                   (call-scute '%make-http-response 200 "[]")))
+           (check (nth-value 1 (ignore-errors
+                                (call-scute 'control-request broker "POST" "/tokens"
+                                            :body "dummy-secret")))
+                  "missing Unix control did not refuse the request")
+           (check (not sent) "control secrets were sent over unauthenticated TCP"))
+      (setf (symbol-function name) original))))
+
+(deftest test-security-broker-rejects-another-users-peer
+  (check (nth-value 1 (ignore-errors
+                       (call-scute 'require-broker-peer-uid (1+ (sb-posix:geteuid)))))
+         "a different user's broker peer was accepted")
+  (check (call-scute 'require-broker-peer-uid (sb-posix:geteuid))
+         "our broker peer was refused"))
+
+(deftest test-security-credential-cleanup-keeps-the-pinned-directory
+  (let* ((root (format nil "~A/" (scratch-pathname "pinned-cleanup")))
+         (parent (concatenate 'string root "original/"))
+         (moved (concatenate 'string root "moved/"))
+         (destination (concatenate 'string parent "token"))
+         (file nil))
+    (unwind-protect
+         (progn
+           (setf file (call-scute 'write-credential-output destination "dummy"))
+           (sb-posix:rename parent moved)
+           (ensure-directories-exist destination)
+           (with-open-file (out destination :direction :output)
+             (write-string "replacement" out))
+           (call-scute 'remove-credential-files (list file))
+           (check (not (probe-file (concatenate 'string moved "token")))
+                  "cleanup left the original token behind")
+           (check (equal "replacement" (read-file-string destination))
+                  "cleanup deleted a replacement directory's file"))
+      (when file (call-scute 'remove-credential-files (list file)))
+      (delete-scratch destination (concatenate 'string moved "token"))
+      (dolist (path (list parent moved root)) (ignore-errors (sb-posix:rmdir path))))))
+
+(deftest test-security-unix-peer-credentials-come-from-the-kernel
+  (cffi:with-foreign-object (pair :int 2)
+    (check (zerop (cffi:foreign-funcall "socketpair" :int 1 :int 1 :int 0 :pointer pair :int))
+           "could not create a local socket pair")
+    (let ((socket (make-instance 'sb-bsd-sockets:local-socket :type :stream
+                                :descriptor (cffi:mem-aref pair :int 0))))
+      (unwind-protect
+           (check (call-scute 'authenticate-broker-socket socket)
+                  "a kernel-authenticated peer with our uid was refused")
+        (sb-bsd-sockets:socket-close socket)
+        (sb-posix:close (cffi:mem-aref pair :int 1))))))
+
+(deftest test-security-control-port-policies-require-migration
+  (check (typep (nth-value 1 (ignore-errors
+                              (call-scute 'validate-sandbox-policy
+                                          (call-scute 'parse-policy-text
+                                            (format nil "[filesystem]~%read=[\"/etc\"]~%[credentials]~%control-port=10212~%[credentials.x]~%ref=\"x\"~%env=\"X\"~%destinations=[\"example.test\"]~%")))))
+                'scute:policy-error)
+         "legacy TCP control settings were silently accepted"))
+
+(deftest test-security-credential-read-grant-pins-the-created-file
+  (let* ((root (format nil "~A/" (scratch-pathname "pinned-grant")))
+         (destination (concatenate 'string root "token"))
+         (moved (concatenate 'string root "moved"))
+         (victim (concatenate 'string root "victim"))
+         (file nil))
+    (ensure-directories-exist destination)
+    (unwind-protect
+         (progn
+           (setf file (call-scute 'write-credential-output destination "dummy-token"))
+           (sb-posix:rename destination moved)
+           (with-open-file (out victim :direction :output) (write-string "host-secret" out))
+           (sb-posix:symlink victim destination)
+           (check (equal "dummy-token"
+                         (read-file-string (call-scute 'rendered-credential-rule-path file)))
+                  "replacing token pathname redirected the read grant"))
+      (when file (call-scute 'remove-credential-files (list file)))
+      (delete-scratch destination moved victim)
+      (ignore-errors (sb-posix:rmdir root)))))

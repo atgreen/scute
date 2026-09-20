@@ -123,3 +123,15 @@ ran the tests."
     (format stream "~D~%" *ran*))
   (format t "~D Scute test~:P passed.~%" *ran*)
   t)
+
+(defun unix-isolation-available-or-refused-p ()
+  "On older kernels, prove the launch fails closed instead of skipping the check."
+  (if (>= (or (call-scute 'landlock-abi-version) 0) 9)
+      t
+      (let ((refusal (nth-value 1 (ignore-errors
+                                   (call-scute 'acquire-launch-resources
+                                               (call-scute 'compile-command-launch-plan '("/bin/true") nil)
+                                               :observe :learn)))))
+        (check (and refusal (search "landlock-unix" (string-downcase (princ-to-string refusal))))
+               "older kernel did not refuse Unix-enabled learning safely: ~S" refusal)
+        nil)))

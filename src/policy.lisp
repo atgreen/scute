@@ -266,10 +266,10 @@ and the refusal messages all see the path the policy meant."
   (template nil :read-only t))     ; what to write there, with ${token} in it
 
 (defstruct (broker-settings (:constructor make-broker-settings
-                                (name proxy-port control-port)))
+                                (name proxy-port control-socket)))
   (name nil :read-only t)          ; :keyfence is the only one v0 knows
   (proxy-port nil :read-only t)
-  (control-port nil :read-only t))
+  (control-socket nil :read-only t))
 
 (defstruct (resource-limits (:constructor make-resource-limits
                                 (&key memory processes cpu-percent wall-clock)))
@@ -654,9 +654,15 @@ goes double for a policy Scute ships: /home/green is nobody else's path."
          (let ((ttl (entry "ttl"))) (when ttl (parse-duration ttl pathname)))
          reference file template)))))
 
-(defparameter +default-control-port-offset+ 2
-  "How far the broker's control API sits from its proxy port, by its own default
-layout: KeyFence proxies on 10210 and answers control requests on 10212.")
+(defvar *broker-control-socket* nil
+  "Optional embedding override for the local broker control socket.")
+
+(defun default-broker-control-socket ()
+  (or *broker-control-socket*
+      (format nil "~A/keyfence/control.sock"
+              (string-right-trim "/"
+                (or (sb-posix:getenv "XDG_RUNTIME_DIR")
+                    (format nil "/run/user/~D" (sb-posix:geteuid)))))))
 
 (defun validate-credentials (value proxy-port pathname)
   "The [credentials] table: which broker to run, and what it holds for us.
@@ -664,7 +670,10 @@ Answers the broker settings and the credentials it will be asked for."
   (let ((entries (table-entries value "credentials" pathname)))
     (let ((scalars (remove-if #'consp entries :key #'cdr))
           (tables (remove-if-not #'consp entries :key #'cdr)))
-      (check-known-keys scalars '("broker" "control-port") "[credentials]" pathname)
+      (when (assoc "control-port" scalars :test #'string=)
+        (policy-error "control-port is no longer safe; use control-socket with a KeyFence Unix control listener"
+                      pathname))
+      (check-known-keys scalars '("broker" "control-socket") "[credentials]" pathname)
       (let* ((broker (let ((named (assoc "broker" scalars :test #'string=)))
                        ;; Naming one is optional: there is one broker, and a
                        ;; policy that asks for credentials has already said the
@@ -679,15 +688,12 @@ Answers the broker settings and the credentials it will be asked for."
                                      \"keyfence\""
                                 broker)
                         pathname)))
-             (control (or (cdr (assoc "control-port" scalars :test #'string=))
-                          (+ proxy-port +default-control-port-offset+))))
-        (unless (and (integerp control) (< 0 control 65536))
-          (policy-error "control-port is a TCP port number" pathname))
-        (when (= control proxy-port)
-          (policy-error "the broker's control port cannot be its proxy port: the ~
-                         sandbox may reach the proxy, and the control port is ~
-                         where credentials are handed over"
-                        pathname))
+             (control (let ((named (assoc "control-socket" scalars :test #'string=)))
+                        (if named
+                            (expand-home (scalar-string (cdr named) "control-socket" pathname))
+                            (default-broker-control-socket)))))
+        (unless (uiop:absolute-pathname-p control)
+          (policy-error "control-socket must be an absolute pathname" pathname))
         (unless tables
           (policy-error "[credentials] names a broker but no credentials; add a ~
                          [credentials.NAME] table saying what it should hold"
@@ -967,7 +973,7 @@ is a sandbox the operator half asked for."
                          (let ((port (proxy-url-port proxy pathname)))
                            (make-broker-settings
                             :keyfence port
-                            (+ port +default-control-port-offset+))))))
+                            (default-broker-control-socket))))))
          :credentials (when (table "credentials")
                         (nth-value 1 (validate-credentials
                                       (table "credentials")
@@ -1103,7 +1109,15 @@ nothing here touches the kernel."
   (setf command (append (sandbox-policy-command policy) command))
   (unless (and (listp command) command (every #'stringp command))
     (usage-error "the command must be a non-empty list of strings"))
-  (let ((directory (canonical-directory directory)))
+  (let* ((directory (canonical-directory directory))
+         (rules (remove nil
+                        (mapcar (lambda (rule)
+                                  (resolve-rule rule directory
+                                                (sandbox-policy-pathname policy)))
+                                (sandbox-policy-filesystem policy)))))
+    (when (and (sandbox-policy-filesystem policy) (null rules))
+      (policy-error "no filesystem grants remain after resolving optional paths"
+                    (sandbox-policy-pathname policy)))
     (%make-launch-plan
      :command (cons (resolve-executable (first command) directory) (rest command))
      :directory directory
@@ -1132,11 +1146,7 @@ nothing here touches the kernel."
                                       (format nil "https_proxy=~A" proxy)
                                       (format nil "http_proxy=~A" proxy)))
                         kept))
-     :filesystem (remove nil
-                         (mapcar (lambda (rule)
-                                   (resolve-rule rule directory
-                                                 (sandbox-policy-pathname policy)))
-                                 (sandbox-policy-filesystem policy)))
+     :filesystem rules
      :sources (sandbox-policy-sources policy)
      :absent (loop for rule in (sandbox-policy-filesystem policy)
                    when (and (filesystem-rule-optional rule)
@@ -1332,10 +1342,10 @@ compiles being a plan that runs."
             (credential-request-destinations request)))
   (let ((broker (launch-plan-broker plan)))
     (when broker
-      (format stream "broker       ~(~A~), proxy on ~D, control on ~D~%"
+      (format stream "broker       ~(~A~), proxy on ~D, control at ~A~%"
               (broker-settings-name broker)
               (broker-settings-proxy-port broker)
-              (broker-settings-control-port broker))))
+              (broker-settings-control-socket broker))))
   ;; Names only.  The values are the caller's own, but a plan is the sort of
   ;; thing that ends up in a log.
   (format stream "environment  ~:[nothing~;~:*~{~A~^ ~}~]~%"

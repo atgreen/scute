@@ -74,13 +74,12 @@ register, and the programs that use it also use openat.  Not stat and its
 relatives: Landlock does not govern them, so a policy has nothing to say about
 them.")
 
-(defun learn-seccomp-filter ()
+(defun learn-seccomp-filter (&key unix-sockets (ipv6 t))
   "The v0 denylist, plus a notification for every syscall worth watching.
 
 One filter rather than two stacked ones: a command's own syscalls should meet
-the same refusals during a learning run as during a real one -- except for
-unix-domain sockets, which are watched rather than refused, because a learning
-run that refused them would teach nothing about a command that needs one."
+the same refusals during a learning run as during a real one. UNIX-SOCKETS is
+enabled explicitly for permissive policy learning; audit and explanation pass the policy permission unchanged."
   (ensure-libseccomp)
   (let ((context (cffi:foreign-funcall "seccomp_init"
                                        :uint32 +scmp-act-allow+ :pointer)))
@@ -96,17 +95,25 @@ run that refused them would teach nothing about a command that needs one."
                  (cffi:foreign-funcall "seccomp_rule_add" :pointer context
                                        :uint32 refuse :int number
                                        :unsigned-int 0 :int))))
-           (setf watched watched)          ; keep the binding obvious
+           (unless unix-sockets (deny-unix-domain-sockets context))
+           (unless ipv6 (deny-ipv6-sockets context))
            (deny-nested-user-namespaces context)
            (dolist (syscall +watched-syscalls+)
              (let ((number (cffi:foreign-funcall "seccomp_syscall_resolve_name"
                                                  :string (watched-syscall-name syscall)
                                                  :int)))
                (unless (<= number +scmp-error+)
-                 (when (zerop (cffi:foreign-funcall "seccomp_rule_add"
-                                                    :pointer context
-                                                    :uint32 +scmp-act-notify+
-                                                    :int number :unsigned-int 0 :int))
+                 ;; A catch-all socket notification would replace its conditional
+                 ;; denials in libseccomp. Only Unix sockets are worth recording,
+                 ;; and only when this run actually permits them.
+                 (when (if (eq :unix-socket (watched-syscall-access syscall))
+                           (and unix-sockets
+                                (add-masked-argument-rule context +scmp-act-notify+
+                                                          "socket" 0 #xffffffff +af-unix+))
+                           (zerop (cffi:foreign-funcall "seccomp_rule_add"
+                                                       :pointer context
+                                                       :uint32 +scmp-act-notify+
+                                                       :int number :unsigned-int 0 :int)))
                    (push (cons number syscall) watched)))))
            (multiple-value-bind (program instructions) (export-filter-program context)
              (declare (ignore instructions))

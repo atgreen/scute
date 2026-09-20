@@ -165,9 +165,10 @@ int main(void) {
       (delete-scratch source))))
 
 (deftest test-unix-domain-sockets-may-be-allowed
-  "The refusal is the default, not the only option: an interactive shell wants an
-ssh-agent, and a policy that says so should get one.  Everything else about the
-sandbox is unchanged."
+  "The refusal is the default, not the only option: sandbox IPC can create Unix
+sockets when a policy says so. Host pathname sockets stay isolated by Landlock."
+  (unless (unix-isolation-available-or-refused-p)
+    (return-from test-unix-domain-sockets-may-be-allowed nil))
   (let ((program (compile-unix-socket-probe)))
     (if (null program)
         (format *error-output* "~&SKIP: no working gcc, so the flag is untested~%")
@@ -198,6 +199,8 @@ read-execute = [\"/\"]"))))
 (deftest test-learning-notices-a-wanted-socket
   "Learning has to see what a command wants, so a unix socket is watched rather
 than refused during a learning run, and the policy it writes says so."
+  (unless (unix-isolation-available-or-refused-p)
+    (return-from test-learning-notices-a-wanted-socket nil))
   (let ((program (compile-unix-socket-probe)))
     (if (null program)
         (format *error-output* "~&SKIP: no working gcc, so learning sockets is untested~%")
@@ -205,7 +208,7 @@ than refused during a learning run, and the policy it writes says so."
              (multiple-value-bind (result observations)
                  (call-scute 'run-launch-plan
                              (call-scute 'compile-command-launch-plan (list program) '())
-                             :observe t)
+                             :observe :learn)
                (check (eql 0 (call-scute 'sandbox-result-exit-code result))
                       "a learning run refused the socket it was meant to watch: ~S"
                       result)
@@ -263,3 +266,74 @@ int main(void) {
                          socketpair was broken with it: ~S"
                         result))))
       (delete-scratch source program))))
+
+(defun filter-verdict (program syscall &optional (argument 0))
+  "Interpret the actual classic BPF filter without installing it in the runner.
+Only the instructions emitted by libseccomp are accepted; unknown code fails."
+  (let ((instructions (cffi:mem-ref program :pointer 8))
+        (count (cffi:mem-ref program :uint16 0))
+        (accumulator 0) (pc 0))
+    (loop repeat (* 2 count)
+          while (< pc count)
+          for offset = (* pc 8)
+          for code = (cffi:mem-ref instructions :uint16 offset)
+          for yes = (cffi:mem-ref instructions :uint8 (+ offset 2))
+          for no = (cffi:mem-ref instructions :uint8 (+ offset 3))
+          for value = (cffi:mem-ref instructions :uint32 (+ offset 4))
+          do (incf pc)
+             (case code
+               (#x20 (setf accumulator
+                           (case value
+                             (0 syscall) (4 #xc000003e) ; AUDIT_ARCH_X86_64
+                             (16 (ldb (byte 32 0) argument))
+                             (20 (ldb (byte 32 32) argument))
+                             (t 0))))
+               (#x54 (setf accumulator (logand accumulator value)))
+               (#x15 (incf pc (if (= accumulator value) yes no)))
+               (#x25 (incf pc (if (> accumulator value) yes no)))
+               (#x35 (incf pc (if (>= accumulator value) yes no)))
+               (#x45 (incf pc (if (logtest accumulator value) yes no)))
+               (#x05 (incf pc value))
+               (#x06 (return-from filter-verdict value))
+               (t (error "unsupported BPF opcode ~X" code))))
+    (error "filter did not return a verdict")))
+
+(deftest test-security-guarded-filters-deny-ipv6
+  (let* ((filter (call-scute 'v0-seccomp-filter :ipv6 nil))
+         (program (call-scute 'seccomp-filter-program filter)))
+    (check (= #x50001 (filter-verdict program 41 10))
+           "guarded egress permits socket(AF_INET6)")
+    (check (= #x7fff0000 (filter-verdict program 41 2))
+           "guarded egress broke IPv4 sockets")
+    (check (= #x7fff0000 (filter-verdict
+                         (call-scute 'seccomp-filter-program
+                                     (call-scute 'v0-seccomp-filter :ipv6 t)) 41 10))
+           "unguarded host networking lost IPv6")))
+
+(deftest test-security-observation-keeps-socket-denials
+  (let ((program (call-scute 'learn-seccomp-filter :unix-sockets nil :ipv6 nil)))
+    (check (= #x50001 (filter-verdict program 41 1))
+           "observing a policy permits Unix sockets")
+    (check (= #x50001 (filter-verdict program 41 10))
+           "observing guarded egress permits IPv6")
+    (check (= #x7fff0000 (filter-verdict program 41 2))
+           "observation broke IPv4 sockets"))
+  (let ((program (call-scute 'learn-seccomp-filter :unix-sockets t)))
+    (check (= #x7fc00000 (filter-verdict program 41 1))
+           "explicit policy learning no longer observes Unix sockets")))
+
+(deftest test-security-launch-resources-preserve-socket-policy
+  ;; Exercise the actual filter selection without creating a nested namespace.
+  (dolist (observe (if (unix-isolation-available-or-refused-p) '(nil t :learn) '(nil t)))
+    (let* ((plan (call-scute 'revised-launch-plan
+                            (call-scute 'compile-command-launch-plan '("/bin/true") nil)
+                            :network :proxied))
+           (resources (call-scute 'acquire-launch-resources plan :observe observe)))
+      (unwind-protect
+           (let ((program (call-scute 'launch-resources-seccomp-program resources)))
+             (check (= #x50001 (filter-verdict program 41 10))
+                    "launch selection allows IPv6 with observation ~S" observe)
+             (check (= (if (eq observe :learn) #x7fc00000 #x50001)
+                       (filter-verdict program 41 1))
+                    "launch selection changes Unix policy with observation ~S" observe))
+        (call-scute 'release-launch-resources resources)))))

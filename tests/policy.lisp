@@ -950,3 +950,14 @@ refused where the guard cannot be installed."
         (check (member port (call-scute 'sandbox-policy-connect-tcp policy))
                "port ~D is refused before the kernel could redirect it: ~S"
                port (call-scute 'sandbox-policy-connect-tcp policy))))))
+
+(deftest test-security-absent-optional-grants-fail-closed
+  (let* ((text (format nil "[filesystem]~%read = [\"?/scute-missing-optional-393fd9\"]~%[network]~%mode = \"none\"~%"))
+         (policy (call-scute 'validate-sandbox-policy (call-scute 'parse-policy-text text)))
+         (refusal (nth-value 1 (ignore-errors
+                                (call-scute 'compile-launch-plan policy '("/bin/true"))))))
+    (check (typep refusal 'scute:policy-error)
+           "a policy with no remaining grants disabled filesystem confinement: ~S" refusal))
+  (check (null (call-scute 'launch-plan-filesystem
+                           (call-scute 'compile-command-launch-plan '("/bin/true") nil)))
+         "explicit namespaces-only launches must remain available"))

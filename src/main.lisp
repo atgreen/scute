@@ -301,7 +301,7 @@ a policy that does not name one -- which is most of them."
                     :description "Run COMMAND beside the sandbox -- a credential proxy, say")
                    (clingon:make-option
                     :flag :long-name "allow-unix-sockets" :key :allow-unix-sockets
-                    :description "Let the command open unix-domain sockets (an ssh-agent, D-Bus)")
+                    :description "Permit sandbox Unix IPC (requires Landlock ABI 9; host paths stay denied)")
                    (clingon:make-option
                     :string :long-name "timeout" :key :timeout :parameter "DURATION"
                     :description "Stop the command if it runs longer than this, e.g. 30s")
@@ -396,7 +396,7 @@ a policy that does not name one -- which is most of them."
            (run-launch-plan (revised-launch-plan
                              (compile-command-launch-plan command '())
                              :network (if (clingon:getopt cmd :network) :host :keep))
-                            :observe t)
+                            :observe :learn)
          (let ((rules (merge-learned-rules
                        (learned-rules observations (sb-posix:getcwd))
                        existing))

@@ -99,7 +99,7 @@ about the network is routed through it. Run it as a service, which is where
 credentials belong:
 
 ```sh
-systemctl --user enable --now keyfence.socket keyfence-api.socket
+systemctl --user enable --now keyfence.socket keyfence-control.socket
 ```
 
 A policy with `[network] mode = "none"` needs no broker, and is the one
@@ -293,8 +293,9 @@ scute learn --network -- ./deploy.sh          # also record what it connects to
 scute run --policy scute.policy -- make       # then run under it
 ```
 
-Nothing is restricted during a learning run — that is the point. It needs no
-privileges and no cooperation from the command.
+Learning leaves ordinary filesystem access unrestricted while retaining seccomp
+and namespace isolation. It requires Landlock ABI 9 so that it can observe Unix
+sockets created by the command without exposing host pathname sockets.
 
 Two caveats. One run sees one path through a program: a build that downloads on
 a cold cache and not on a warm one teaches you the warm case. And learning
@@ -381,7 +382,7 @@ table, an unknown key, a value of the wrong shape or a duplicate key is an error
 | | `bind-tcp` | array of ports | the only TCP ports it may listen on |
 | | `proxy` | URL | set the proxy variables, and permit only its port (default: KeyFence on 10210, when `mode` is not named or is `"proxied"`) |
 | | `allow` | array of `host:port` | the only addresses it may reach ([needs a privilege](#an-address-allowlist)) |
-| | `unix-sockets` | `true` / `false` | may the command open an AF_UNIX socket (default `false`) |
+| | `unix-sockets` | `true` / `false` | sandbox Unix IPC; requires ABI 9 (default `false`) |
 | `[credentials.NAME]` | `ref` | name | a credential the broker holds, named rather than read |
 | | `secret-file` | path | or a secret scute reads and the sandbox never sees |
 | | `destinations` | array of hosts | where the token it is swapped for is worth anything |
@@ -396,7 +397,8 @@ table, an unknown key, a value of the wrong shape or a duplicate key is an error
 | `[environment.set]` | any name | string | give the sandbox this value, whatever the caller had |
 
 A relative path means what it says from where scute was invoked, and may not
-climb out of it.
+climb out of it. A filesystem policy whose optional paths all disappear is
+refused; an empty resolved grant list never disables filesystem confinement.
 
 ## Commands
 
@@ -420,7 +422,7 @@ Useful flags to `run`:
 | `--timeout 5m` | wall-clock limit, whatever the policy said |
 | `--keep-env NAME` | pass one more environment variable |
 | `--audit FILE` | write the audit trail here rather than to stderr |
-| `--allow-unix-sockets` | permit AF_UNIX sockets |
+| `--allow-unix-sockets` | permit sandbox Unix IPC; requires Landlock ABI 9 |
 | `--namespaces-only` | no filesystem restriction at all |
 | `--with COMMAND` | run COMMAND beside the sandbox while it runs |
 | `--broker-path PATH` | use this credential broker, not the one on `PATH` |
@@ -494,11 +496,16 @@ one per run if no service is listening, which works and is worse — credentials
 belong in a process somebody supervises:
 
 ```sh
-systemctl --user enable --now keyfence.socket keyfence-api.socket
+systemctl --user enable --now keyfence.socket keyfence-control.socket
 ```
 
-A run that asks the broker to hold nothing needs no control key: what it wants is a
-port and the public CA certificate, and neither is a secret.
+Scute uses the broker's Unix control socket at
+`$XDG_RUNTIME_DIR/keyfence/control.sock` (or `/run/user/UID/keyfence/control.sock`).
+Each connection verifies the server's UID with `SO_PEERCRED` before sending data.
+No bearer control key is read or sent, and there is no TCP control fallback.
+A recent KeyFence with Unix control support is required. For a custom instance,
+set `[credentials] control-socket = "/absolute/path/control.sock"`; old
+`control-port` settings are rejected with migration instructions.
 
 ### No network at all
 
@@ -598,11 +605,18 @@ is not done yet.
 QUIC is refused as a side effect, since it is UDP on 443. Clients fall back to
 TCP, which is what you want here — an HTTP proxy cannot terminate QUIC.
 
-`unix-sockets` is separate from all of this, because a network namespace does
-not stop a command reaching `systemd-resolved`, the system bus or an
-`ssh-agent` by socket path. It is refused by default and it is all or nothing:
-Landlock cannot scope a socket path, so there is no way to permit the agent and
-not the bus.
+Guarded egress is IPv4-only: Scute refuses IPv6 sockets whenever a proxy or
+address allowlist is active, including audit and explanation runs. Unguarded
+host networking retains IPv6.
+
+`unix-sockets = true` permits Unix socket creation for sandbox IPC and requires
+Landlock ABI 9. Connections to preexisting host pathname sockets remain denied,
+even when a filesystem rule grants `/`. Sockets created inside the sandbox can
+communicate normally. This applies to learning and unbrokered runs too, protecting
+the same-UID broker control socket from all Scute sandboxes. Host `ssh-agent` and
+D-Bus pathname sockets are no longer exposed by `--allow-unix-sockets`. Older
+kernels refuse Unix-enabled launches; `socketpair` remains available by default.
+Audit and `--explain` preserve the policy's socket permissions.
 
 ### An address allowlist
 
@@ -687,8 +701,9 @@ convention. An agent that ignores it, a subprocess that never read it, or a
 prompt-injected one told to avoid it connects straight out, and a proxy never
 sees the request. Here the kernel refuses that: ordinary HTTPS is gone, because
 naming a proxy permits its port and no other. Nor can the command mint tokens of
-its own — the broker's control port is not the proxy port, so it is refused like
-anything else:
+its own: broker control uses an authenticated Unix socket, and the sandbox
+cannot connect to preexisting host pathname sockets. The old TCP control port
+is not exposed by Scute either:
 
 ```console
 $ scute run --policy agent.policy -- bash -c 'exec 3<>/dev/tcp/127.0.0.1/10212'
@@ -725,10 +740,10 @@ cgroup is needed for.
 
 `scute run --dry-run` prints which file a policy would read before it reads it,
 and `scute doctor` says whether a broker is there to attach to. Attaching means
-handing a broker your plaintext credential, so scute checks what is on the port
-first: a broker is recognised by answering its own control API, not by returning
-200 to a health check, which plenty of things would. Anything else there is an
-error and the secret stays unread.
+handing a broker your plaintext credential. Scute authenticates the connected
+Unix peer using kernel credentials on every request before sending any bytes,
+then checks API compatibility. A different user's listener cannot impersonate
+your broker, and an unavailable Unix endpoint never causes a TCP fallback.
 
 ### A credential the program reads from a file
 
@@ -746,7 +761,11 @@ template = "~/.config/scute/templates/codex-auth.json"
 
 Scute renders the template at launch with `${token}` replaced by the token it
 minted, writes it 0600, grants the sandbox read access to that one file, and
-deletes it when the run ends. `--dry-run` names both files before either exists:
+deletes it when the run ends. The destination must be new: existing files,
+symlinks, and symlink ancestors are refused. Missing parent directories are
+created privately. Scute pins both the created file for its Landlock grant and
+the parent directory for cleanup, so renaming a path cannot redirect either.
+`--dry-run` names both files before either exists:
 
 ```
 credential   chatgpt
@@ -780,13 +799,13 @@ secrets.
 
 ```sh
 sudo dnf install keyfence               # from the repository Install enables
-systemctl --user enable --now keyfence.socket keyfence-api.socket
+systemctl --user enable --now keyfence.socket keyfence-control.socket
 ```
 
-Those are socket units, so systemd holds the ports and starts the broker on the
-first connection: enabled costs nothing until something wants a credential
-swapped. KeyFence's units listen on loopback only, generate a control API key on
-first start where scute looks for it, and run the broker with `NoNewPrivileges`,
+Those are socket units, so systemd holds the proxy listener and private Unix
+control socket and starts the broker on the first connection. The proxy listens
+on loopback; control authorizes the user's Unix peer credentials. The units run
+the broker with `NoNewPrivileges`,
 `ProtectSystem=strict`, an empty capability bounding set and a system call filter
 — the process holding the real credentials should be able to do less than the
 agent it protects, not more.
@@ -928,7 +947,7 @@ scute: the broker refused 1 request:
 | `/dev/null: Permission denied` | Nothing is granted implicitly. Name `/dev/null`, and usually `/proc`. |
 | A binary you just built will not run | `read-write` can hold it; running it needs `read-write-execute`. |
 | `cannot give controllers to children` | Scute needs a cgroup of its own and normally makes one. This means it could not: no systemd user manager in the session, or `SCUTE_NO_OWN_SCOPE=1`. Run it under `systemd-run --user --scope -p Delegate=yes scute run ...`. |
-| `unix_listener: socket: Operation not permitted` | Something wants a unix-domain socket — often a shell's startup files starting an `ssh-agent`. `--allow-unix-sockets`, or `[network] unix-sockets = true`. |
+| `unix_listener: socket: Operation not permitted` | For sandbox IPC, use `--allow-unix-sockets` or `[network] unix-sockets = true` on Landlock ABI 9. Host pathname sockets stay denied. |
 | A learned policy is full of your dotfiles | bash sources `~/.bashrc` non-interactively when stdin is a socket, as under CI. Learn with `< /dev/null`, or `bash --norc`. |
 | A tool cannot find its home or cache | The environment is filtered. `--keep-env JAVA_HOME`, or `[environment] keep = [...]`. |
 | `command not found` for something on your `PATH` | The command must be an absolute path: a sandbox whose command is found by searching `PATH` depends on the environment it inherited. |
@@ -979,7 +998,7 @@ sandbox that has `/proc`. That is one reason to keep secrets out of argv.
 Three more limits worth knowing. A sandboxed command shares your kernel's
 clocks and load, so it can observe more than it can touch. A command that wants
 to create its own unix-domain socket — a language server, a test harness talking
-to a helper — cannot, unless you allow sockets wholesale. And a policy is only
+to a helper — needs `unix-sockets = true` and Landlock ABI 9 for sandbox IPC. And a policy is only
 as good as its narrowest rule: `read-write = ["/"]` is a policy, and it protects
 nothing.
 

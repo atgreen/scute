@@ -113,3 +113,83 @@ path the kernel cannot open, so the root is the one path that keeps its slash."
                             :filesystem '((:read-write-execute "/")))))
     (check (eql 0 (call-scute 'sandbox-result-exit-code result))
            "a sandbox granted the whole filesystem could not read /etc: ~S" result)))
+
+(deftest test-security-unix-isolation-is-independent-of-filesystem-grants
+  ;; Even namespaces-only and learning must isolate the same-uid control socket.
+  (unless (unix-isolation-available-or-refused-p)
+    (return-from test-security-unix-isolation-is-independent-of-filesystem-grants nil))
+  (let ((ruleset (call-scute 'compile-filesystem-ruleset nil "/bin/true"
+                             :isolate-unix t)))
+    (unwind-protect
+         (check (and ruleset (>= ruleset 0)) "Unix isolation was omitted with no filesystem grants")
+      (when ruleset (sb-posix:close ruleset))))
+  (dolist (kind '(:read :read-execute :read-write :read-write-execute))
+    (check (zerop (logand (ash 1 16) (call-scute 'kind-rights kind 9)))
+           "a broad filesystem grant exposes preexisting Unix sockets")))
+
+(deftest test-unix-pathname-isolation-denies-host-and-allows-sandbox-ipc
+  "Exercise RESOLVE_UNIX against real pathname sockets in a disposable process."
+  (unless (unix-isolation-available-or-refused-p)
+    (return-from test-unix-pathname-isolation-denies-host-and-allows-sandbox-ipc nil))
+  (let* ((base (scratch-pathname "unix-domain"))
+         (source (concatenate 'string base ".c"))
+         (program (concatenate 'string base ".bin"))
+         (host (concatenate 'string base ".host"))
+         (local (concatenate 'string base ".local"))
+         (ruleset (call-scute 'compile-filesystem-ruleset nil "/bin/true" :isolate-unix t)))
+    (unwind-protect
+         (progn
+           (with-open-file (out source :direction :output :if-exists :supersede)
+             (write-string "#define _GNU_SOURCE
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/prctl.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+static int listener(char *path) {
+  int fd=socket(AF_UNIX,SOCK_STREAM,0);
+  struct sockaddr_un a={.sun_family=AF_UNIX};
+  strncpy(a.sun_path,path,sizeof(a.sun_path)-1);
+  if(fd<0 || bind(fd,(void*)&a,sizeof(a)) || listen(fd,1)) return -1;
+  return fd;
+}
+static int connection(char *path) {
+  int fd=socket(AF_UNIX,SOCK_STREAM,0), result, saved;
+  struct sockaddr_un a={.sun_family=AF_UNIX};
+  strncpy(a.sun_path,path,sizeof(a.sun_path)-1);
+  if(fd<0) return -1;
+  result=connect(fd,(void*)&a,sizeof(a)); saved=errno; close(fd); errno=saved;
+  return result;
+}
+int main(int argc,char **argv) {
+  if(argc!=4) return 10;
+  int host=listener(argv[2]); if(host<0) return 11;
+  if(prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0) || syscall(446,atoi(argv[1]),0)) return 12;
+  close(atoi(argv[1]));
+  if(connection(argv[2])==0 || errno!=EACCES) return 13;
+  int local=listener(argv[3]); if(local<0) return 14;
+  if(connection(argv[3])) return 15;
+  close(local); close(host); return 0;
+}
+" out))
+           (check (zerop (cffi:foreign-funcall "system" :string
+                           (format nil "gcc -Wall -Wextra -o ~A ~A" program source) :int))
+                  "could not compile the Unix isolation probe")
+           ;; The only inherited extra descriptor is the ruleset under test.
+           (sb-posix:fcntl ruleset sb-posix:f-setfd 0)
+           (let ((status (cffi:foreign-funcall "system" :string
+                           (format nil "~A ~D ~A ~A" program ruleset host local) :int)))
+             (check (zerop status)
+                    "Unix isolation probe status ~D (11=host socket unavailable, 13=host access, 15=internal IPC denied)"
+                    status)))
+      (sb-posix:close ruleset)
+      (delete-scratch source program host local))))
+
+(deftest test-security-old-landlock-refuses-unix-isolation
+  (loop for abi from 1 below 9
+        do (check (nth-value 1 (ignore-errors (call-scute 'require-unix-isolation abi)))
+                  "ABI ~D was accepted for host Unix socket isolation" abi))
+  (call-scute 'require-unix-isolation 9))
