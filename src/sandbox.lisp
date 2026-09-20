@@ -102,18 +102,27 @@ the child only uses what is already in its hands."
          (ruleset (compile-filesystem-ruleset
                    (launch-plan-filesystem plan) path
                    :connect-ports (launch-plan-connect-tcp plan)
-                   :bind-ports (launch-plan-bind-tcp plan)))
+                   :bind-ports (launch-plan-bind-tcp plan)
+                   :isolate-unix (or (eq observe :learn)
+                                     (launch-plan-unix-sockets plan))))
          ;; Built before the child exists, so a filter that will not build is a
          ;; launch that does not happen.  The program is shared and read-only:
          ;; these resources borrow it rather than owning it.
          (watched nil)
+         (ipv6 (not (or (launch-plan-allow plan) (launch-plan-proxy plan)
+                        (eq :proxied (launch-plan-network plan)))))
          (filter (if observe
-                     (multiple-value-bind (program table) (learn-seccomp-filter)
+                     (multiple-value-bind (program table)
+                         (learn-seccomp-filter
+                          :unix-sockets (or (eq observe :learn)
+                                            (launch-plan-unix-sockets plan))
+                          :ipv6 ipv6)
                        (setf watched table)
                        program)
                      (seccomp-filter-program
                       (v0-seccomp-filter
-                       :unix-sockets (launch-plan-unix-sockets plan))))))
+                       :unix-sockets (launch-plan-unix-sockets plan)
+                       :ipv6 ipv6)))))
     (multiple-value-bind (sync-read sync-write) (make-sync-pipe)
       (multiple-value-bind (status-read status-write) (make-sync-pipe)
         (multiple-value-bind (cap-header cap-data) (make-empty-capability-request)

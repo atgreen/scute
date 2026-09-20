@@ -149,6 +149,12 @@ talk to itself."
                                   #xffffffff +af-unix+)
     (list "socket(AF_UNIX)")))
 
+(defun deny-ipv6-sockets (context)
+  "The cgroup guards cover IPv4 only; IPv6 must not bypass them."
+  (when (add-masked-argument-rule context (scmp-act-errno +eperm+) "socket" 0
+                                  #xffffffff 10) ; AF_INET6
+    (list "socket(AF_INET6)")))
+
 (defun deny-nested-user-namespaces (context)
   "Refuse the two ways a command could put itself in a new user namespace."
   (let ((denied '()))
@@ -204,7 +210,7 @@ talk to itself."
             (cffi:mem-ref program :pointer 8) instructions)
       (values program (floor bytes 8)))))
 
-(defun compile-seccomp-filter (&key unix-sockets)
+(defun compile-seccomp-filter (&key unix-sockets (ipv6 t))
   "Build the v0 filter.  Every failure here happens before the child exists.
 With UNIX-SOCKETS the AF_UNIX refusal is left out, because a policy said so."
   (ensure-libseccomp)
@@ -237,6 +243,7 @@ With UNIX-SOCKETS the AF_UNIX refusal is left out, because a policy said so."
                                                          name result))))))))
            (setf denied (append (unless unix-sockets
                                   (deny-unix-domain-sockets context))
+                                (unless ipv6 (deny-ipv6-sockets context))
                                 (deny-nested-user-namespaces context)
                                 denied))
            (multiple-value-bind (program instructions) (export-filter-program context)
@@ -246,16 +253,14 @@ With UNIX-SOCKETS the AF_UNIX refusal is left out, because a policy said so."
                                    :unavailable (nreverse unavailable))))
       (cffi:foreign-funcall "seccomp_release" :pointer context :void))))
 
-(defvar *seccomp-filters* (make-hash-table :test #'eq)
-  "The v0 filter, built once per shape.  There are two: with and without the
-refusal of unix-domain sockets.  Neither holds per-launch state, and a child
-only ever reads one.")
+(defvar *seccomp-filters* (make-hash-table :test #'eql)
+  "Filters cached by the two independent socket permissions.")
 
-(defun v0-seccomp-filter (&key unix-sockets)
-  (let ((key (if unix-sockets :with-unix-sockets :without)))
+(defun v0-seccomp-filter (&key unix-sockets (ipv6 t))
+  (let ((key (+ (if unix-sockets 1 0) (if ipv6 2 0))))
     (or (gethash key *seccomp-filters*)
         (setf (gethash key *seccomp-filters*)
-              (compile-seccomp-filter :unix-sockets unix-sockets)))))
+              (compile-seccomp-filter :unix-sockets unix-sockets :ipv6 ipv6)))))
 
 (declaim (inline %seccomp-install))
 (defun %seccomp-install (program flags)

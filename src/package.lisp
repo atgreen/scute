@@ -173,7 +173,7 @@
            #:make-broker-settings
            #:broker-settings-name
            #:broker-settings-proxy-port
-           #:broker-settings-control-port
+           #:broker-settings-control-socket
            #:launch-plan-broker
            #:launch-plan-credentials
            #:launch-plan-absent

@@ -6,11 +6,10 @@
 
 (in-package #:scute)
 
-;;; Just enough HTTP to talk to a credential broker on the loopback interface.
+;;; Just enough HTTP to talk to a credential broker over an authenticated Unix socket.
 ;;;
 ;;; Scute has no HTTP client and should not grow one.  What it needs is four
-;;; requests to a process it started itself, on 127.0.0.1, over a socket it
-;;; opened: no redirects, no chunked transfer, no TLS, no connection reuse, no
+;;; requests to a local process, over a socket whose peer it authenticated: no redirects, no chunked transfer, no TLS, no connection reuse, no
 ;;; content negotiation.  A general client would bring a dependency that runs
 ;;; before the sandbox exists, in the process holding the operator's secret.
 ;;; This is a hundred lines that do only what the broker's control API needs,
@@ -95,6 +94,44 @@ been talked into sending a credential somewhere nobody named."
            (error (condition)
              (broker-error "cannot reach the broker on 127.0.0.1:~D: ~A"
                            port condition)))
+      (ignore-errors (sb-bsd-sockets:socket-close socket)))))
+
+(defun require-broker-peer-uid (uid)
+  "Only this user's broker may receive credentials."
+  (unless (= uid (sb-posix:geteuid))
+    (broker-error "refusing broker owned by uid ~D (expected ~D)" uid (sb-posix:geteuid)))
+  t)
+
+(defun authenticate-broker-socket (socket)
+  "Check the connected peer, not the pathname, before sending any bytes."
+  (cffi:with-foreign-objects ((credentials :uint32 3) (size :uint32))
+    (setf (cffi:mem-ref size :uint32) 12)
+    (unless (and (zerop (cffi:foreign-funcall "getsockopt"
+                         :int (sb-bsd-sockets:socket-file-descriptor socket)
+                         :int 1 :int 17 ; SOL_SOCKET, SO_PEERCRED
+                         :pointer credentials :pointer size :int))
+                 (= 12 (cffi:mem-ref size :uint32)))
+      (broker-error "cannot authenticate the broker's Unix socket peer"))
+    (require-broker-peer-uid (cffi:mem-aref credentials :uint32 1))))
+
+(defun unix-control-request (path method resource &key body (seconds 10))
+  "One control request over an authenticated Unix connection. Never uses TCP."
+  (unless (and (stringp path) (uiop:absolute-pathname-p path))
+    (broker-error "broker control requires an absolute Unix socket path"))
+  (let ((socket (make-instance 'sb-bsd-sockets:local-socket :type :stream)))
+    (unwind-protect
+         (handler-case
+             (sb-sys:with-deadline (:seconds seconds)
+               (sb-bsd-sockets:socket-connect socket path)
+               (authenticate-broker-socket socket)
+               (let ((stream (sb-bsd-sockets:socket-make-stream
+                               socket :input t :output t :element-type 'character
+                               :external-format :utf-8)))
+                 (write-request stream method resource body nil)
+                 (read-response stream)))
+           (broker-error (condition) (error condition))
+           (error (condition)
+             (broker-error "cannot reach authenticated broker control at ~A: ~A" path condition)))
       (ignore-errors (sb-bsd-sockets:socket-close socket)))))
 
 ;;── Just enough JSON ───────────────────────────────────────────────────────────

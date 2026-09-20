@@ -10,6 +10,25 @@ entry is part of releasing rather than a courtesy afterwards.
 
 ## [Unreleased]
 
+### Security
+
+- Refuse filesystem policies whose optional grants all disappear.
+- Deny IPv6 sockets in proxy and address-guarded runs, including observation.
+- Preserve Unix socket denials during audit and explanation.
+- Create credential output exclusively without following symlink components;
+  pin file descriptors for Landlock grants and directory descriptors for cleanup.
+- Authenticate every broker control connection over Unix with `SO_PEERCRED`;
+  remove bearer-key discovery and TCP control fallback.
+
+### Changed
+
+- Broker control requires a recent KeyFence with Unix control support. Enable
+  `keyfence-control.socket`; replace `control-port` with `control-socket`.
+- Unix-enabled and learning runs require Landlock ABI 9. Preexisting host
+  pathname sockets remain inaccessible even with broad filesystem grants;
+  sockets created inside the sandbox remain usable.
+- Credential output destinations must not already exist.
+
 ## [0.1.0] - 2026-09-19
 
 ### Added

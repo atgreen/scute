@@ -372,9 +372,11 @@ each request. KeyFence is such a broker.
 What Scute contributes is the part a proxy cannot do for itself. `HTTPS_PROXY`
 is a convention; a command is free to ignore it. Under a policy naming a proxy,
 the kernel permits that one port and refuses every other address, so the swap is
-not something the command can route around — and the broker's control port,
-being a different port, is refused like anything else, so the sandbox cannot
-mint tokens of its own.
+not something the command can route around. IPv6 sockets are refused in guarded
+modes until equivalent guards exist. Control uses a Unix socket; every sandbox
+permitting Unix sockets handles Landlock ABI 9 RESOLVE_UNIX without granting it
+on host paths, so the same-UID sandbox cannot administer the broker. This also
+applies to learning and namespaces-only launches; older kernels fail closed.
 
 The arrangement:
 
@@ -392,12 +394,12 @@ The arrangement:
   systemd user service, which costs no startup per run, keeps one certificate
   authority between runs, and confines the process holding the secrets more
   tightly than the shell Scute was started from.
-- What is on the control port is identified before anything is sent to it. A
-  broker is recognised by answering its own control API; returning 200 to a
-  health check is not identity, and attaching means handing over the operator's
-  plaintext credential. Anything unrecognised is an error with the secret unread.
+- Every control connection authenticates its Unix peer with SO_PEERCRED before
+  sending bytes. The server UID must match the supervisor. API shape checks only
+  establish compatibility; they are not authentication. There is no TCP fallback
+  and no bearer control key in the environment, argv, or requests.
 - Secrets are read in the supervisor, before the sandbox exists, and handed to
-  the broker over loopback. They are never placed in the sandbox's environment,
+  the broker over the authenticated Unix connection. They are never placed in the sandbox's environment,
   never written into a command line, and never passed through a shell.
 - The sandbox is given read access to the broker's CA certificate — the file,
   not the directory holding it, because the CA's private key sits beside it.
@@ -473,3 +475,12 @@ user-supplied BPF, or BPF-based enforcement.
 
 The authoritative implementation plan is the dependency graph under beads epic
 `scute-do3`; this document records architecture rather than task status.
+
+### Security regression coverage
+
+Missing optional filesystem grants fail closed. Audit and explanation retain
+the normal socket denials; permissive learning is selected explicitly and still
+isolates preexisting Unix sockets. Credential files are created exclusively by
+descriptor-relative operations, reject symlink components, and retain open file
+and parent descriptors for Landlock registration and cleanup. Partial rendering
+failures clean up files already created by the same run.

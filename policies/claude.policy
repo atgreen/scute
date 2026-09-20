@@ -11,7 +11,7 @@
 #
 # It needs KeyFence listening on 10210 (https://github.com/atgreen/keyfence):
 #
-#     systemctl --user enable --now keyfence.socket keyfence-api.socket
+#     systemctl --user enable --now keyfence.socket keyfence-control.socket
 #
 # and those of Claude Code's own hosts that carry no credential of ours:
 #
@@ -91,7 +91,7 @@ env = "ANTHROPIC_AUTH_TOKEN"
 [limits]
 memory = "6G"
 processes = 512
-wall-clock = "2h"
+# wall-clock = "2h"
 
 [environment.set]
 # Claude Code writes its own configuration and history; a scratch directory keeps

@@ -57,6 +57,12 @@
 (defconstant +fs-refer+       (ash 1 13))   ; ABI 2
 (defconstant +fs-truncate+    (ash 1 14))   ; ABI 3
 (defconstant +fs-ioctl-dev+   (ash 1 15))   ; ABI 5
+(defconstant +fs-resolve-unix+ (ash 1 16)) ; ABI 9
+
+(defun require-unix-isolation (abi)
+  (when (< abi 9)
+    (setup-error :landlock-unix
+                 :detail "Unix sockets and learning require Landlock ABI 9 to isolate host control sockets")))
 
 ;;; The rights each ABI version added.  Scute handles everything the running
 ;;; kernel understands, so that whatever a rule does not grant is denied.
@@ -242,19 +248,24 @@ that names no ports handles nothing and leaves the network as it found it."
     (logior (if connect-ports +access-net-connect-tcp+ 0)
             (if bind-ports +access-net-bind-tcp+ 0))))
 
-(defun compile-filesystem-ruleset (rules executable &key connect-ports bind-ports)
+(defun compile-filesystem-ruleset (rules executable &key connect-ports bind-ports isolate-unix)
   "Build the one ruleset that RULES and the named ports describe.
 Answers NIL when a policy asked for none of them.  Returns the ruleset
 descriptor and the ABI version it was built for.
 
 Paths and ports go in the same ruleset, which is the whole of Cave's
 constraint: rights handled in separate rulesets deny each other by implication."
-  (when (or rules connect-ports bind-ports)
+  (when (or rules connect-ports bind-ports isolate-unix)
     (let* ((abi (require-landlock))
            (handled-net (or (handled-network-rights connect-ports bind-ports abi) 0)))
+      (when isolate-unix (require-unix-isolation abi))
       (when rules
         (ensure-executable-permitted rules executable abi))
-      (let ((ruleset (create-ruleset (if rules (supported-rights abi) 0)
+      ;; Never grant RESOLVE_UNIX through a path rule, even a grant of /.
+      ;; ABI 9 permits sockets created in this domain without granting access
+      ;; to preexisting host sockets, including the same-uid broker control API.
+      (let ((ruleset (create-ruleset (logior (if rules (supported-rights abi) 0)
+                                            (if isolate-unix +fs-resolve-unix+ 0))
                                      handled-net)))
         (handler-bind ((error (lambda (condition)
                                 (declare (ignore condition))

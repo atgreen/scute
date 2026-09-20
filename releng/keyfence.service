@@ -11,9 +11,9 @@
 # this running a brokered sandbox costs no broker startup, and the CA the
 # agent's runtimes trust stays the same between runs.
 #
-# The listeners are on the loopback interface only.  Nothing off this machine
-# can reach the proxy, and the sandbox reaches it because its policy names it --
-# the one address the kernel permits it.
+# The proxy and SSH listeners are loopback-only. Control uses a private Unix
+# socket; Scute confines every Unix-enabled sandbox with Landlock ABI 9 so that
+# sharing the host UID cannot give the command access to this control socket.
 
 [Unit]
 Description=KeyFence credential broker
@@ -23,11 +23,10 @@ After=network.target
 [Service]
 Type=simple
 
-# The control API mints tokens out of real credentials, so it is worth a key
-# even on a loopback port: every process of this user can reach 127.0.0.1.
-# Generated once, kept where Scute looks for it, readable only by its owner.
-ExecStartPre=/bin/sh -c 'mkdir -p %h/.keyfence && test -s %h/.keyfence/api-key || { umask 077; head -c 16 /dev/urandom | od -An -tx1 | tr -d " \\n" > %h/.keyfence/api-key; }'
-ExecStart=/bin/sh -c 'exec keyfence -proxy 127.0.0.1:10210 -api 127.0.0.1:10212 -ssh 127.0.0.1:10211 -data-dir %h/.keyfence -api-key "$(cat %h/.keyfence/api-key)"'
+# A private Unix listener authenticated by peer UID; no control secret in argv.
+RuntimeDirectory=keyfence
+RuntimeDirectoryMode=0700
+ExecStart=keyfence -proxy 127.0.0.1:10210 -api unix:%t/keyfence/control.sock -api-allow-uid %U -ssh 127.0.0.1:10211 -data-dir %h/.keyfence
 
 Restart=on-failure
 RestartSec=2
