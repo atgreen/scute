@@ -91,7 +91,7 @@ env = "ANTHROPIC_AUTH_TOKEN"
 [limits]
 memory = "6G"
 processes = 512
-wall-clock = "2h"
+# wall-clock = "2h"
 
 [environment.set]
 # Claude Code writes its own configuration and history; a scratch directory keeps

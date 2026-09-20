@@ -100,7 +100,7 @@ read-write = [
 [limits]
 memory = "6G"
 processes = 512
-wall-clock = "2h"
+# wall-clock = "2h"
 
 [environment.set]
 # Your own git config is often a symlink into a dotfiles repository the sandbox
