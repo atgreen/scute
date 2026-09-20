@@ -170,6 +170,7 @@ scute claude              # claude code, with its key held by the broker
 scute bash                # a shell in this directory and nowhere else
 
 scute codex -- "work through the ready beads"    # arguments go to the agent
+scute codex -- exec "fix the build"              # unattended, one turn
 scute policies            # what this host has, and which file each came from
 ```
 

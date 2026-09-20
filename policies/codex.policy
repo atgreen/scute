@@ -1,6 +1,8 @@
 # Codex, confined, in the directory you run it from.
 #
-#     scute run --policy codex -- "work through the ready beads"
+#     scute codex                              # a session, here
+#     scute codex "work through the ready beads"
+#     scute codex exec "fix the build"         # unattended, one turn
 #
 # What the agent can reach is this directory and the toolchains it needs to build
 # what is in it. Not ~/.ssh, not your shell history, not your other projects.
@@ -27,7 +29,13 @@ program = "codex"
 # correct setting: codex would otherwise wrap every command in bubblewrap, which
 # cannot nest inside Scute's namespaces and fails claiming your kernel forbids
 # user namespaces. Scute is the sandbox; the inner one is redundant and broken.
-arguments = ["exec", "--dangerously-bypass-approvals-and-sandbox"]
+#
+# Nothing here says interactive or unattended, because the caller does: what
+# follows on the command line is codex's own first argument. Nothing at all is a
+# session in this directory, a sentence is that session with its first word
+# already said, and "exec ..." is the one-turn form -- which inherits the flag
+# above, so the inner sandbox stays off whichever way it is run.
+arguments = ["--dangerously-bypass-approvals-and-sandbox"]
 
 [filesystem]
 read-execute = [
@@ -51,8 +59,8 @@ read = [
   "?~/.bash_profile",                    # cannot read its own rc says so before
   "?~/.profile",                         # every single command
   "?~/.cargo/env",                       # which those often source
-  "?~/.config/git",
-  "?~/.local/share/scute/agent-home/gitconfig",   # shared, and read-only                      # attributes and ignore files git reads
+  "?~/.config/git",                      # attributes and ignore files git reads
+  "?~/.local/share/scute/agent-home/gitconfig",   # shared, and read-only
   "?~/.agents",                          # skills, where both agents look for them
   "?~/go/bin",                           # tools a toolchain looks for
 ]
