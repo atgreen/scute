@@ -73,28 +73,36 @@ jobs:
       - name: What this host can enforce
         run: sudo -u builder -H ./scute doctor || true
 
-      # Two tests want the certificate authority the broker writes on first
-      # start, which on a workstation a user service has already done.  Mint it
-      # and stop again rather than leave one running: Scute starts a broker per
-      # run with a control key of its own, and one already listening is one it
-      # cannot authenticate to.  The broker will not start without a key, which
-      # is why this cannot just be "keyfence &".
-      - name: Mint the broker's certificate authority
+      # A broker is a service Scute attaches to, so the suite needs one running
+      # rather than one it can start: left listening on the Unix control socket
+      # Scute looks for, with this uid allowed to use it.  It also writes the
+      # certificate authority two tests want, on first start.
+      #
+      # No systemd in the container, so the runtime directory is made by hand
+      # and the broker is backgrounded; a workstation gets all of this from
+      # keyfence.socket and keyfence-control.socket instead.
+      - name: Run the broker the suite attaches to
         run: |
+          install -d -o builder -g builder -m 700 /run/user/$(id -u builder)
           sudo -u builder -H sh -c '
-            keyfence --api-key ci-only >/tmp/keyfence.log 2>&1 &
-            pid=$!
+            export XDG_RUNTIME_DIR=/run/user/$(id -u)
+            mkdir -p "$XDG_RUNTIME_DIR/keyfence"
+            keyfence --api-key ci-only \
+                     --api "unix:$XDG_RUNTIME_DIR/keyfence/control.sock" \
+                     --api-allow-uid "$(id -u)" >/tmp/keyfence.log 2>&1 &
             for _ in $(seq 60); do
-              [ -f ~/.keyfence/ca/ca.pem ] && break
+              [ -S "$XDG_RUNTIME_DIR/keyfence/control.sock" ] && [ -f ~/.keyfence/ca/ca.pem ] && break
               sleep 1
-            done
-            kill "$pid" 2>/dev/null || true'
+            done'
           test -f /home/builder/.keyfence/ca/ca.pem
+          test -S /run/user/$(id -u builder)/keyfence/control.sock
 
       # Root arranges the host and then hands the suite to builder: a
       # container's PAM cannot be relied on to let builder ask for root back.
       - name: Test and smoke
-        run: SCUTE_CI_USER=builder releng/ci-host.sh make check
+        run: |
+          SCUTE_CI_USER=builder XDG_RUNTIME_DIR=/run/user/$(id -u builder) \
+            releng/ci-host.sh make check
 
   # ------------------------------------------------------------------
   # The package, built the way the release builds it and installed the way a

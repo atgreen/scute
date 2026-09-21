@@ -23,6 +23,11 @@
 # managers are not on every machine, and a policy naming one unconditionally is a
 # policy that refuses to start. --dry-run lists the ones that were not found.
 
+# The floor every real program needs -- /usr, /etc, /proc, the device nodes,
+# /tmp -- is in the base policy, so what follows is only what codex itself
+# reaches for. --dry-run names both files.
+include = ["base"]
+
 [command]
 program = "codex"
 # --dangerously-bypass-approvals-and-sandbox is not bravado here, it is the
@@ -39,22 +44,10 @@ arguments = ["--dangerously-bypass-approvals-and-sandbox"]
 
 [filesystem]
 read-execute = [
-  "/usr",
-  "?/opt",                               # where a distribution or a vendor puts tools
-  "?/home/linuxbrew/.linuxbrew",         # homebrew on Linux
-  "?~/.local/bin",                       # pip, pipx, cargo install --root
-  "?~/bin",                              # where a hand-installed tool usually goes
   "?~/.nvm",                             # node, when it came from nvm
   "?~/.rustup",
 ]
 read = [
-  "/etc",
-  "/proc",
-  "/dev/urandom",
-  "?/sys/devices/system/cpu/online",     # how many processors, for build parallelism
-  "?/sys/fs/cgroup",
-  "?/sys/kernel/mm/transparent_hugepage/enabled",
-  "?/sys/kernel/mm/transparent_hugepage/hpage_pmd_size",
   "?~/.bashrc",                          # codex runs bash -lc, and a shell that
   "?~/.bash_profile",                    # cannot read its own rc says so before
   "?~/.profile",                         # every single command
@@ -71,9 +64,6 @@ read-write = [
                                          # writes for itself. One directory per agent,
                                          # because a credential one of them acquires
                                          # is not the other's to read
-  "/dev/null",
-  "/dev/tty",                            # the terminal, for an interactive session
-  "/tmp",
   "?~/.cache",                           # build caches: go, cargo, npm, pip
   "?~/go/pkg/mod",                       # the Go module cache, which go writes to
   "?~/.config/go",

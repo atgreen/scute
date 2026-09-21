@@ -21,6 +21,11 @@
 # on it. A "?" before a path means "if this host has it"; --dry-run lists the ones
 # that were not found.
 
+# The floor every real program needs -- /usr, /etc, /proc, the device nodes,
+# /tmp -- is in the base policy, so what follows is only what Claude Code itself
+# reaches for. --dry-run names both files.
+include = ["base"]
+
 [command]
 program = "claude"
 # Claude Code asks before it acts, which is the right default and the wrong one
@@ -30,20 +35,10 @@ arguments = ["--dangerously-skip-permissions"]
 
 [filesystem]
 read-execute = [
-  "/usr",
-  "?/opt",
-  "?/home/linuxbrew/.linuxbrew",
-  "?~/.local/bin",                       # pip, pipx, cargo install --root
-  "?~/bin",                              # where a hand-installed tool usually goes
   "?~/.nvm",                             # claude is usually node, and node is usually nvm
   "?~/.volta",
 ]
 read = [
-  "/etc",
-  "/proc",
-  "/dev/urandom",
-  "?/sys/devices/system/cpu/online",
-  "?/sys/fs/cgroup",
   "?~/.bashrc",
   "?~/.bash_profile",
   "?~/.profile",
@@ -58,9 +53,6 @@ read-write = [
                                          # writes for itself. One directory per agent,
                                          # because a credential one of them acquires
                                          # is not the other's to read
-  "/dev/null",
-  "/dev/tty",
-  "/tmp",
   "?~/.cache",
   "?~/.npm",
 ]

@@ -696,15 +696,26 @@ README somebody skims."
   "The policies in this tree are the ones that get installed, so they are held to
 the same standard as any other: parsed, checked, and read for the command they
 carry. Their paths are not resolved here -- half of them are deliberately absent
-on any given machine, which is the point of the optional marker."
-  (dolist (pathname (directory (merge-pathnames "policies/*.policy"
+on any given machine, which is the point of the optional marker.
+
+A shipped policy earns its place one of two ways: it names a command, so that
+\"scute NAME\" runs something, or another shipped policy includes it. A file
+that does neither is one nobody can reach."
+  (let* ((pathnames (directory (merge-pathnames "policies/*.policy"
                                                 (asdf:system-source-directory :scute))))
-    (let ((policy (call-scute 'read-sandbox-policy pathname)))
-      (check (call-scute 'sandbox-policy-command policy)
-             "~A ships without a [command], so it cannot be run by name"
-             (file-namestring pathname))
-      (check (call-scute 'sandbox-policy-filesystem policy)
-             "~A grants no filesystem access at all" (file-namestring pathname)))))
+         (included (loop for pathname in pathnames
+                         append (let ((document (call-scute 'read-policy-document
+                                                            pathname)))
+                                  (cdr (assoc "include" document :test #'string=))))))
+    (dolist (pathname pathnames)
+      (let ((policy (call-scute 'read-sandbox-policy pathname))
+            (name (pathname-name pathname)))
+        (check (or (call-scute 'sandbox-policy-command policy)
+                   (member name included :test #'string=))
+               "~A ships with no [command] and nothing includes it, so there is ~
+                no way to reach it" (file-namestring pathname))
+        (check (call-scute 'sandbox-policy-filesystem policy)
+               "~A grants no filesystem access at all" (file-namestring pathname))))))
 
 ;;── Drop-in directories ────────────────────────────────────────────────────────
 ;;;
@@ -735,6 +746,136 @@ Answers their pathnames, so a test can write policies and fragments into them."
     (with-open-file (stream pathname :direction :output :if-exists :supersede)
       (write-string text stream))
     pathname))
+
+(deftest test-a-connect-rule-is-kept-narrow
+  "connect is the one rule that reaches a socket the host already had, so it is
+the one rule with something to lose.  Three refusals keep it to what it is for:
+a sandbox that may not make a Unix socket at all cannot usefully be given one to
+connect to; a rule naming a directory would carry every socket in it, and the
+directory this is wanted in is where the session bus and the broker live; and
+the broker's own control socket is never namable, because a sandbox that reached
+it could ask for the credentials the whole arrangement exists to withhold."
+  (let* ((directory (scratch-pathname "connect-policy"))
+         (path (format nil "~A/socket" directory))
+         (socket nil))
+    (flet ((refusal (policy-text)
+             (nth-value 1 (ignore-errors
+                           (call-scute 'compile-launch-plan
+                                       (call-scute 'validate-sandbox-policy
+                                                   (call-scute 'parse-policy-text
+                                                               policy-text))
+                                       '("/bin/true")
+                                       :directory directory)))))
+      (unwind-protect
+           (progn
+             (ensure-directories-exist (format nil "~A/" directory))
+             (setf socket (listening-unix-socket path))
+             (let ((without (refusal (format nil "[filesystem]~%~
+                                                  read-execute = [\"/usr\"]~%~
+                                                  connect = [\"~A\"]~%~
+                                                  [network]~%mode = \"none\"~%"
+                                             path)))
+                   (directory-rule (refusal (format nil "[filesystem]~%~
+                                                         read-execute = [\"/usr\"]~%~
+                                                         connect = [\"~A\"]~%~
+                                                         [network]~%mode = \"none\"~%~
+                                                         unix-sockets = true~%"
+                                                    directory))))
+               (check (and without (search "unix-sockets"
+                                           (princ-to-string without)))
+                      "connect without unix-sockets was not refused as such: ~A"
+                      without)
+               (check (and directory-rule (search "socket"
+                                                  (princ-to-string directory-rule)))
+                      "connect naming a directory was not refused as such: ~A"
+                      directory-rule))
+             ;; The broker's control socket, wherever this host keeps it.
+             (let* ((scute::*broker-control-socket* path)
+                    (refusal (refusal (format nil "[filesystem]~%~
+                                                   read-execute = [\"/usr\"]~%~
+                                                   connect = [\"~A\"]~%~
+                                                   [network]~%unix-sockets = true~%"
+                                              path))))
+               (check (and refusal (search "control" (princ-to-string refusal)))
+                      "a connect rule on the broker's control socket was allowed, ~
+                       or refused for some other reason: ~A" refusal)))
+        (when socket (ignore-errors (sb-bsd-sockets:socket-close socket)))
+        (ignore-errors (delete-file path))
+        (ignore-errors (sb-posix:rmdir directory))))))
+
+(deftest test-a-policy-can-include-another
+  "One floor under many policies: what every program on a host needs is written
+once and included, so a gap found in one policy is not fixed in only that one.
+
+Three things have to be true.  The included set arrives; the including policy
+wins where they disagree, since it is the specific one; and both files are named
+in what the policy says it was read from, because a grant nobody can see is
+worse than no include at all."
+  (with-policy-directories
+    (lambda (far near)
+      (declare (ignore near))
+      (write-into far "base.policy"
+                  "[filesystem]
+read = [\"/etc\"]
+read-write = [\"/tmp\"]
+
+[limits]
+memory = \"1G\"
+")
+      (write-into far "agent.policy"
+                  "include = [\"base\"]
+
+[command]
+program = \"/bin/true\"
+
+[filesystem]
+read-execute = [\"/usr\"]
+read = [\"/proc\"]
+
+[limits]
+memory = \"2G\"
+")
+      (let* ((policy (call-scute 'read-sandbox-policy "agent"))
+             (paths (mapcar (lambda (rule) (call-scute 'filesystem-rule-path rule))
+                            (call-scute 'sandbox-policy-filesystem policy)))
+             (sources (mapcar #'namestring (call-scute 'sandbox-policy-sources policy))))
+        (dolist (wanted '("/etc" "/tmp" "/usr" "/proc"))
+          (check (member wanted paths :test #'string=)
+                 "~A is not in the policy that included the base: ~S" wanted paths))
+        (check (eql (* 2 1024 1024 1024)
+                    (call-scute 'resource-limits-memory
+                                (call-scute 'sandbox-policy-limits policy)))
+               "the base's limit overrode the policy's own: ~S"
+               (call-scute 'sandbox-policy-limits policy))
+        (check (find-if (lambda (source) (search "base.policy" source)) sources)
+               "the included file is not among the policy's sources: ~S" sources)
+        (check (find-if (lambda (source) (search "agent.policy" source)) sources)
+               "the policy itself is not among its own sources: ~S" sources)))))
+
+(deftest test-an-include-that-comes-back-round-is-refused
+  "A policy that includes itself, directly or by way of another, is a policy
+Scute would read for ever.  It is refused rather than unrolled to some depth,
+because a limit would make the answer depend on how deep the loop was."
+  (with-policy-directories
+    (lambda (far near)
+      (declare (ignore near))
+      (write-into far "left.policy"
+                  "include = [\"right\"]
+
+[filesystem]
+read = [\"/etc\"]
+")
+      (write-into far "right.policy"
+                  "include = [\"left\"]
+
+[filesystem]
+read = [\"/proc\"]
+")
+      (let ((refusal (nth-value 1 (ignore-errors
+                                   (call-scute 'read-sandbox-policy "left")))))
+        (check refusal "a policy including itself in a circle was read anyway")
+        (check (search "include" (princ-to-string refusal))
+               "the refusal does not say an include caused it: ~A" refusal)))))
 
 (deftest test-a-drop-in-adds-to-what-a-policy-grants
   "The common case: two more paths, without touching the shipped file."

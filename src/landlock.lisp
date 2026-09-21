@@ -99,19 +99,25 @@ regular file or a device and landlock_add_rule answers EINVAL.")
 (defun kind-rights (kind abi &key (directoryp t))
   "The access rights KIND stands for on a kernel at ABI.
 A rule on anything but a directory keeps only the rights that apply to a
-file; asking for the rest is an error, not a stronger sandbox."
-  (let* ((read (logior +fs-read-file+ +fs-read-dir+))
-         (write (logior +fs-write-file+ +fs-remove-dir+ +fs-remove-file+
-                        +fs-make-char+ +fs-make-dir+ +fs-make-reg+
-                        +fs-make-sock+ +fs-make-fifo+ +fs-make-block+
-                        +fs-make-sym+ +fs-refer+ +fs-truncate+))
-         (rights (ecase kind
-                   (:read read)
-                   (:read-execute (logior read +fs-execute+))
-                   (:read-write (logior read write))
-                   (:read-write-execute (logior read write +fs-execute+)))))
-    (logand rights (supported-rights abi)
-            (if directoryp #xffffffffffffffff (lognot +directory-only-rights+)))))
+file; asking for the rest is an error, not a stronger sandbox.
+
+:CONNECT is the one kind that does not go through the ABI mask, because
+RESOLVE_UNIX is deliberately absent from it: no ordinary rule may grant it, not
+even a rule on \"/\", so it is written here and nowhere else."
+  (if (eq kind :connect)
+      +fs-resolve-unix+
+      (let* ((read (logior +fs-read-file+ +fs-read-dir+))
+             (write (logior +fs-write-file+ +fs-remove-dir+ +fs-remove-file+
+                            +fs-make-char+ +fs-make-dir+ +fs-make-reg+
+                            +fs-make-sock+ +fs-make-fifo+ +fs-make-block+
+                            +fs-make-sym+ +fs-refer+ +fs-truncate+))
+             (rights (ecase kind
+                       (:read read)
+                       (:read-execute (logior read +fs-execute+))
+                       (:read-write (logior read write))
+                       (:read-write-execute (logior read write +fs-execute+)))))
+        (logand rights (supported-rights abi)
+                (if directoryp #xffffffffffffffff (lognot +directory-only-rights+))))))
 
 ;;── Probing ────────────────────────────────────────────────────────────────────
 
@@ -258,14 +264,22 @@ constraint: rights handled in separate rulesets deny each other by implication."
   (when (or rules connect-ports bind-ports isolate-unix)
     (let* ((abi (require-landlock))
            (handled-net (or (handled-network-rights connect-ports bind-ports abi) 0)))
-      (when isolate-unix (require-unix-isolation abi))
+      (when (or isolate-unix (find :connect rules :key #'path-rule-kind))
+        (require-unix-isolation abi))
       (when rules
         (ensure-executable-permitted rules executable abi))
-      ;; Never grant RESOLVE_UNIX through a path rule, even a grant of /.
-      ;; ABI 9 permits sockets created in this domain without granting access
+      ;; Never grant RESOLVE_UNIX through an ordinary path rule, even a grant of
+      ;; /.  ABI 9 permits sockets created in this domain without granting access
       ;; to preexisting host sockets, including the same-uid broker control API.
+      ;; One kind of rule does grant it, and only for the path it names: connect,
+      ;; which a policy writes out socket by socket and which the validator keeps
+      ;; away from the broker's own.
       (let ((ruleset (create-ruleset (logior (if rules (supported-rights abi) 0)
-                                            (if isolate-unix +fs-resolve-unix+ 0))
+                                            (if (or isolate-unix
+                                                    (find :connect rules
+                                                          :key #'path-rule-kind))
+                                                +fs-resolve-unix+
+                                                0))
                                      handled-net)))
         (handler-bind ((error (lambda (condition)
                                 (declare (ignore condition))

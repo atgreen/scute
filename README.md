@@ -27,7 +27,8 @@ credential story only means anything because that part holds:
   exist for the command — including the file your real credentials sit in.
 - **seccomp** denies the system calls a sandboxed program has no business making,
   `unshare` and `mount` among them, so it cannot build itself somewhere else to
-  stand.
+  stand — and the two `ioctl`s that would let it type into the terminal you
+  started it from.
 - **Namespaces** — user, mount, pid, uts, net — give it its own view, so it
   cannot see or signal your processes, and has no network but the one it was
   given.
@@ -373,7 +374,9 @@ table, an unknown key, a value of the wrong shape or a duplicate key is an error
 
 | Table | Key | Value | Meaning |
 |---|---|---|---|
+| *(top level)* | `include` | array of policy names or paths | read these underneath this policy, weakest first |
 | `[filesystem]` | `read` | array of paths | read files, list directories |
+| | `connect` | array of socket paths | connect to a Unix socket the host already has — one socket per rule, never a directory, and never the broker's own |
 | | `read-execute` | array of paths | the same, and execute |
 | | `read-write` | array of paths | read, write, create, delete, rename |
 | | `read-write-execute` | array of paths | the same, and execute |
@@ -384,6 +387,7 @@ table, an unknown key, a value of the wrong shape or a duplicate key is an error
 | | `allow` | array of `host:port` | the only addresses it may reach ([needs a privilege](#an-address-allowlist)) |
 | | `unix-sockets` | `true` / `false` | sandbox Unix IPC; requires ABI 9 (default `false`) |
 | `[credentials.NAME]` | `ref` | name | a credential the broker holds, named rather than read |
+| | `ssh-user` | user name | this secret is an ssh key: the broker keeps it, answers ssh on its bastion, and logs in upstream as this user. Port 22 is redirected there; `destinations` must name one host |
 | | `secret-file` | path | or a secret scute reads and the sandbox never sees |
 | | `destinations` | array of hosts | where the token it is swapped for is worth anything |
 | | `env` | variable name | where the sandbox finds its token |
@@ -399,6 +403,29 @@ table, an unknown key, a value of the wrong shape or a duplicate key is an error
 A relative path means what it says from where scute was invoked, and may not
 climb out of it. A filesystem policy whose optional paths all disappear is
 refused; an empty resolved grant list never disables filesystem confinement.
+
+### Building on another policy
+
+Every policy for a real program needs `/usr`, `/etc`, `/proc`, a few device
+nodes and somewhere to put a temporary file, and each of those lines was found
+the same way: a command failing deep inside a library. `include` is how a policy
+says that once:
+
+```toml
+include = ["base"]
+```
+
+The shipped policies do exactly this, and `base.policy` is the only thing in
+them that is not about their own program. An included name resolves beside the
+including file first and then along the search path, so a tree of policies works
+before any of it is installed.
+
+Three layers, weakest first: what a policy includes, the policy itself, and the
+drop-ins beside it. Arrays append and a scalar is answered by the nearest layer,
+so an include widens and never takes anything away. Nothing is hidden — every
+file that contributed is named by `--dry-run`, and `scute check` answers for what
+the policy ended up granting however it got there. A policy that includes itself,
+around any number of corners, is refused.
 
 ## Commands
 
@@ -792,10 +819,13 @@ refresh performed inside a sandbox rotates yours out from under you.
 
 ### Run the broker as a service
 
-Scute attaches to a broker already running, and starts one per run only when
-there is none. A service is better: no startup per run, one certificate
-authority that stays put, and systemd confining the process that holds your
-secrets.
+**A brokered policy needs a broker already running.** Scute attaches to it and
+does not start one: a process holding credentials has a lifetime of its own, one
+already running has the certificate authority your runtimes already trust, and a
+broker started per run would be a second listener on the ports the service holds
+and a stranger in the cgroup scute needs to delegate. Without one, a policy that
+needs a broker is refused and told this. `scute doctor` says whether this host
+has one.
 
 ```sh
 sudo dnf install keyfence               # from the repository Install enables
@@ -812,6 +842,159 @@ agent it protects, not more.
 
 `releng/keyfence.service` here is the same unit without the socket activation,
 for a broker you built rather than installed.
+
+Where there is no service to attach to — a container, a CI host with no systemd —
+name the program and scute will start one for the run:
+
+```sh
+scute run --policy agent.policy --broker-path ./keyfence -- claude
+```
+
+A broker of KeyFence's own needs `--api-allow-uid $(id -u)` before it will serve
+a Unix control socket at all, and systemd refuses to start a socket unit whose
+service is already running — so enable the socket first, or restart the service
+after.
+
+### Pushing to a forge without the key
+
+An ssh key is the credential kind with no header to swap, so the broker keeps
+the key itself and answers the sandbox's ssh on a bastion of its own. The agent
+uses the remote it already has, and never holds anything worth stealing.
+
+**1. Let the broker reach the forge.** It refuses a host it has no key for,
+which is what stops it offering your key to whatever answers an address:
+
+```sh
+ssh-keyscan -H github.com >> ~/.keyfence/ssh/known_hosts
+```
+
+**2. Write the policy.** `forge.policy`, whole:
+
+```toml
+include = ["base"]                        # /usr, /etc, /proc, the device nodes
+
+[command]
+program = "git"
+
+[filesystem]
+read-write = ["."]                        # the repository you run it in
+
+[credentials.forge]
+secret-file = "~/.ssh/id_ed25519_forge"   # scute reads it; the sandbox cannot
+ssh-user = "git"                          # who to be at the other end
+destinations = ["github.com"]             # where the broker connects
+
+[environment.set]
+GIT_CONFIG_GLOBAL = "/dev/null"           # your ~/.gitconfig may be unreachable
+```
+
+**3. Run it.** The remote is the ordinary one — `git@github.com:owner/repo.git`:
+
+```sh
+scute run --policy forge.policy -- ls-remote origin
+scute run --policy forge.policy -- push origin HEAD
+```
+
+**4. Convince yourself.** `--dry-run` shows where port 22 goes, and the sandbox
+cannot read what it is authenticating with:
+
+```sh
+scute run --policy forge.policy --dry-run -- ls-remote origin
+```
+
+```text
+credential   forge
+             holds /home/you/.ssh/id_ed25519_forge
+             usable only at github.com
+             an ssh key: the broker logs in there as git
+ssh          port 22 goes to the broker's bastion at 127.0.0.1:10211
+```
+
+Nothing has been read or started at that point — a dry run is a plan, and the
+key is read only when a run needs a token minted from it.
+
+#### How it holds
+
+Two mechanisms, and neither is something the command has to know about. The
+kernel sends port 22 to the bastion, the way it already sends 80 and 443 to the
+proxy, so a client aimed at github arrives where the key is. And the token
+travels as **an `ssh` of the sandbox's own, first on its `PATH`** — a few lines
+that answer the bastion's password prompt from a file readable only inside the
+run, written when the token is minted and removed when the run ends.
+
+Why a program rather than a variable: an agent decides what its subprocesses
+inherit. Codex's default hands its shells a core set — `HOME`, `PATH`, and
+little else — so a token in `SSHPASS` would reach the agent and stop there, and
+the `git` it runs would have no credential. `PATH` survives, because a shell
+without one is no use to anybody. Keeping the token out of the environment is
+worth something by itself: it is not in anything the agent copies into a log.
+
+What it needs, beyond the two steps above: a broker running ([as a
+service](#run-the-broker-as-a-service)), and the kernel redirect, which is
+`cap_bpf` — a packaged scute has it, a build from source gets it with `make
+egress`. Without the redirect an ssh credential is **refused**, not quietly
+downgraded: port 22 would otherwise reach the real host and offer it a password
+it has never heard of, and the failure would read as a bad key.
+
+One limit: the bastion connects to the destination the token names, and ssh
+carries no equivalent of a TLS server name, so it cannot be told which of several
+hosts the sandbox meant. One credential is one upstream host — which is why
+`destinations` must name exactly one.
+
+### Reaching a socket the host already has
+
+Sometimes the thing holding a credential is not the broker: an ssh-agent you
+already run, a language server, a signing daemon. Every Unix socket already on
+the host is out of reach of a sandbox, whatever the filesystem rules say — the
+sockets lying around a machine include the broker's own control API, and a
+sandbox that could reach that could ask for the credentials it exists not to
+hold. One rule opens one socket:
+
+```toml
+[filesystem]
+connect = ["/run/user/1000/scute-ssh/agent.sock"]
+
+[network]
+unix-sockets = true
+```
+
+The example worth walking through is an ssh-agent, because it is the fallback
+when a forge is reached some way the broker does not cover. Start one outside,
+holding one key restricted to one destination (`ssh-add -h`, OpenSSH 8.9 or
+newer), and let the policy name its socket.
+
+```sh
+mkdir -p -m 700 /run/user/$(id -u)/scute-ssh
+eval "$(ssh-agent -a /run/user/$(id -u)/scute-ssh/agent.sock)"
+ssh-add -h 'git@forge.example.com' ~/.ssh/id_ed25519_forge
+ssh-keyscan forge.example.com > /run/user/$(id -u)/scute-ssh/known_hosts
+```
+
+The policy points the sandbox at that agent, and at an ssh configuration of its
+own — `ssh -F` also means the system-wide one is not read, which matters because
+`/etc` belongs to a user the sandbox has no mapping for and ssh refuses a config
+whose owner it cannot account for:
+
+```toml
+[network]
+mode = "host"
+unix-sockets = true
+connect-tcp = [22, 443, 53]
+
+[environment.set]
+SSH_AUTH_SOCK = "/run/user/1000/scute-ssh/agent.sock"
+GIT_SSH_COMMAND = "ssh -F /run/user/1000/scute-ssh/ssh_config"
+```
+
+What that buys, and it is worth being exact: the sandbox can push to that forge,
+it cannot read `~/.ssh`, it cannot take the key with it, and the agent will not
+sign for anywhere else — ask it for any other host and it reports no identities
+at all. What it does not buy is a restriction on *what* is pushed. An agent that
+can push can push anything it can read.
+
+It is still second best to the bastion above, and for one reason: an agent
+socket is a signing service the sandbox holds for as long as the run lasts. The
+bastion never gives the sandbox anything but a token that expires.
 
 ### Anything else beside the sandbox
 
@@ -945,7 +1128,9 @@ scute: the broker refused 1 request:
 |---|---|
 | `Permission denied` from the command | The policy is missing a path. Re-run with `--explain` and it names them, with the lines to add — scute says so itself when a command fails and you are watching. |
 | `/dev/null: Permission denied` | Nothing is granted implicitly. Name `/dev/null`, and usually `/proc`. |
+| `test -r FILE` says yes, and reading it fails | `access(2)` is not governed by Landlock, so shell tests, `configure` scripts and anything asking "could I open this?" get an answer that has nothing to do with what opening would do. Verify a grant by reading the file, or ask the policy directly: `scute check --policy p FILE`, which answers from the rules and never from `access(2)`. |
 | A binary you just built will not run | `read-write` can hold it; running it needs `read-write-execute`. |
+| `broker did not answer … address already in use` | A broker is already listening on the proxy port — usually your own KeyFence service. Scute attaches to one that offers a Unix control socket and starts its own when there is none, so give the running one a socket: `systemctl --user enable --now keyfence-control.socket`, then restart `keyfence.service` *after* the socket unit is up, since systemd refuses to start a socket whose service is already running. KeyFence also needs `--api-allow-uid $(id -u)` before it will serve a Unix control API at all. |
 | `cannot give controllers to children` | Scute needs a cgroup of its own and normally makes one. This means it could not: no systemd user manager in the session, or `SCUTE_NO_OWN_SCOPE=1`. Run it under `systemd-run --user --scope -p Delegate=yes scute run ...`. |
 | `unix_listener: socket: Operation not permitted` | For sandbox IPC, use `--allow-unix-sockets` or `[network] unix-sockets = true` on Landlock ABI 9. Host pathname sockets stay denied. |
 | A learned policy is full of your dotfiles | bash sources `~/.bashrc` non-interactively when stdin is a socket, as under CI. Learn with `< /dev/null`, or `bash --norc`. |
@@ -953,6 +1138,9 @@ scute: the broker refused 1 request:
 | `command not found` for something on your `PATH` | The command must be an absolute path: a sandbox whose command is found by searching `PATH` depends on the environment it inherited. |
 | A policy needing `allow` fails only under `strace` | ptrace suppresses file capabilities. Not a scute bug. |
 | `cannot start a sandbox from inside one` | Exactly that: a sandbox refuses the syscalls a sandbox needs. Run it from outside. |
+| `bwrap: No permissions to create a new namespace, likely because the kernel does not allow non-privileged user namespaces` | The sandboxed command tried to sandbox itself, and is guessing at why it could not. Your kernel is fine; scute's filter refused it, and the sysctl named does not need setting. Turn the inner sandbox off — `codex --dangerously-bypass-approvals-and-sandbox` — which is what the shipped policy already does. `--explain` says this for you. |
+| `Operation not permitted` from `execve`, on a path the policy grants | The file carries capabilities — the packaged `scute` does, so do `ping` and `newgidmap`. A process may not exec one unless its permitted set is within the caller's bounding set, and a sandboxed child's is empty. Scute says so when it happens. Run it outside, or `setcap -r` it. |
+| A program dies immediately, killed by `SIGSYS` (exit 159) | It is a 32-bit or x32 binary. The seccomp filter is built for this machine's architecture and refuses every other one outright, since the call numbers mean different things there. Scute says so when it happens. |
 | `scute doctor` exits non-zero | It names the missing control. Landlock needs Linux 5.13 or newer, and unprivileged user namespaces must be enabled. |
 
 ## What it protects, and what it does not
@@ -960,7 +1148,11 @@ scute: the broker refused 1 request:
 Within a sandbox, a command cannot read files the policy does not name, cannot
 write outside what it was given, cannot reach the network beyond what it was
 allowed, cannot regain a capability, cannot put itself in a fresh user
-namespace, and cannot exceed the memory, process or CPU limits it was given.
+namespace, cannot type into the terminal it was started from, and cannot exceed
+the memory, process or CPU limits it was given. It also starts with no open
+descriptor but the standard three: a file that is already open is one Landlock
+was never asked about, so `exec 9</etc/shadow; scute run ...` hands the sandbox
+nothing.
 
 Scute needs no privileges of its own for any of that: it is not setuid and
 expects no root, and everything it installs, an ordinary user may install for

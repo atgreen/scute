@@ -127,13 +127,29 @@ a nameserver, and a nameserver is a channel.  Narrowing this to the resolvers in
 (defparameter +proxied-ports+ '(80 443)
   "The ports a proxied sandbox has redirected to its proxy.
 
-Only these.  Sending anything else to an HTTP proxy would break it -- an SSH
-session, a database connection -- and refusing those outright says so, where
-quietly delivering them somewhere that cannot speak their protocol would leave
-somebody debugging a timeout.")
+Only these.  Sending anything else to an HTTP proxy would break it -- a database
+connection, say -- and refusing those outright says so, where quietly delivering
+them somewhere that cannot speak their protocol would leave somebody debugging a
+timeout.
 
-(defun egress-redirect-forms (endpoint)
+SSH is the exception, and it is not sent here: it goes to the broker's bastion
+instead, which does speak it.  See +ssh-port+.")
+
+(defparameter +ssh-port+ 22
+  "The port redirected to the broker's ssh bastion, when a policy has an ssh
+credential.
+
+This is what lets an agent write the remote it already has -- git@github.com --
+and have the connection arrive where the key is.  The alternative is telling the
+agent to address the bastion itself, which means the agent has to know the
+arrangement exists and get the URL right, and an agent that gets it wrong
+authenticates to the real host with nothing.")
+
+(defun egress-redirect-forms (endpoint &optional ssh-endpoint)
   "The program that sends a sandbox's web connections to ENDPOINT.
+
+With SSH-ENDPOINT, port 22 goes there instead of being refused: the broker's ssh
+bastion, which holds the key the sandbox does not have.
 
 A connect4 program may rewrite the destination it was asked about, which is the
 difference between a proxy that a command has to be persuaded to use and one it
@@ -145,8 +161,33 @@ TLS handshake, and the proxy reads it there.
 
 The proxy's address and port are compiled in rather than read from a map, because
 compiling needs no privileges and happens once per run anyway."
-  (let ((address (endpoint-address-word endpoint))
-        (port (network-port-word (endpoint-port endpoint))))
+  (let* ((address (endpoint-address-word endpoint))
+         (port (network-port-word (endpoint-port endpoint)))
+         (ssh-address (and ssh-endpoint (endpoint-address-word ssh-endpoint)))
+         (ssh-port (and ssh-endpoint (network-port-word (endpoint-port ssh-endpoint))))
+         ;; The proxy is left alone so that a redirected connection is not
+         ;; redirected again, and the bastion for the same reason.  Everything
+         ;; else is refused: a sandbox whose egress is a proxy has no other way
+         ;; out by definition.
+         (otherwise `(if (= dport ,(network-port-word +resolver-port+))
+                         1
+                         (if (= dport ,port)
+                             (if (= destination ,address) 1 0)
+                             ,(if ssh-endpoint
+                                  `(if (= dport ,ssh-port)
+                                       (if (= destination ,ssh-address) 1 0)
+                                       0)
+                                  0))))
+         ;; SSH, when the policy has a key for it: to the bastion, which holds
+         ;; the key and connects upstream itself.  Placed before the refusal, so
+         ;; that a policy without an ssh credential still refuses port 22.
+         (after-web (if ssh-endpoint
+                        `(if (= dport ,(network-port-word +ssh-port+))
+                             (progn (setf (ctx user-ip4) ,ssh-address)
+                                    (setf (ctx user-port) ,ssh-port)
+                                    1)
+                             ,otherwise)
+                        otherwise)))
     `((whistler:defprog scute-egress-proxied
        (:type :cgroup-sock-addr :section "cgroup/connect4" :license "GPL")
        (let* ((destination u32 (ctx user-ip4))
@@ -154,10 +195,7 @@ compiling needs no privileges and happens once per run anyway."
          ;; The web ports go to the proxy; name resolution is left alone, because a
          ;; client resolves before it connects and connect4 sees a connected UDP
          ;; socket too -- refusing 53 here stopped resolution, so nothing ever
-         ;; reached the proxy to be redirected; the proxy itself is left alone so
-         ;; that a redirected connection is not redirected again; and everything
-         ;; else is refused, because a sandbox whose egress is a proxy has no
-         ;; other way out by definition.
+         ;; reached the proxy to be redirected.
          (if (= dport ,(network-port-word 443))
              (progn (setf (ctx user-ip4) ,address)
                     (setf (ctx user-port) ,port)
@@ -166,20 +204,16 @@ compiling needs no privileges and happens once per run anyway."
                  (progn (setf (ctx user-ip4) ,address)
                         (setf (ctx user-port) ,port)
                         1)
-                 (if (= dport ,(network-port-word +resolver-port+))
-                     1
-                     (if (= dport ,port)
-                         (if (= destination ,address) 1 0)
-                         0)))))))))
+                 ,after-web)))))))
 
-(defun compile-egress-redirect (endpoint)
+(defun compile-egress-redirect (endpoint &optional ssh-endpoint)
   "Compile the redirect for ENDPOINT.  Touches no kernel."
   (uiop:symbol-call
    '#:whistler/loader '#:compile-bpf-forms
    '()
    (mapcar (lambda (form)
              (uiop:symbol-call '#:whistler/loader '#:whistler-intern-form form))
-           (egress-redirect-forms endpoint))))
+           (egress-redirect-forms endpoint ssh-endpoint))))
 
 ;;── Installing it ──────────────────────────────────────────────────────────────
 
@@ -257,7 +291,7 @@ Answers the attachment, which the supervisor detaches when the sandbox ends."
                         (symbol-value (uiop:find-symbol* '#:+bpf-cgroup-inet4-connect+
                                                          '#:whistler/loader))))))
 
-(defun install-egress-redirect (cgroup endpoint)
+(defun install-egress-redirect (cgroup endpoint &optional ssh-endpoint)
   "Send CGROUP's web connections to ENDPOINT, and refuse everything else.
 
 The same privileges and the same attachment point as the guard; a different
@@ -267,7 +301,8 @@ reach; this says that it reaches the proxy whatever it asked for."
     (unless available
       (setup-error :egress-redirect :detail (format nil "~A" reason))))
   (let ((narration (make-string-output-stream)))
-    (multiple-value-bind (map-specs prog-specs) (compile-egress-redirect endpoint)
+    (multiple-value-bind (map-specs prog-specs)
+        (compile-egress-redirect endpoint ssh-endpoint)
       (declare (ignore map-specs))
       (let ((progs (handler-case
                        (with-narration-captured narration

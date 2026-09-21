@@ -240,6 +240,36 @@ read-execute = [\"/usr\"]"
                             stream :command (call-scute 'launch-plan-command plan)))
               result))))
 
+(deftest test-a-command-that-sandboxes-itself-is-noticed
+  "An agent that wraps what it runs in bubblewrap -- codex does -- meets Scute's
+filter and blames the kernel for it.  A watched run has to notice the attempt so
+that --explain can say what really refused it, and the attempt has to keep
+failing: noticing it is not permitting it.
+
+The second half is the one worth guarding.  The clone that asks for
+CLONE_NEWUSER is refused by an argument test, and an argument test that matched
+too widely would refuse every fork on the machine."
+  (multiple-value-bind (result observations)
+      (learn-command '("/usr/bin/unshare" "--user" "/bin/true"))
+    (check (not (eql 0 (call-scute 'sandbox-result-exit-code result)))
+           "a watched run allowed a nested user namespace: ~S" result)
+    (check (call-scute 'observations-nested-sandbox observations)
+           "the command tried to sandbox itself and nothing recorded it"))
+  (multiple-value-bind (result observations)
+      (learn-command '("/bin/sh" "-c" "/bin/true"))
+    (check (eql 0 (call-scute 'sandbox-result-exit-code result))
+           "an ordinary command could not fork while being watched: ~S" result)
+    (check (not (call-scute 'observations-nested-sandbox observations))
+           "an ordinary fork was mistaken for a sandbox inside the sandbox"))
+  (let ((hint (with-output-to-string (stream)
+                (call-scute 'report-nested-sandbox stream))))
+    (check (search "--dangerously-bypass-approvals-and-sandbox" hint)
+           "the hint does not name the flag that turns the inner sandbox off:~%~A"
+           hint)
+    (check (search "not your kernel" hint)
+           "the hint does not contradict the advice the command itself gave:~%~A"
+           hint)))
+
 (deftest test-auditing-records-what-happened
   "A policy asking to be audited gets a record per event, one JSON object to a
 line, so that reading it needs nothing but the usual tools."

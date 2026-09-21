@@ -24,6 +24,105 @@
            (read-file-string report))
       (delete-scratch report))))
 
+(defun listening-unix-socket (path)
+  "A listening Unix socket at PATH, in this process, outside any sandbox."
+  (ignore-errors (delete-file path))
+  (let ((socket (make-instance 'sb-bsd-sockets:local-socket :type :stream)))
+    (sb-bsd-sockets:socket-bind socket path)
+    (sb-bsd-sockets:socket-listen socket 1)
+    socket))
+
+(defun connect-probe (directory)
+  "Build a program that connects to a Unix socket and answers 0 or its errno.
+Answers its path, or NIL where it could not be built."
+  (let ((source (format nil "~A/connect.c" directory))
+        (program (format nil "~A/connect" directory)))
+    (with-open-file (stream source :direction :output :if-exists :supersede)
+      (write-line "#include <sys/socket.h>" stream)
+      (write-line "#include <sys/un.h>" stream)
+      (write-line "#include <string.h>" stream)
+      (write-line "#include <errno.h>" stream)
+      (write-line "int main(int argc, char **argv) {" stream)
+      (write-line "  struct sockaddr_un a; int s;" stream)
+      (write-line "  memset(&a, 0, sizeof a); a.sun_family = AF_UNIX;" stream)
+      (write-line "  strncpy(a.sun_path, argv[1], sizeof a.sun_path - 1);" stream)
+      (write-line "  s = socket(AF_UNIX, SOCK_STREAM, 0);" stream)
+      (write-line "  if (s < 0) return 100 + errno;" stream)
+      (write-line "  if (connect(s, (struct sockaddr *)&a, sizeof a) < 0) return errno;" stream)
+      (write-line "  return 0;" stream)
+      (write-line "}" stream))
+    (uiop:run-program (list "gcc" "-O2" "-o" program source) :ignore-error-status t)
+    (and (probe-file program) program)))
+
+(deftest test-asking-whether-a-path-is-readable-is-not-reading-it
+  "A boundary of the kernel's, documented here because it looks like a bug in
+the sandbox.  Landlock governs opening a file and not access(2), so test -r says
+a path is readable and reading it is refused a moment later.  Anyone verifying a
+policy with a shell test concludes it is wider than it is, and anyone debugging a
+refusal concludes the sandbox is inconsistent.
+
+If this test ever fails, the kernel has started governing faccessat and the
+README's troubleshooting row about it should go."
+  (let ((result (sandbox-says
+                 "if test -r /etc/fstab; then echo access-says-yes; fi; ~
+                  if cat /etc/fstab > /dev/null 2>&1; then echo read-it; ~
+                  else echo read-refused; fi"
+                 (list (list :read-execute "/usr")
+                       (list :read "/etc/hostname")
+                       (list :read "/proc")
+                       (list :read-write "/dev/null")))))
+    (check (search "access-says-yes" result)
+           "test -r no longer answers about a path the policy withholds: ~S" result)
+    (check (search "read-refused" result)
+           "a path the policy never named was readable: ~S" result)))
+
+(deftest test-a-host-socket-needs-a-connect-rule
+  "Every Unix socket already on the host is out of reach, whatever the
+filesystem rules say, because the sockets lying around a machine include the
+credential broker's own control API -- and a sandbox that could reach that could
+ask for the secrets it exists not to hold.
+
+One kind of rule opens one socket: connect, which names the socket itself.  This
+is the grant that lets an agent reach a restricted ssh-agent and push to a forge
+without the key ever being in the sandbox, so both halves are worth proving --
+that a read-write rule over the same directory is not enough, and that connect
+is."
+  (let* ((directory (scratch-pathname "connect"))
+         (path (format nil "~A/socket" directory))
+         (socket nil))
+    (flet ((run (policy-text probe)
+             (call-scute
+              'run-launch-plan
+              (call-scute 'compile-launch-plan
+                          (call-scute 'validate-sandbox-policy
+                                      (call-scute 'parse-policy-text policy-text))
+                          (list probe path)
+                          :directory directory)))
+           (policy (extra)
+             (format nil "[filesystem]~%read-execute = [\"/usr\"]~%~
+                          read-write-execute = [\"~A\"]~%~A~
+                          [network]~%mode = \"none\"~%unix-sockets = true~%"
+                     directory extra)))
+      (unwind-protect
+           (progn
+             (ensure-directories-exist (format nil "~A/" directory))
+             (let ((probe (connect-probe directory)))
+               (setf socket (listening-unix-socket path))
+               (let ((refused (run (policy "") probe))
+                     (allowed (run (policy (format nil "connect = [\"~A\"]~%" path))
+                                   probe)))
+                 (check (eql 13 (call-scute 'sandbox-result-exit-code refused))
+                        "a host socket was reachable under read-write alone, or ~
+                         failed for some reason other than EACCES: ~S" refused)
+                 (check (eql 0 (call-scute 'sandbox-result-exit-code allowed))
+                        "a connect rule did not make the socket reachable: ~S"
+                        allowed))))
+        (when socket (ignore-errors (sb-bsd-sockets:socket-close socket)))
+        (ignore-errors (delete-file path))
+        (dolist (name (list "connect.c" "connect"))
+          (ignore-errors (delete-file (format nil "~A/~A" directory name))))
+        (ignore-errors (sb-posix:rmdir directory))))))
+
 (deftest test-filesystem-is-denied-by-default
   "Without a rule for it, a path cannot be opened -- and with one, it can.
 Both halves matter: the second is what proves the first is Landlock talking

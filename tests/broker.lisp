@@ -48,7 +48,7 @@
                      (format nil "        open(~S,'a').write(json.dumps(body)+chr(10))"
                              record)
                      "        self.send_response(200); self.end_headers()"
-                     "        held=body.get('credential') or body.get('credential_ref')"
+                     "        held=body.get('credential') or body.get('credential_ref') or body.get('ssh_private_key')"
                      "        t={'token':'kf_'+held[::-1]}"
                      "        self.wfile.write(json.dumps(t).encode())"
                      "    def do_DELETE(self):"
@@ -79,6 +79,186 @@ env = \"ANTHROPIC_API_KEY\"~%"
           +broker-proxy-port+ (broker-test-socket)
           (format nil "~A.secret" (scratch-pathname "broker"))))
 
+(defun ssh-credential-policy-text (key-file)
+  "A policy whose credential is an ssh key the broker holds for a forge."
+  (format nil "~
+[filesystem]~%read-execute = [\"/usr\"]~%read = [\"/etc\"]~%~%~
+[network]~%mode = \"proxied\"~%proxy = \"http://127.0.0.1:~D\"~%~%~
+[credentials]~%broker = \"keyfence\"~%control-socket = ~S~%~%~
+[credentials.forge]~%secret-file = ~S~%ssh-user = \"git\"~%~
+destinations = [\"forge.example.com\"]~%"
+          +broker-proxy-port+ (broker-test-socket) key-file))
+
+(deftest test-a-control-socket-that-never-answers-is-an-error-not-a-debugger
+  "A socket can exist and serve nobody -- systemd holds one open for a service
+that is already running, so nothing ever accepts on it -- and Scute used to meet
+that with an unhandled deadline and an SBCL debugger prompt, which is the worst
+thing a command-line tool can do to somebody.
+
+The catch is that a deadline is not an error: SBCL signals DEADLINE-TIMEOUT as a
+plain condition, so the handler that catches everything else lets it past."
+  (let* ((directory (scratch-pathname "deaf-broker"))
+         (path (format nil "~A/control.sock" directory))
+         (socket nil))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist (format nil "~A/" directory))
+           ;; Listening and never accepting: the connect succeeds into the
+           ;; backlog, the request goes out, and the answer never comes.
+           (setf socket (listening-unix-socket path))
+           (let ((refusal (nth-value 1 (ignore-errors
+                                        (call-scute 'unix-control-request
+                                                    path "GET" "/health"
+                                                    :seconds 1)))))
+             (check refusal "a socket that never answers did not raise anything")
+             (check (and refusal (search "did not answer"
+                                         (princ-to-string refusal)))
+                    "the refusal does not say what happened: ~A" refusal))
+           ;; And the question Scute actually asks at startup answers no rather
+           ;; than exploding.
+           (check (null (call-scute 'broker-answering-p path))
+                  "a deaf socket was taken for a working broker"))
+      (when socket (ignore-errors (sb-bsd-sockets:socket-close socket)))
+      (ignore-errors (delete-file path))
+      (ignore-errors (sb-posix:rmdir directory)))))
+
+(deftest test-an-ssh-credential-is-a-key-the-broker-keeps
+  "An ssh key is the credential kind with no header to swap, so the broker holds
+it and answers the sandbox's ssh itself.  What Scute has to get right is the
+request -- the key goes up as an ssh key rather than as something to put in a
+header -- and the arrangement around it: the token lands where sshpass reads it,
+port 22 is sent to the bastion rather than to the host the command named, and the
+plan says so out loud."
+  (if (plusp (cffi:foreign-funcall "system" :string
+                                  "command -v python3 >/dev/null 2>&1" :int))
+      (format *error-output* "~&SKIP: no python3 to stand in for a broker~%")
+      (let* ((record (format nil "~A.jsonl" (scratch-pathname "broker-ssh-record")))
+             (key-file (format nil "~A.key" (scratch-pathname "broker-ssh")))
+             (key "-----BEGIN OPENSSH PRIVATE KEY-----not-a-real-key")
+             (helper nil))
+        (with-open-file (stream key-file :direction :output :if-exists :supersede)
+          (write-line key stream))
+        (sb-posix:chmod key-file #o600)
+        (unwind-protect
+             (progn
+               (setf helper (start-fake-broker record))
+               (let* ((policy (call-scute 'validate-sandbox-policy
+                                          (call-scute 'parse-policy-text
+                                                      (ssh-credential-policy-text key-file))))
+                      (plan (call-scute 'compile-launch-plan policy '("/bin/true")))
+                      (seen nil)
+                      (shim-directory nil)
+                      (shim-text nil))
+                 (check (equal "127.0.0.1:10211" (call-scute 'launch-plan-ssh-proxy plan))
+                        "the plan does not send ssh to the bastion: ~S"
+                        (call-scute 'launch-plan-ssh-proxy plan))
+                 (check (member 22 (call-scute 'launch-plan-connect-tcp plan))
+                        "port 22 is not permitted, so the redirect would never ~
+                         see the connection: ~S"
+                        (call-scute 'launch-plan-connect-tcp plan))
+                 ;; Read while the sandbox would be running: the shim exists
+                 ;; for exactly as long as the run does.
+                 (call-scute 'call-with-broker plan
+                             (lambda (revised)
+                               (setf seen revised)
+                               (let* ((path (find-if (lambda (entry)
+                                                       (and (> (length entry) 5)
+                                                            (string= "PATH=" entry :end2 5)))
+                                                     (call-scute 'launch-plan-environment revised)))
+                                      (value (and path (subseq path 5)))
+                                      (directory (and value
+                                                      (subseq value 0 (position #\: value)))))
+                                 (setf shim-directory directory)
+                                 (when (and directory
+                                            (probe-file (format nil "~A/ssh" directory)))
+                                   (setf shim-text
+                                         (with-open-file (stream (format nil "~A/ssh" directory))
+                                           (let ((text (make-string (file-length stream))))
+                                             (subseq text 0 (read-sequence text stream)))))))))
+                 (let ((environment (call-scute 'launch-plan-environment seen))
+                       (first-on-path shim-directory))
+                   ;; The credential is not in the environment at all.  An agent
+                   ;; decides what its subprocesses inherit -- codex hands its
+                   ;; shells a core set and nothing else -- so a token in a
+                   ;; variable reaches the agent and stops there.  What the
+                   ;; sandbox gets instead is an ssh of its own, first on PATH,
+                   ;; which is the one variable every agent passes down.
+                   (check (notany (lambda (entry) (search "kf_" entry)) environment)
+                          "the token was in the environment, where an agent may ~
+                           filter it away or write it to a log: ~S" environment)
+                   (check (notany (lambda (entry) (search "BEGIN OPENSSH" entry))
+                                  environment)
+                          "the key itself reached the sandbox's environment")
+                   (check (and first-on-path (search "scute-ssh-" first-on-path))
+                          "the sandbox's own ssh is not first on its PATH: ~S"
+                          first-on-path)
+                   (check shim-text
+                          "nothing was written for the sandbox to run as ssh")
+                   (when shim-text
+                     (check (search "SSH_ASKPASS" shim-text)
+                            "the shim does not answer the bastion's password ~
+                             prompt: ~A" shim-text)
+                     (check (search "/ssh " shim-text)
+                            "the shim does not run a real ssh by an absolute ~
+                             path, so it would find itself: ~A" shim-text))
+                   ;; And it is taken away again: a token left in the runtime
+                   ;; directory outlives the run that minted it.
+                   (check (not (probe-file first-on-path))
+                          "the shim directory survived the run: ~A" first-on-path))
+                 (let ((sent (with-open-file (stream record) (read-line stream nil ""))))
+                   (check (search "ssh_private_key" sent)
+                          "the key was not offered to the broker as an ssh key: ~A"
+                          sent)
+                   (check (and (search "ssh_username" sent) (search "\"git\"" sent))
+                          "the broker was not told who to log in as: ~A" sent)
+                   (check (search "forge.example.com" sent)
+                          "the token was not locked to the forge: ~A" sent))))
+          (when helper (call-scute 'stop-helper helper))
+          (ignore-errors (delete-file key-file))
+          (ignore-errors (delete-file record))))))
+
+(deftest test-an-ssh-credential-is-kept-to-one-key-and-one-host
+  "Two refusals, both about the broker's side of the arrangement.  A ref names a
+credential the broker swaps into a header, which would issue a token the bastion
+cannot use.  And the bastion connects to the destination the token names, taking
+the first if there are several -- so a second destination is one the sandbox
+would never reach, silently."
+  (flet ((refusal (text)
+           (nth-value 1 (ignore-errors
+                         (call-scute 'validate-sandbox-policy
+                                     (call-scute 'parse-policy-text text))))))
+    (let ((with-ref (refusal (format nil "~
+[filesystem]~%read-execute = [\"/usr\"]~%~%~
+[credentials.forge]~%ref = \"forge\"~%ssh-user = \"git\"~%~
+destinations = [\"forge.example.com\"]~%")))
+          (two-hosts (refusal (format nil "~
+[filesystem]~%read-execute = [\"/usr\"]~%~%~
+[credentials.forge]~%secret-file = \"/etc/hostname\"~%ssh-user = \"git\"~%~
+destinations = [\"one.example.com\", \"two.example.com\"]~%"))))
+      (check (and with-ref (search "secret-file" (princ-to-string with-ref)))
+             "an ssh credential naming a ref was not refused as such: ~A" with-ref)
+      (check (and two-hosts (search "one host" (princ-to-string two-hosts)))
+             "an ssh credential with two destinations was not refused as such: ~A"
+             two-hosts))))
+
+(deftest test-an-ssh-credential-needs-the-redirect
+  "Without the kernel redirect, port 22 goes to the host the command named, which
+would be handed a password it has never heard of -- and the failure would read as
+a bad key rather than a missing capability.  Refused instead, with the remedy."
+  (let* ((text (ssh-credential-policy-text "/etc/hostname"))
+         (host-mode (let ((in (search "mode = \"proxied\"" text)))
+                      (concatenate 'string (subseq text 0 in) "mode = \"host\""
+                                   (subseq text (+ in (length "mode = \"proxied\""))))))
+         (refusal (nth-value 1 (ignore-errors
+                                (call-scute 'compile-launch-plan
+                                            (call-scute 'validate-sandbox-policy
+                                                        (call-scute 'parse-policy-text
+                                                                    host-mode))
+                                            '("/bin/true"))))))
+    (check refusal "an ssh credential was accepted with no redirect to use")
+    (check (search "make egress" (princ-to-string refusal))
+           "the refusal does not say how to get the redirect: ~A" refusal)))
+
 (deftest test-a-policy-says-which-credential-the-sandbox-never-holds
   "The policy names a secret file and an environment variable.  What the plan
 says is that the file is read by Scute and the variable carries a token, and a
@@ -102,6 +282,39 @@ dry run has to show both without reading anything."
              "the broker would not listen where the proxy is")
       (check (equal (broker-test-socket) (call-scute 'broker-settings-control-socket broker))
              "the control socket was not read from the policy"))))
+
+(deftest test-a-broker-that-will-not-start-is-quoted-not-guessed-about
+  "A broker that fails writes the reason down -- a port already in use, a
+certificate it cannot read -- and that line is the answer.  Scute used to guess
+instead, and its guess named the only cause it knew of: a KeyFence too old for
+Unix control.  Anyone whose broker failed for any other reason was sent to
+upgrade something that was already new enough.
+
+Both halves are checked, because the guess is still the right thing to say when
+the broker wrote nothing at all."
+  (let* ((directory (scratch-pathname "broker-log"))
+         (log (format nil "~A/broker.log" directory)))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist (format nil "~A/" directory))
+           (with-open-file (stream log :direction :output :if-exists :supersede)
+             (write-line "2026/09/20 17:54:01 proxy listening on 127.0.0.1:10210" stream)
+             (write-line "2026/09/20 17:54:01 ssh: listen 127.0.0.1:10211: bind: address already in use"
+                         stream)
+             (write-line "" stream))
+           (let ((complaint (call-scute 'broker-last-words log)))
+             (check (equal "ssh: listen 127.0.0.1:10211: bind: address already in use"
+                           complaint)
+                    "the broker's last words came back as ~S" complaint))
+           (with-open-file (stream log :direction :output :if-exists :supersede)
+             (declare (ignore stream)))
+           (check (null (call-scute 'broker-last-words log))
+                  "an empty log answered with something")
+           (check (null (call-scute 'broker-last-words
+                                    (format nil "~A/no-such-log" directory)))
+                  "a log that does not exist answered with something"))
+      (ignore-errors (delete-file log))
+      (ignore-errors (sb-posix:rmdir directory)))))
 
 (deftest test-credentials-need-a-proxy-to-be-swapped-behind
   "A swap nothing routes through is not containment.  A policy asking for

@@ -22,6 +22,11 @@
 # A policy of that name in your configuration directory wins over this one, and an
 # upgrade will not touch it. "scute policies" says which file answered.
 
+# Everything true of any program on this host -- /usr, /etc, /proc, the device
+# nodes, /tmp -- comes from the base policy, so that what is written out below is
+# only what is true of a shell. --dry-run names both files.
+include = ["base"]
+
 [command]
 program = "bash"
 # No profile and no rc file: a login shell sources scripts from your home that
@@ -31,23 +36,9 @@ program = "bash"
 arguments = ["--noprofile", "--norc"]
 
 [filesystem]
-read-execute = [
-  "/usr",
-  "?/opt",
-  "?/home/linuxbrew/.linuxbrew",
-  "?~/.local/bin",
-]
-read = [
-  "/etc",
-  "/proc",
-  "/dev/urandom",
-  "?/sys/devices/system/cpu/online",
-]
 read-write = [
-  ".",                                   # where you ran scute: the work
-  "/dev/null",
-  "/dev/tty",                            # the terminal, so this is a shell you can use
-  "/tmp",
+  ".",                                   # where you ran scute: the work, and the
+                                         # only thing here a shell can change
 ]
 
 [network]

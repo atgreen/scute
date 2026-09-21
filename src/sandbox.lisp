@@ -25,6 +25,21 @@ when limits were asked for."
   (events      nil :read-only t)
   (timed-out   nil :read-only t))     ; stopped for taking too long
 
+(defun sandbox-result-wrong-architecture-p (result)
+  "Whether a foreign architecture is what ended this command.
+
+Every refusal Scute writes into its filter answers with an errno; none of them
+kills.  What does kill is libseccomp's own answer for a system call arriving
+from an architecture the filter was not built for, and that is the right answer:
+a 32-bit or x32 binary has different system call numbers, so letting it past
+unfiltered would be a way to make every denial in the filter mean nothing.
+
+The cost is a death with nothing to read.  A 32-bit program dies of SIGSYS on
+its first system call, before it has printed anything, and neither the exit
+status nor the policy says the architecture was the reason.  This is what lets
+Scute say it."
+  (eql +sigsys+ (sandbox-result-term-signal result)))
+
 (defun sandbox-result-oom-killed-p (result)
   "Whether the memory limit is what ended this command.
 A command killed for running out of its own memory looks exactly like one
@@ -59,6 +74,7 @@ killed from outside; the cgroup is what tells them apart."
 (defconstant +stage-learn-handshake+ 9)
 (defconstant +stage-chdir+        10)
 (defconstant +stage-landlock+      8)
+(defconstant +stage-close-descriptors+ 10)
 (defconstant +stage-execve+        6)
 
 (defun child-stage-name (stage)
@@ -73,6 +89,7 @@ killed from outside; the cgroup is what tells them apart."
     (#.+stage-learn-handshake+ :child-hand-over-listener)
     (#.+stage-chdir+         :child-enter-directory)
     (#.+stage-landlock+      :child-restrict-self)
+    (#.+stage-close-descriptors+ :child-close-descriptors)
     (#.+stage-execve+        :child-execve)
     (t                       :child-unknown)))
 
@@ -179,6 +196,30 @@ the child only uses what is already in its hands."
 
 ;;── The child ──────────────────────────────────────────────────────────────────
 
+(defun file-capabilities-p (path)
+  "Whether PATH carries file capabilities of its own."
+  (plusp (cffi:foreign-funcall "getxattr" :string path :string "security.capability"
+                               :pointer (cffi:null-pointer) :unsigned-long 0 :long)))
+
+(defun child-failure-detail-for (stage errno path)
+  "What to add to a stage failure whose errno would otherwise mislead.
+
+One case so far, and it is the one somebody meets by running the packaged Scute
+-- or ping, or anything else with capabilities on it -- inside a sandbox.  A
+process may not exec a file whose permitted capability set is not within its own
+bounding set, and a sandboxed child's bounding set is empty by design.  The
+kernel answers EPERM, which reads as a filesystem permission it is not: the
+policy may grant the path every right there is and the exec still fails."
+  (when (and (eq :child-execve stage)
+             (eql errno +eperm+)
+             path
+             (ignore-errors (file-capabilities-p path)))
+    (format nil "~A carries file capabilities, and a sandbox may not exec one: ~
+                 its bounding set is empty, so the kernel refuses whatever the ~
+                 policy says about the path. Run it outside, or take them off ~
+                 with setcap -r"
+            path)))
+
 (defun run-child (resources)
   "Become the sandboxed command.  Never returns.
 
@@ -251,6 +292,25 @@ collector."
           (when (minusp (%landlock-restrict-self ruleset))
             (die +stage-landlock+ +child-exit-setup-failed+))
           (%close ruleset)))
+      ;; Last: every descriptor but the standard three, and the one this process
+      ;; reports its own failures on.  Scute opens what it opens with O_CLOEXEC,
+      ;; so in the ordinary case there is nothing here to close -- which is the
+      ;; point.  A descriptor is authority that no rule in the policy governs,
+      ;; because it was never opened inside the sandbox, and one forgotten flag
+      ;; anywhere in Scute or in the Lisp runtime underneath it would hand the
+      ;; command a file the kernel will not ask about again.  One syscall makes
+      ;; that impossible rather than merely unlikely.
+      ;;
+      ;; The status pipe is left until exec closes it: it is O_CLOEXEC like the
+      ;; rest, and until execve returns it is the only way a failure below has
+      ;; of being reported as anything but a silent exit code.
+      (let ((status status-fd))
+        (declare (type fixnum status))
+        (when (and (> status 3)
+                   (minusp (%close-range 3 (1- status))))
+          (die +stage-close-descriptors+ +child-exit-setup-failed+))
+        (when (minusp (%close-range (1+ status) #xffffffff))
+          (die +stage-close-descriptors+ +child-exit-setup-failed+)))
       (%execve (launch-resources-path resources) (launch-resources-argv resources)
                (launch-resources-envp resources))
       (die +stage-execve+ +child-exit-exec-failed+))))
@@ -488,7 +548,11 @@ rules to enforce, while an explaining run has the caller's."
              ;; which addresses may be reached, it sends the web ports to the
              ;; proxy and refuses the rest.
              (setf guard (install-egress-redirect
-                          cgroup (proxy-endpoint (launch-plan-proxy plan)))))
+                          cgroup (proxy-endpoint (launch-plan-proxy plan))
+                          ;; With an ssh credential, port 22 goes to the broker's
+                          ;; bastion rather than being refused: the key is there.
+                          (let ((bastion (launch-plan-ssh-proxy plan)))
+                            (and bastion (parse-endpoint bastion nil))))))
            ;; Either guard accounts for connect(2), and sendto(2) on an
            ;; unconnected socket never calls it.  Without this, a sandbox whose
            ;; TCP was fully controlled could still send datagrams anywhere.
@@ -526,7 +590,11 @@ rules to enforce, while an explaining run has the caller's."
                       (when stage
                         (error 'child-failure :operation (child-stage-name stage)
                                               :status status
-                                              :errno child-errno))
+                                              :errno child-errno
+                                              :detail (child-failure-detail-for
+                                                       (child-stage-name stage)
+                                                       child-errno
+                                                       (first (launch-plan-command plan)))))
                       (values (classify-wait-status
                                pid status
                                (and cgroup (read-cgroup-events cgroup))

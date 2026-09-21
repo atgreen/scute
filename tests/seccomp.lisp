@@ -83,6 +83,100 @@ a C program exercises far more of the system-call surface than a shell does."
         (ignore-errors (delete-file (format nil "~A/~A" directory name))))
       (ignore-errors (sb-posix:rmdir directory)))))
 
+(deftest test-the-terminal-cannot-be-typed-into
+  "A sandboxed command keeps the terminal it was started from, as an inherited
+descriptor no policy governs.  TIOCSTI on that descriptor pushes characters into
+the terminal's input queue, and the shell reading them back after the command
+exits runs them as though somebody had typed them -- out of the sandbox and into
+the session.  The filter refuses it.
+
+EPERM is what is checked rather than mere failure.  A kernel from 6.2 on can
+turn TIOCSTI off for the whole machine and Fedora ships it off, so the call
+already fails here with EIO; a test satisfied by failure would pass on this host
+with no filter at all.  EPERM is seccomp's answer and nobody else's, and it
+arrives before the kernel has looked at the descriptor -- which is why the
+program below can ask on an ordinary file and still be refused."
+  (let ((filter (call-scute 'v0-seccomp-filter)))
+    (dolist (name '("ioctl(TIOCSTI)" "ioctl(TIOCLINUX)"))
+      (check (member name (call-scute 'seccomp-filter-denied filter) :test #'string=)
+             "~A is not among what the filter denies" name)))
+  (let ((directory (scratch-pathname "seccomp-tty")))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist (format nil "~A/" directory))
+           (with-open-file (stream (format nil "~A/inject.c" directory)
+                                   :direction :output :if-exists :supersede)
+             (write-line "#include <sys/ioctl.h>" stream)
+             (write-line "#include <errno.h>" stream)
+             (write-line "int main(void){" stream)
+             (write-line "  char c = 'x';" stream)
+             (write-line "  if (ioctl(0, 0x5412, &c) == 0) return 0;" stream)
+             (write-line "  return errno;" stream)
+             (write-line "}" stream))
+           (let ((result (call-scute
+                          'run-namespaced-command
+                          (list "/bin/sh" "-c"
+                                (format nil "cd ~A && gcc -O2 -o inject inject.c && ./inject"
+                                        directory))
+                          :filesystem +unrestricted+)))
+             (check (eql 1 (call-scute 'sandbox-result-exit-code result))
+                    "TIOCSTI answered with something other than EPERM: ~S -- 0 is ~
+                     the terminal accepting it, and anything else is the kernel ~
+                     refusing rather than the filter" result)))
+      (dolist (name '("inject.c" "inject"))
+        (ignore-errors (delete-file (format nil "~A/~A" directory name))))
+      (ignore-errors (sb-posix:rmdir directory)))))
+
+(deftest test-a-foreign-architecture-is-killed-and-named
+  "A filter is built for one architecture's system call numbers.  Anything
+arriving from another -- a 32-bit or x32 binary -- is killed outright rather
+than let past, because on that architecture the numbers in the filter mean
+different calls and every denial in it would be answering about the wrong one.
+
+That is the right answer and a silent one: the program dies of SIGSYS before it
+has printed anything.  So Scute recognises the death and says what it was.
+
+The program below is freestanding -- no libc, one system call -- because a
+machine that can link a 32-bit program is a machine with 32-bit libraries
+installed, and that is too much to ask of every host the suite runs on.  Where
+even this cannot be built, the recognition is still checked and the end-to-end
+half says out loud that it did not run."
+  (check (call-scute 'sandbox-result-wrong-architecture-p
+                     (call-scute 'make-sandbox-result 1 nil 31))
+         "a command killed by SIGSYS was not recognised as a foreign architecture")
+  (check (not (call-scute 'sandbox-result-wrong-architecture-p
+                          (call-scute 'make-sandbox-result 1 nil 9)))
+         "a command killed by SIGKILL was mistaken for a foreign architecture")
+  (let* ((directory (scratch-pathname "seccomp-m32"))
+         (source (format nil "~A/tiny.c" directory))
+         (program (format nil "~A/tiny" directory)))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist (format nil "~A/" directory))
+           (with-open-file (stream source :direction :output :if-exists :supersede)
+             (write-line "void _start(void) {" stream)
+             (write-line "  __asm__ volatile (\"movl $1, %eax\\n\\t\"" stream)
+             (write-line "                    \"movl $3, %ebx\\n\\t\"" stream)
+             (write-line "                    \"int $0x80\");" stream)
+             (write-line "}" stream))
+           (uiop:run-program (list "gcc" "-m32" "-nostdlib" "-static"
+                                   "-o" program source)
+                             :ignore-error-status t)
+           (if (not (probe-file program))
+               (format *error-output*
+                       "~&note: this host cannot build a 32-bit program, so the ~
+                        foreign-architecture~%      kill was not exercised end to ~
+                        end~%")
+               (let ((result (call-scute 'run-namespaced-command (list program)
+                                         :filesystem +unrestricted+)))
+                 (check (call-scute 'sandbox-result-wrong-architecture-p result)
+                        "a 32-bit program was not killed as a foreign ~
+                         architecture: ~S -- 3 as an exit code would mean it ran"
+                        result))))
+      (dolist (name (list source program))
+        (ignore-errors (delete-file name)))
+      (ignore-errors (sb-posix:rmdir directory)))))
+
 (deftest test-supervisor-holds-no-capabilities
   "By the time a command exists, the supervisor has dropped everything it could
 pass on, and has checked rather than assumed."

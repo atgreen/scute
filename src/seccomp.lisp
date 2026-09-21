@@ -83,6 +83,14 @@ Denying unshare does not stop a program from creating a nested user namespace,
 because clone and clone3 can do the same thing and seccomp cannot read the
 struct clone3 takes its flags from.  This is defence in depth, not a boundary.")
 
+(defparameter +nested-sandbox-syscalls+
+  '("unshare")
+  "Denied calls that a watching run notifies on rather than refuses outright.
+
+clone is the other half of this and is not here, because it is denied by an
+argument test rather than by name: a clone that does not ask for CLONE_NEWUSER
+is an ordinary fork and must stay untouched.")
+
 (defun denied-syscall-names ()
   (loop for (nil . names) in +denied-syscalls+ append names))
 
@@ -155,10 +163,49 @@ talk to itself."
                                   #xffffffff 10) ; AF_INET6
     (list "socket(AF_INET6)")))
 
-(defun deny-nested-user-namespaces (context)
-  "Refuse the two ways a command could put itself in a new user namespace."
+(defconstant +tiocsti+   #x5412
+  "ioctl: push a character into a terminal's own input queue.")
+(defconstant +tioclinux+ #x541c
+  "ioctl: the console's selection and paste, which can do the same on a VT.")
+
+(defun deny-terminal-injection (context)
+  "Refuse the ioctls that let a command type into the terminal it was given.
+
+The sandbox is started from a terminal and keeps it: the policies name /dev/tty,
+and standard input arrives as an already-open descriptor whatever the policy
+says.  TIOCSTI pushes characters into that terminal's input queue, and the shell
+that reads them back after the sandboxed command exits runs them as though you
+had typed them.  That is a way out of the sandbox and into the session that
+started it.
+
+Landlock cannot answer this one.  Its ioctl right is checked when a device is
+opened, and this descriptor was never opened inside the sandbox -- it was
+inherited.  Seccomp can: ioctl takes its request number in a register, so the
+two that matter are refused by an argument test and every other ioctl, including
+all the ones a terminal actually needs, is untouched.
+
+Linux 6.2 and later can turn TIOCSTI off for the whole machine, and Fedora ships
+it off.  This does not depend on that: Scute says it runs on 5.13 and newer, and
+a boundary that holds only where the host already closed the hole is not one."
   (let ((denied '()))
-    (when (add-masked-argument-rule context (scmp-act-errno +eperm+) "clone" 0
+    (dolist (request (list (cons "TIOCSTI" +tiocsti+)
+                           (cons "TIOCLINUX" +tioclinux+)))
+      (when (add-masked-argument-rule context (scmp-act-errno +eperm+) "ioctl" 1
+                                      #xffffffff (cdr request))
+        (push (format nil "ioctl(~A)" (car request)) denied)))
+    (nreverse denied)))
+
+(defun deny-nested-user-namespaces (context &optional action)
+  "Refuse the two ways a command could put itself in a new user namespace.
+
+ACTION is how clone(CLONE_NEWUSER) is answered, EPERM unless a caller says
+otherwise.  A watching run passes SCMP_ACT_NOTIFY instead and answers with the
+same EPERM itself, which is how Scute comes to know that the command it is
+watching was trying to sandbox itself -- a fact worth telling somebody, since
+the message the command prints about it blames the kernel."
+  (let ((denied '())
+        (action (or action (scmp-act-errno +eperm+))))
+    (when (add-masked-argument-rule context action "clone" 0
                                     +clone-newuser+ +clone-newuser+)
       (push "clone(CLONE_NEWUSER)" denied))
     (let ((number (cffi:foreign-funcall "seccomp_syscall_resolve_name"
@@ -245,6 +292,7 @@ With UNIX-SOCKETS the AF_UNIX refusal is left out, because a policy said so."
                                   (deny-unix-domain-sockets context))
                                 (unless ipv6 (deny-ipv6-sockets context))
                                 (deny-nested-user-namespaces context)
+                                (deny-terminal-injection context)
                                 denied))
            (multiple-value-bind (program instructions) (export-filter-program context)
              (%make-seccomp-filter :program program

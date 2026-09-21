@@ -82,13 +82,19 @@ created rather than as a failed exec."))
 (define-condition child-failure (scute-error)
   ((operation :initarg :operation :reader child-failure-operation)
    (status    :initarg :status    :reader child-failure-status :initform nil)
-   (errno     :initarg :errno     :reader child-failure-errno :initform nil))
+   (errno     :initarg :errno     :reader child-failure-errno :initform nil)
+   ;; Said by whoever signals this when the errno alone would mislead.  An exec
+   ;; refused with EPERM is the one that does: the file carries capabilities and
+   ;; the sandbox has an empty bounding set, which reads as a permission problem
+   ;; with the path and is nothing of the sort.
+   (detail    :initarg :detail    :reader child-failure-detail :initform nil))
   (:report
    (lambda (condition stream)
-     (format stream "the sandboxed child failed during ~(~A~)~@[: ~A~]"
+     (format stream "the sandboxed child failed during ~(~A~)~@[: ~A~]~@[. ~A~]"
              (child-failure-operation condition)
              (let ((errno (child-failure-errno condition)))
-               (and errno (plusp errno) (strerror errno))))))
+               (and errno (plusp errno) (strerror errno)))
+             (child-failure-detail condition))))
   (:documentation "The child died before it could become the requested command.
 It reports the stage it failed at and its errno over its status pipe, so the
 supervisor can say why rather than only that."))

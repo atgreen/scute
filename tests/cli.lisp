@@ -324,7 +324,13 @@ kernel were too old."
       (scute-run (format nil "run --namespaces-only -- ~A run --namespaces-only -- /bin/true"
                          +scute+))
     (check (not (zerop status)) "scute nested inside scute, which it cannot do")
-    (check (search "inside one" said)
+    ;; Two ways this is refused, and which one depends on the binary under test.
+    ;; A scute carrying file capabilities -- the packaged one, or a build after
+    ;; make egress -- cannot even be exec'd by a sandboxed child, whose bounding
+    ;; set is empty; one without them gets as far as the clone3 its own filter
+    ;; refuses.  Both say what happened, which is the thing being tested.
+    (check (or (search "inside one" said)
+               (search "carries file capabilities" said))
            "the failure did not explain itself:~%~A" said)
     (check (not (search "Function not implemented" said))
            "the failure still reports ENOSYS:~%~A" said)))

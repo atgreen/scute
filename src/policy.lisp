@@ -144,6 +144,19 @@ What a refusal lists, and what \"scute policies\" prints."
 ;;; already have.  The mechanism for an operator constraining somebody else is a
 ;;; different one, and it can only narrow.
 
+(defparameter +include-key+ "include"
+  "The top-level key naming policies to be read underneath this one.
+
+A shipped policy for a real program needs the same forty lines of /usr, /etc,
+/proc, device nodes and toolchain caches as every other one, and repeating them
+means a gap found in one is fixed in one.  An include is how a policy says
+\"everything true of any program on this host, and then what is true of mine\".
+
+It widens rather than narrows, and so does not need to be privileged: whoever
+can write the policy could paste the same lines into it.  What it must not do is
+hide anything -- every included file is named by --dry-run, beside the policy
+that asked for it.")
+
 (defun table-document-p (value)
   "Whether VALUE is a TOML table rather than an array or a scalar.
 
@@ -218,22 +231,73 @@ in filename order, which is what a 10- and 20- prefix is for."
                                 pathname)))))
     (parse-policy-text text pathname)))
 
-(defun read-sandbox-policy (pathname)
-  "Read and validate the policy in PATHNAME, or the policy PATHNAME names."
-  (let* ((text (if (stringp pathname) pathname (namestring pathname)))
+(defvar *policies-being-read* '()
+  "The policies whose includes are still being resolved, to catch a loop.")
+
+(defun included-policy-designator (text beside)
+  "What an include naming TEXT in the policy at BESIDE refers to.
+
+A file beside the including policy first, and only then the search path.  A
+shipped policy including \"base\" means the base it was shipped with, which is
+what makes a tree of policies work before any of it is installed; a name that is
+not there falls through to the ordinary lookup, so somebody's own policy can
+include one Scute installed."
+  (if (not (policy-name-p text))
+      text
+      (let ((candidate (merge-pathnames (format nil "~A~A" text +policy-extension+)
+                                        (uiop:parse-native-namestring beside))))
+        (if (probe-file candidate)
+            (namestring candidate)
+            text))))
+
+(defun assembled-policy-document (designator)
+  "The document DESIGNATOR names, with its drop-ins and its includes merged in.
+
+Answers the document and the files that contributed, the policy's own file
+first.  Three layers, weakest first: what it includes, the policy itself, and
+the drop-ins beside it -- so an included base states what is true of every
+program, the policy says what is true of its own, and whoever writes a drop-in
+still has the last word.
+
+Includes are read after the drop-ins because a drop-in may add one, and stripped
+here rather than left for the validator, which should see one document with
+nothing left to resolve."
+  (let* ((text (if (stringp designator) designator (namestring designator)))
          (name (and (policy-name-p text) text))
          (base (locate-policy text))
-         (fragments (drop-in-files base name))
-         (document (reduce (lambda (merged fragment)
-                             (merge-policy-documents merged
-                                                     (read-policy-document fragment)))
-                           fragments
-                           :initial-value (read-policy-document base)))
-         (sources (cons base fragments)))
+         (identity (or (ignore-errors (namestring (truename base)))
+                       (namestring base))))
+    (when (member identity *policies-being-read* :test #'string=)
+      (policy-error "include comes back round to this policy" base))
+    (let* ((*policies-being-read* (cons identity *policies-being-read*))
+           (fragments (drop-in-files base name))
+           (document (reduce (lambda (merged fragment)
+                               (merge-policy-documents merged
+                                                       (read-policy-document fragment)))
+                             fragments
+                             :initial-value (read-policy-document base)))
+           (included (cdr (assoc +include-key+ document :test #'string=))))
+      (if (null included)
+          (values document (cons base fragments))
+          (let ((underneath '())
+                (sources '()))
+            (dolist (one (string-array included +include-key+ base))
+              (multiple-value-bind (document files)
+                  (assembled-policy-document (included-policy-designator one base))
+                (setf underneath (merge-policy-documents underneath document)
+                      sources (append sources files))))
+            (values (merge-policy-documents
+                     underneath
+                     (remove +include-key+ document :key #'car :test #'string=))
+                    (list* base (append sources fragments))))))))
+
+(defun read-sandbox-policy (pathname)
+  "Read and validate the policy in PATHNAME, or the policy PATHNAME names."
+  (multiple-value-bind (document sources) (assembled-policy-document pathname)
     ;; The files that contributed travel with the policy, so that --dry-run can
     ;; name them: a policy whose meaning comes from files nobody can see is worse
     ;; than no drop-ins at all.
-    (validate-sandbox-policy document base sources)))
+    (validate-sandbox-policy document (first sources) sources)))
 
 ;;── What a policy says ─────────────────────────────────────────────────────────
 
@@ -249,7 +313,7 @@ and the refusal messages all see the path the policy meant."
 
 (defstruct (credential-request (:constructor make-credential-request
                                    (name secret-file destinations variable ttl
-                                    &optional reference file template)))
+                                    &optional reference file template ssh-user)))
   "One credential the sandbox needs, and what the sandbox is given instead."
   (name nil :read-only t)
   (secret-file nil :read-only t)   ; read by the supervisor, never by the sandbox
@@ -263,7 +327,11 @@ and the refusal messages all see the path the policy meant."
   ;; credentials are most worth brokering -- a file is where a credential
   ;; otherwise sits on disk for ever.
   (file nil :read-only t)          ; where to write the token, inside the sandbox
-  (template nil :read-only t))     ; what to write there, with ${token} in it
+  (template nil :read-only t)      ; what to write there, with ${token} in it
+  ;; An ssh key is not a header, and the broker does not swap it: it holds the
+  ;; key, answers the sandbox's ssh on a bastion port, and connects upstream
+  ;; itself.  The user is the one to log in as there -- "git" at most forges.
+  (ssh-user nil :read-only t))
 
 (defstruct (broker-settings (:constructor make-broker-settings
                                 (name proxy-port control-socket)))
@@ -371,8 +439,17 @@ is the only kind anyone can check.")
 
 (defparameter +access-key-names+
   '(("read" . :read) ("read-execute" . :read-execute)
-    ("read-write" . :read-write) ("read-write-execute" . :read-write-execute))
-  "The filesystem keys a policy may use, and the access kind each names.")
+    ("read-write" . :read-write) ("read-write-execute" . :read-write-execute)
+    ("connect" . :connect))
+  "The filesystem keys a policy may use, and the access kind each names.
+
+\"connect\" is unlike the others.  It grants nothing about the contents of a
+path: it says that a Unix socket already on the host may be connected to, which
+is otherwise refused whatever the filesystem rules say -- because the sockets
+lying around a machine include the broker's own control API, and a sandbox that
+could reach that could ask for the credentials it exists not to hold.  A policy
+therefore names the one socket it means, and no rule of any other kind opens
+that door, not even a grant of \"/\".")
 
 (defun optional-path-p (declared)
   "Whether DECLARED is marked as a path that may be absent, by a leading \"?\".
@@ -592,7 +669,7 @@ goes double for a policy Scute ships: /home/green is nobody else's path."
   "One [credentials.NAME] table: a secret to hold, and where its token goes."
   (let ((entries (table-entries value (format nil "credentials.~A" name) pathname)))
     (check-known-keys entries '("secret-file" "ref" "destinations" "env" "ttl"
-                                "file" "template")
+                                "file" "template" "ssh-user")
                       (format nil "[credentials.~A]" name) pathname)
     (flet ((entry (key) (cdr (assoc key entries :test #'string=))))
       (let ((secret-file (let ((raw (entry "secret-file")))
@@ -606,7 +683,9 @@ goes double for a policy Scute ships: /home/green is nobody else's path."
             (file (let ((raw (entry "file")))
                     (when raw (expand-home (scalar-string raw "file" pathname)))))
             (template (let ((raw (entry "template")))
-                        (when raw (expand-home (scalar-string raw "template" pathname))))))
+                        (when raw (expand-home (scalar-string raw "template" pathname)))))
+            (ssh-user (let ((raw (entry "ssh-user")))
+                        (when raw (scalar-string raw "ssh-user" pathname)))))
         (when (and secret-file reference)
           (policy-error (format nil "[credentials.~A] gives both secret-file and ~
                                      ref; they are alternatives -- a secret Scute ~
@@ -625,7 +704,31 @@ goes double for a policy Scute ships: /home/green is nobody else's path."
                                      write and a template needs somewhere to go"
                                 name file)
                         pathname))
-        (unless (or variable file)
+        (when ssh-user
+          ;; The broker makes an ssh token out of the key itself; a ref names a
+          ;; credential it swaps into a header, which is a different thing and
+          ;; would issue a token the bastion cannot use.
+          (when reference
+            (policy-error (format nil "[credentials.~A] gives ssh-user with ref; ~
+                                       an ssh key has to be one the broker is ~
+                                       handed, so name the secret-file it is in"
+                                  name)
+                          pathname))
+          ;; The bastion connects to the destination the token names, and takes
+          ;; the first if there are several.  Two destinations would mean one of
+          ;; them silently never being reached.
+          (unless (= 1 (length destinations))
+            (policy-error (format nil "[credentials.~A] is an ssh credential, so ~
+                                       destinations must name exactly one host: ~
+                                       that is where the broker connects, and it ~
+                                       cannot be told which of several the sandbox ~
+                                       meant"
+                                  name)
+                          pathname)))
+        ;; An ssh credential needs no env of its own, and is better without one:
+        ;; the token goes into a file only the sandbox's own ssh reads, so it is
+        ;; not in the environment for an agent to copy into a log.
+        (unless (or variable file ssh-user)
           (policy-error (format nil "[credentials.~A] must say where the sandbox ~
                                      receives its token: env, for the programs that ~
                                      read one, or file and template for the ~
@@ -650,9 +753,10 @@ goes double for a policy Scute ships: /home/green is nobody else's path."
                                 name)
                         pathname))
         (make-credential-request
-         name (and secret-file (expand-home secret-file)) destinations variable
+         name (and secret-file (expand-home secret-file)) destinations
+         variable
          (let ((ttl (entry "ttl"))) (when ttl (parse-duration ttl pathname)))
-         reference file template)))))
+         reference file template ssh-user)))))
 
 (defvar *broker-control-socket* nil
   "Optional embedding override for the local broker control socket.")
@@ -923,8 +1027,16 @@ Anything the schema does not name is an error: a policy Scute half understands
 is a sandbox the operator half asked for."
   (let ((tables (table-entries document "policy" pathname)))
     (check-known-keys tables '("filesystem" "network" "limits" "audit"
-                               "environment" "credentials" "command")
+                               "environment" "credentials" "command" "include")
                       "a policy" pathname)
+    ;; Named above only so that this is the answer rather than "unknown key".
+    ;; An include is resolved while the policy is read; one that survived to here
+    ;; means a document was assembled some other way, and validating it would
+    ;; quietly produce a sandbox missing whatever the include was carrying.
+    (when (assoc +include-key+ tables :test #'string=)
+      (policy-error "include is resolved when a policy is read, and this policy ~
+                     was not read that way"
+                    pathname))
     (flet ((table (name) (cdr (assoc name tables :test #'string=))))
       (let ((filesystem (table "filesystem")))
         (unless filesystem
@@ -1007,6 +1119,7 @@ is a sandbox the operator half asked for."
   (connect-tcp nil :read-only t)
   (bind-tcp    nil :read-only t)
   (proxy       nil :read-only t)
+  (ssh-proxy   nil :read-only t)     ; the broker's ssh bastion, "host:port"
   (allow       nil :read-only t)
   (limits      nil :read-only t)
   (audit       nil :read-only t)
@@ -1095,6 +1208,47 @@ was not asked about."
                       (trim-trailing-slash path)
                       (and (uiop:directory-exists-p truename) t)))))
 
+(defun socket-path-p (path)
+  "Whether PATH is a Unix socket on this host."
+  (handler-case (sb-posix:s-issock (sb-posix:stat-mode (sb-posix:stat path)))
+    (error () nil)))
+
+(defun check-connect-rules (rules policy)
+  "Refuse a connect rule that cannot work, or that reaches further than a socket.
+
+Two rules, and both are about keeping this narrow.  A sandbox that may not make
+a Unix socket at all cannot connect to one, so a policy asking for the second
+without the first is asking for something that would fail at the syscall; say so
+here rather than there.  And a connect rule names one socket: a rule on the
+directory holding it would carry every other socket in there with it, and the
+directory this is wanted in -- the runtime directory -- is exactly where the
+session bus, the display server and the credential broker's own control API
+live."
+  (let ((connects (remove :connect rules :key #'path-rule-kind :test-not #'eq))
+        (pathname (sandbox-policy-pathname policy)))
+    (when connects
+      (unless (sandbox-policy-unix-sockets policy)
+        (policy-error "[filesystem] connect needs [network] unix-sockets = true: ~
+                       a sandbox that may not make a Unix socket cannot connect ~
+                       to one"
+                      pathname))
+      (let ((control (let ((broker (sandbox-policy-broker policy)))
+                       (and broker (broker-settings-control-socket broker)))))
+        (dolist (rule connects)
+          (unless (socket-path-p (path-rule-path rule))
+            (policy-error
+             (format nil "[filesystem] connect ~A is not a Unix socket; connect ~
+                          names one socket, never a directory of them"
+                     (path-rule-path rule))
+             pathname))
+          (when (and control (rule-covers-p rule control))
+            (policy-error
+             (format nil "[filesystem] connect ~A is the broker's own control ~
+                          socket; a sandbox that can reach it can ask for the ~
+                          credentials it exists not to hold"
+                     (path-rule-path rule))
+             pathname)))))))
+
 (defun compile-launch-plan (policy command
                             &key (directory (sb-posix:getcwd))
                                  (environment (sb-ext:posix-environ))
@@ -1118,7 +1272,9 @@ nothing here touches the kernel."
     (when (and (sandbox-policy-filesystem policy) (null rules))
       (policy-error "no filesystem grants remain after resolving optional paths"
                     (sandbox-policy-pathname policy)))
-    (%make-launch-plan
+    (check-connect-rules rules policy)
+    (plan-with-ssh-bastion
+     (%make-launch-plan
      :command (cons (resolve-executable (first command) directory) (rest command))
      :directory directory
      ;; Deny-by-default applies to the environment too: what a command is given
@@ -1162,7 +1318,54 @@ nothing here touches the kernel."
      :limits (sandbox-policy-limits policy)
      :audit (sandbox-policy-audit policy)
      :broker (sandbox-policy-broker policy)
-     :credentials (sandbox-policy-credentials policy))))
+     :credentials (sandbox-policy-credentials policy)))))
+
+(defparameter +default-bastion-port+ 10211
+  "Where KeyFence answers ssh.  The proxy's neighbour, and its default.")
+
+(defun plan-with-ssh-bastion (plan)
+  "PLAN with the broker's ssh bastion wired in, when a credential needs one.
+
+What this buys is that the agent writes the remote it already has --
+git@github.com -- and the connection arrives at the broker, which holds the key.
+The alternative is an agent that has to address the bastion itself and know the
+arrangement exists.
+
+Refused rather than half-done where the redirect cannot be installed: without it
+port 22 goes to the real host, which would be handed a password it has never
+heard of, and the failure would look like a bad key rather than a missing
+capability."
+  (let ((credential (find-if #'credential-request-ssh-user
+                             (launch-plan-credentials plan))))
+    (if (null credential)
+        plan
+        (progn
+          (unless (eq :proxied (launch-plan-network plan))
+            (policy-error
+             (format nil "[credentials.~A] is an ssh credential, which needs the ~
+                          kernel redirect that sends port 22 to the broker: this ~
+                          plan's network is ~(~A~). A packaged Scute has the ~
+                          capability for it; a build from source gets it with ~
+                          \"make egress\""
+                     (credential-request-name credential)
+                     (launch-plan-network plan))))
+          (let ((bastion (format nil "~A:~D"
+                                 (or (proxy-url-host (launch-plan-proxy plan))
+                                     "127.0.0.1")
+                                 +default-bastion-port+)))
+            ;; Landlock sees the connect before the redirect rewrites it, so what
+            ;; has to be permitted is the port the command asked for.  The
+            ;; bastion's own port is permitted too, for a command that addresses
+            ;; it directly rather than being sent there.
+            ;;
+            ;; Nothing is set in the environment here.  What the sandbox needs to
+            ;; speak to the bastion is an ssh of its own, written when the token
+            ;; exists and put first on PATH -- see write-ssh-shim.
+            (revised-launch-plan
+             plan
+             :ssh-proxy bastion
+             :connect-tcp (union (launch-plan-connect-tcp plan)
+                                 (list +ssh-port+ +default-bastion-port+))))))))
 
 (defun compile-command-launch-plan (command filesystem &optional directory keep)
   "A launch plan for COMMAND with FILESYSTEM given as (KIND PATH) forms.
@@ -1184,7 +1387,8 @@ a policy's would be, so the two routes cannot diverge."
 
 (defun revised-launch-plan (plan &key (wall-clock :keep) (unix-sockets :keep)
                                       (network :keep) (environment :keep)
-                                      (filesystem :keep) (allow :keep))
+                                      (filesystem :keep) (allow :keep)
+                                      (connect-tcp :keep) (ssh-proxy :keep))
   "PLAN with what the command line overrode, whatever its policy said.
 A plan is immutable, so an override makes another one rather than changing it."
   (let ((limits (launch-plan-limits plan)))
@@ -1201,9 +1405,12 @@ A plan is immutable, so an override makes another one rather than changing it."
      :unix-sockets (if (eq unix-sockets :keep)
                        (launch-plan-unix-sockets plan)
                        unix-sockets)
-     :connect-tcp (launch-plan-connect-tcp plan)
+     :connect-tcp (if (eq connect-tcp :keep)
+                      (launch-plan-connect-tcp plan)
+                      connect-tcp)
      :bind-tcp (launch-plan-bind-tcp plan)
      :proxy (launch-plan-proxy plan)
+     :ssh-proxy (if (eq ssh-proxy :keep) (launch-plan-ssh-proxy plan) ssh-proxy)
      :allow (if (eq allow :keep) (launch-plan-allow plan) allow)
      :audit (launch-plan-audit plan)
      :broker (launch-plan-broker plan)
@@ -1339,13 +1546,24 @@ compiles being a plan that runs."
         (format stream "~13Tfrom the template ~A~%"
                 (credential-request-template request))))
     (format stream "~13Tusable only at ~{~A~^, ~}~%"
-            (credential-request-destinations request)))
+            (credential-request-destinations request))
+    ;; An ssh credential is spent differently enough to say so: the broker does
+    ;; not swap a header, it answers the sandbox's ssh and logs in itself.
+    (let ((ssh-user (credential-request-ssh-user request)))
+      (when ssh-user
+        (format stream "~13Tan ssh key: the broker logs in there as ~A~%" ssh-user))))
   (let ((broker (launch-plan-broker plan)))
     (when broker
       (format stream "broker       ~(~A~), proxy on ~D, control at ~A~%"
               (broker-settings-name broker)
               (broker-settings-proxy-port broker)
               (broker-settings-control-socket broker))))
+  ;; Said out loud because it rewrites where a connection goes: a reader of this
+  ;; plan should see that port 22 does not arrive where the command aimed it.
+  (let ((bastion (launch-plan-ssh-proxy plan)))
+    (when bastion
+      (format stream "ssh          port ~D goes to the broker's bastion at ~A~%"
+              +ssh-port+ bastion)))
   ;; Names only.  The values are the caller's own, but a plan is the sort of
   ;; thing that ends up in a log.
   (format stream "environment  ~:[nothing~;~:*~{~A~^ ~}~]~%"

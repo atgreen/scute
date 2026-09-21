@@ -130,6 +130,18 @@ been talked into sending a credential somewhere nobody named."
                  (write-request stream method resource body nil)
                  (read-response stream)))
            (broker-error (condition) (error condition))
+           ;; Caught by name, because a deadline is not an error: SBCL signals
+           ;; DEADLINE-TIMEOUT as a plain condition, so an ERROR clause lets it
+           ;; past and the caller meets the debugger instead of a message.  The
+           ;; TCP path has always named it; this one had not, and the way to
+           ;; find that out was a socket that accepts and then says nothing.
+           (sb-sys:deadline-timeout ()
+             (broker-error "the broker's control socket at ~A did not answer ~
+                            within ~D second~:P. Something is listening there ~
+                            and not serving it -- with systemd socket ~
+                            activation that is what happens when the service was ~
+                            already running when its socket unit started"
+                           path seconds))
            (error (condition)
              (broker-error "cannot reach authenticated broker control at ~A: ~A" path condition)))
       (ignore-errors (sb-bsd-sockets:socket-close socket)))))

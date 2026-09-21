@@ -165,12 +165,14 @@ than failing, and the refusal at launch says the rest."
                                (default-broker-control-socket)
                                certificate (broker-certificate-path))))
           (installed
-           (make-probe "credential broker" :info
-                       (format nil "installed at ~A but not running, so Scute will ~
-                                    start one per run.  Better as a service: ~
-                                    systemctl --user enable --now keyfence.socket ~
-                                    keyfence-control.socket"
-                               installed)))
+           (make-probe "credential broker" :missing
+                       (format nil "installed at ~A and not answering at ~A. A ~
+                                    broker is a service Scute attaches to, so ~
+                                    enable it -- systemctl --user enable --now ~
+                                    keyfence.socket keyfence-control.socket -- or ~
+                                    name the program with --broker-path for a run ~
+                                    that must bring its own"
+                               installed (default-broker-control-socket))))
           (t
            (make-probe "credential broker" :missing
                        (format nil "keyfence is not installed, and the default ~

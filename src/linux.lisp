@@ -16,6 +16,7 @@
 ;;── Constants ──────────────────────────────────────────────────────────────────
 
 (defconstant +sys-clone3+ 435)
+(defconstant +sys-close-range+ 436)
 
 (defconstant +clone-newns+    #x00020000)
 (defconstant +clone-newuts+   #x04000000)
@@ -51,6 +52,7 @@ which the policy therefore has to say out loud."
 (defconstant +sigkill+  9)
 (defconstant +sigalrm+ 14)
 (defconstant +sigterm+ 15)
+(defconstant +sigsys+  31)
 
 (defconstant +o-cloexec+ #o2000000)
 
@@ -95,11 +97,21 @@ which the policy therefore has to say out loud."
 ;;; inline so that the child path makes foreign calls and nothing else: no
 ;;; allocation, no streams, no condition system, no GC.
 
-(declaim (inline %close %read %write %prctl %capset %execve %exit %kill %access %open
-                 %chdir))
+(declaim (inline %close %close-range %read %write %prctl %capset %execve %exit %kill
+                 %access %open %chdir))
 
 (defun %close (fd)
   (cffi:foreign-funcall "close" :int fd :int))
+
+(defun %close-range (first last)
+  "Close every descriptor from FIRST to LAST inclusive.
+
+Called straight rather than through libc: the wrapper arrived in glibc 2.34 and
+this has to work where it did not.  The syscall is 436 on every architecture
+Linux added it to, which is what makes the number safe to write down."
+  (cffi:foreign-funcall "syscall" :long +sys-close-range+
+                        :unsigned-int first :unsigned-int last
+                        :unsigned-int 0 :int))
 
 (defun %read (fd buffer count)
   (cffi:foreign-funcall "read" :int fd :pointer buffer :unsigned-long count :long))

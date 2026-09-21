@@ -204,14 +204,63 @@ has never heard of, at a moment when they were running a sandbox and not a broke
                    :detail (format nil "~A is not installed.~%~%~A"
                                    program +broker-remedy+)))))
 
+(defun broker-last-words (log)
+  "The last thing the broker said before it failed to answer, or NIL.
+
+A broker that will not start has almost always written the reason down -- a port
+already in use, a certificate it cannot read -- and that line is the answer.
+Scute used to guess instead, and its guess named the one cause it knew about,
+which sent people to upgrade a KeyFence that was already new enough."
+  (handler-case
+      (with-open-file (stream log :direction :input :if-does-not-exist nil)
+        (when stream
+          (let ((last nil))
+            (loop for line = (read-line stream nil)
+                  while line
+                  do (let ((line (string-trim '(#\Space #\Tab #\Return) line)))
+                       (when (plusp (length line))
+                         ;; Without the syslog-style timestamp the line leads
+                         ;; with, which says nothing here and crowds out what does.
+                         (setf last (if (and (> (length line) 20)
+                                             (digit-char-p (char line 0))
+                                             (char= #\Space (char line 19)))
+                                        (subseq line 20)
+                                        line)))))
+            last)))
+    (error () nil)))
+
+(defparameter +no-broker-remedy+
+  "A broker is a service, not something a run brings with it: enable it once and
+       every sandbox after that attaches to the same one.
+
+         systemctl --user enable --now keyfence.socket keyfence-control.socket
+
+       \"scute doctor\" says whether this host has one. For a run that must bring
+       its own -- a container, a test host with no systemd -- name the program
+       with --broker-path and Scute will start it."
+  "Said when no broker is answering and a policy needs one.")
+
 (defun start-broker (settings &key program
                                   (certificate (broker-certificate-path)))
-  "Attach through Unix peer authentication, or start a broker in a private directory."
+  "Attach to the broker this host runs, or start the one a caller named.
+
+Attaching is the ordinary case and the better one.  A broker holds credentials,
+so it is a service with a lifetime of its own: one already running has the CA the
+agent's runtimes already trust, and the tokens it mints outlive nothing.  Scute
+starting one per run gave every sandbox a fresh CA, put a second listener on
+ports the service already held, and left the broker inside the cgroup Scute needs
+to delegate.  So a run attaches, and says so plainly when there is nothing to
+attach to."
   (let ((control (broker-settings-control-socket settings)))
     (when (probe-file control)
       (identify-broker control)
       (return-from start-broker
         (%make-broker settings nil (or (fetch-broker-certificate control) certificate))))
+    (unless program
+      (setup-error :no-broker
+                   :detail (format nil "no broker is answering at ~A, and this ~
+                                        policy needs one.~%       ~A"
+                                   control +no-broker-remedy+)))
     (let* ((executable (broker-executable (or program (broker-program settings))))
            (directory (create-broker-runtime-directory))
            (control (concatenate 'string directory "control.sock"))
@@ -231,9 +280,31 @@ has never heard of, at a moment when they were running a sandbox and not a broke
              (unless (loop repeat 150
                            thereis (and (probe-file control) (broker-answering-p control))
                            do (sleep 1/10))
-               (setup-error :start-broker
-                            :detail (format nil "broker did not answer at ~A; Unix control requires a recent KeyFence. See ~A"
-                                            control log)))
+               (let ((complaint (broker-last-words log)))
+                 (setup-error
+                  :start-broker
+                  :detail
+                  (if complaint
+                      (format nil "broker did not answer at ~A. Its last words were ~
+                                   \"~A\". The whole of it is in ~A~@[~%~A~]"
+                              control complaint log
+                              ;; The common case by far, and the remedy is not
+                              ;; the one the message suggests on its own: a
+                              ;; broker is already running, and Scute would
+                              ;; rather attach to it than start a second.
+                              (when (search "address already in use" complaint)
+                                (format nil "       A broker is already listening ~
+                                             there. Scute attaches to one that ~
+                                             offers a Unix control socket rather ~
+                                             than starting another, so give it ~
+                                             one -- for the packaged KeyFence, ~
+                                             enable keyfence-control.socket and ~
+                                             restart the service after the socket ~
+                                             is up.")))
+                      (format nil "broker did not answer at ~A and wrote nothing ~
+                                   to ~A; a KeyFence too old for Unix control ~
+                                   would do that"
+                              control log)))))
              (identify-broker control)
              (let ((broker (%make-broker settings helper
                                          (or (fetch-broker-certificate control) certificate)
@@ -300,12 +371,28 @@ ordering."
 A request naming a ref never reads a secret at all: the broker already holds it,
 Scute says which one, and the plaintext is in one process rather than two."
   (let* ((reference (credential-request-reference request))
+         (ssh-user (credential-request-ssh-user request))
          (secret (unless reference
                    (read-secret (credential-request-secret-file request)
                                 (credential-request-name request))))
-         (body (format nil "{~A:~A,~A:[~{~A~^,~}],~A:~D,~A:~A~@[,~A:~A~]}"
-                       (json-escape (if reference "credential_ref" "credential"))
+         ;; An ssh key is not swapped into a header on the way past: the broker
+         ;; keeps it, answers the sandbox's ssh itself, and logs in upstream as
+         ;; the user named here.  Same request, a different field, and the same
+         ;; token comes back.
+         ;; Built rather than conditionalised inside the format string: a
+         ;; directive that consumes one argument and skips two is how this went
+         ;; wrong the first time, silently, for every credential that was not an
+         ;; ssh key.
+         (ssh-field (if ssh-user
+                        (format nil "~A:~A," (json-escape "ssh_username")
+                                (json-escape ssh-user))
+                        ""))
+         (body (format nil "{~A:~A,~A~A:[~{~A~^,~}],~A:~D,~A:~A~@[,~A:~A~]}"
+                       (json-escape (cond (reference "credential_ref")
+                                          (ssh-user "ssh_private_key")
+                                          (t "credential")))
                        (json-escape (or reference secret))
+                       ssh-field
                        (json-escape "destinations")
                        (mapcar #'json-escape (credential-request-destinations request))
                        (json-escape "ttl_seconds") seconds
@@ -653,6 +740,85 @@ gets an hour."
         (and limits (resource-limits-wall-clock limits)))
       3600))
 
+(defparameter +ssh-shim+
+  "#!/bin/sh
+# Written by scute for one run, and removed when it ends.  The sandbox has no
+# key: this answers the broker's bastion with a token, which is what the broker
+# swaps for the key it holds.
+SSH_ASKPASS=~A/askpass
+SSH_ASKPASS_REQUIRE=force
+export SSH_ASKPASS SSH_ASKPASS_REQUIRE
+exec ~A -F none -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \\
+     -o PreferredAuthentications=password -o NumberOfPasswordPrompts=1 \"$@\"
+"
+  "An ssh of the sandbox's own, first on its PATH.
+
+Why a program rather than an environment variable, which is what this started
+as: an agent decides what its subprocesses inherit, and codex's default hands
+its shells a core set that carries HOME and PATH and nothing else.  A token in
+SSHPASS reaches the agent and stops there, so the git the agent runs has no
+credential and the push fails for a reason no one can see from inside.
+
+PATH survives, because a shell with no PATH is no use to anybody.  So the
+credential travels as a file the shim reads, and the shim is what git finds when
+it looks for ssh.  The real ssh is named absolutely here, or the shim would find
+itself.
+
+Every option is required by the arrangement rather than chosen: -F none because
+/etc belongs to a user this sandbox has no mapping for, so ssh would refuse the
+system-wide configuration as owned by nobody; the host checks off because the
+sandbox believes it is talking to the upstream and is in fact talking to the
+bastion, whose key is its own -- the check that matters happens in the broker,
+against its own known_hosts; and password authentication because the token is
+the password.")
+
+(defun write-ssh-shim (token)
+  "Write the ssh a sandbox with an ssh credential will find on its PATH.
+Answers the directory holding it, which the caller grants and later removes."
+  (let* ((directory (format nil "~A/scute-ssh-~A"
+                            (string-right-trim "/" (or (sb-posix:getenv "XDG_RUNTIME_DIR")
+                                                       "/tmp"))
+                            (random-hex 16)))
+         (real-ssh (or (search-path-for "ssh")
+                       (setup-error :write-ssh-shim
+                                    :detail "no ssh on PATH for the sandbox's own to run"))))
+    (sb-posix:mkdir directory #o700)
+    (flet ((write-file (name text mode)
+             (let ((path (format nil "~A/~A" directory name)))
+               (with-open-file (stream path :direction :output :if-exists :supersede
+                                            :external-format :utf-8)
+                 (write-string text stream))
+               (sb-posix:chmod path mode)
+               path)))
+      ;; The token in a file of its own, read by the askpass and by nothing else:
+      ;; a credential in the environment is a credential in every log the agent
+      ;; writes about its own subprocesses.
+      (write-file "token" token #o400)
+      (write-file "askpass" (format nil "#!/bin/sh~%exec cat ~A/token~%" directory) #o500)
+      (write-file "ssh" (format nil +ssh-shim+ directory real-ssh) #o500))
+    directory))
+
+(defun remove-ssh-shim (directory)
+  "Take the shim and the token in it away, whatever the run did."
+  (when directory
+    (dolist (name '("token" "askpass" "ssh"))
+      (ignore-errors (delete-file (format nil "~A/~A" directory name))))
+    (ignore-errors (sb-posix:rmdir directory))))
+
+(defun plan-with-ssh-shim (plan directory)
+  "PLAN with DIRECTORY readable, executable, and first on the sandbox's PATH."
+  (if (null directory)
+      plan
+      (revised-launch-plan
+       plan
+       :filesystem (append (launch-plan-filesystem plan)
+                           (list (make-path-rule :read-execute directory t)))
+       :environment
+       (loop for entry in (launch-plan-environment plan)
+             collect (if (and (> (length entry) 5) (string= "PATH=" entry :end2 5))
+                         (format nil "PATH=~A:~A" directory (subseq entry 5))
+                         entry)))))
+
 (defun call-with-broker (plan function &key program)
   "Run FUNCTION on PLAN, with the broker its policy asked for reachable.
 
@@ -669,7 +835,8 @@ tokens are revoked."
         (brokered (and (launch-plan-proxy plan) (launch-plan-broker plan)))
         ;; What was written for this run, so that it can be removed even when the
         ;; command ends badly.
-        (written '()))
+        (written '())
+        (shim-directory nil))
     (if (and (null credentials) (null brokered))
         (funcall function plan)
         (let* ((broker (start-broker (launch-plan-broker plan) :program program))
@@ -693,10 +860,21 @@ tokens are revoked."
                                                   file)))
                       (tokens (loop for (request . token) in minted
                                     for variable = (credential-request-variable request)
-                                    when variable collect (cons variable token))))
+                                    when variable collect (cons variable token)))
+                      ;; An ssh credential is spent by a program rather than read
+                      ;; from a variable, so what the sandbox gets is an ssh of
+                      ;; its own, first on its PATH.
+                      (shim (loop for (request . token) in minted
+                                  when (credential-request-ssh-user request)
+                                    return (write-ssh-shim token))))
                  ;; With no credentials there are no tokens, and the certificate is
                  ;; still the point: the sandbox has to trust the broker to speak
                  ;; TLS through it at all.
-                 (funcall function (plan-with-broker plan broker tokens rendered)))
+                 (setf shim-directory shim)
+                 (funcall function
+                          (plan-with-ssh-shim
+                           (plan-with-broker plan broker tokens rendered)
+                           shim)))
+            (remove-ssh-shim shim-directory)
             (remove-credential-files written)
             (stop-broker broker))))))

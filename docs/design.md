@@ -58,7 +58,8 @@ made effective. Scute never applies file capabilities to sandbox children.
 11. In the child, arm `PR_SET_PDEATHSIG`, clear capabilities, set
     `no_new_privs`, and install seccomp.
 12. Enforce the ruleset with `landlock_restrict_self`, which requires
-    `no_new_privs`, and `execve` the command.
+    `no_new_privs`, close every descriptor but the standard three and the one
+    the child reports failures on, and `execve` the command.
 13. Forward signals, consume audit events, decode wait status, and unwind every
     cgroup, BPF, pipe, and process resource in reverse acquisition order.
 
@@ -361,6 +362,66 @@ One right is deliberately left ungoverned in v0: `LANDLOCK_ACCESS_FS_IOCTL_DEV`
 an interactive shell nobody can run is not a useful sandbox. Device `ioctl` is
 therefore out of v0's scope, stated here rather than discovered later.
 
+Two `ioctl` requests are refused all the same, and by seccomp rather than by
+Landlock, because the descriptor they act on is one Landlock never sees.  A
+sandboxed command inherits the terminal it was started from; `TIOCSTI` pushes
+characters into that terminal's input queue, and the shell that reads them back
+once the command exits runs them as though they had been typed.  That is an
+escape from the sandbox into the session around it, and no filesystem rule can
+close it -- Landlock's `ioctl` right is checked when a device is opened, and
+this one was inherited.  `ioctl` carries its request number in a register, so
+`TIOCSTI` and `TIOCLINUX` are refused by an argument test and every other
+request, `tcgetattr` and `tcsetattr` among them, is untouched.  Linux 6.2 can
+disable `TIOCSTI` for a whole machine and several distributions do, but Scute
+supports 5.13 and a boundary that holds only where the host already closed the
+hole is not a boundary.
+
+An open descriptor is authority that no rule in the policy governs, because
+Landlock decides what may be opened and says nothing about what already is.  The
+descriptor need not even be Scute's: `exec 9</etc/shadow; scute run ...` hands
+the sandbox a readable file no policy names and no policy could take away.  So
+the child closes everything above standard input, output and error before it
+execs -- one `close_range`, after the seccomp listener has been handed over and
+before the command exists.  The status pipe is the single exception, kept until
+`execve` closes it, because until then it is the only way a failure has of being
+reported as anything but an exit code.
+
+A sandbox reaches no Unix socket the host already had.  Landlock ABI 9's
+`RESOLVE_UNIX` is handled and granted by no ordinary path rule, not even a grant
+of `/`, because the sockets on a machine include the session bus, the display
+server, and the credential broker's own control API -- and a sandbox that could
+reach the last of those could ask for the secrets the whole arrangement exists
+to withhold.
+
+One kind of rule grants it, for the path it names and nothing else:
+`connect`.  It is how a sandbox reaches an ssh-agent held outside it, which is
+what lets an agent push to a forge without the private key ever being inside.
+Three things keep it narrow: it needs `unix-sockets` to be on, since a sandbox
+that may not create a Unix socket cannot connect to one; the path must be a
+socket rather than a directory, so a rule cannot sweep up everything in a runtime
+directory; and a rule covering the broker's control socket is refused outright.
+
+The token for such a credential never enters the sandbox's environment.  An agent
+decides what its own subprocesses inherit -- codex hands its shells a core set
+carrying HOME and PATH and little else -- so a credential in a variable reaches
+the agent and stops there, and the git it runs has none.  What the sandbox gets
+instead is an ssh of its own: a few lines written for the run, first on PATH,
+which answer the bastion's password prompt from a file readable only inside the
+sandbox.  PATH is the one variable that always survives, because a shell without
+one is no use to anybody.  The shim, the askpass and the token go away when the
+run ends.
+
+Port 22 is the one other port the redirect touches, and only when a policy has an
+ssh credential.  An ssh key cannot be swapped into a header on the way past, so
+the broker keeps it and answers ssh itself; sending the sandbox's port 22 to that
+bastion is what lets an agent use the remote it already has rather than being
+told to address the broker.  The rewrite makes the sandbox's own host-key check
+meaningless -- it believes it is talking to the upstream -- so the check moves to
+the broker, which authenticates the real host against its own known_hosts.  A
+plan that asks for this without the redirect is refused rather than run: port 22
+would otherwise reach the real host and offer it a password it has never heard
+of.
+
 ## Credential brokering
 
 A sandbox that may call an API needs that API's key, and an environment filter
@@ -368,6 +429,15 @@ cannot help: the key is exactly what the command was given on purpose. The
 containment that works is a broker — an HTTPS proxy holding the real secret,
 handing out destination-locked opaque tokens, and swapping one for the other on
 each request. KeyFence is such a broker.
+
+The broker is a service Scute attaches to, never one a run brings with it.  That
+is a decision rather than an optimisation: a process holding credentials has a
+lifetime of its own, the certificate authority a sandbox trusts should not change
+between runs, and a broker started per run is both a second listener on the ports
+a service already holds and a process in the cgroup Scute has to delegate to its
+child -- which a cgroup holding anything but Scute cannot do.  A policy needing a
+broker where none answers is refused, with the systemctl line that fixes it;
+`--broker-path` is for hosts with no service to attach to.
 
 What Scute contributes is the part a proxy cannot do for itself. `HTTPS_PROXY`
 is a convention; a command is free to ignore it. Under a policy naming a proxy,

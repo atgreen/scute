@@ -66,7 +66,12 @@
         (make-watched-syscall "socket" nil :flags-argument 0 :access :unix-socket)
         ;; Nor is this: where the command tried to connect, which is what an
         ;; address allowlist has to name and nobody wants to write by hand.
-        (make-watched-syscall "connect" nil :flags-argument 1 :access :connect))
+        (make-watched-syscall "connect" nil :flags-argument 1 :access :connect)
+        ;; Nor this, and it is not even allowed: a command asking for a user
+        ;; namespace of its own is refused either way, and the notification is
+        ;; how Scute learns that the refusal it is about to be blamed for was
+        ;; an agent trying to sandbox itself.
+        (make-watched-syscall "unshare" nil :access :nested-sandbox))
   "What a learning run listens for.
 
 Not openat2: its flags live in a struct in the target's memory rather than in a
@@ -89,15 +94,27 @@ enabled explicitly for permissive policy learning; audit and explanation pass th
          (let ((refuse (scmp-act-errno +eperm+))
                (watched '()))
            (dolist (name (denied-syscall-names))
-             (let ((number (cffi:foreign-funcall "seccomp_syscall_resolve_name"
-                                                 :string name :int)))
-               (unless (<= number +scmp-error+)
-                 (cffi:foreign-funcall "seccomp_rule_add" :pointer context
-                                       :uint32 refuse :int number
-                                       :unsigned-int 0 :int))))
+             ;; Except the ones a watching run notifies on instead. A syscall
+             ;; may not be both refused and notified by one filter, and these
+             ;; end up refused all the same: the answer is written by the
+             ;; supervisor rather than by the kernel, and is the same EPERM.
+             (unless (member name +nested-sandbox-syscalls+ :test #'string=)
+               (let ((number (cffi:foreign-funcall "seccomp_syscall_resolve_name"
+                                                   :string name :int)))
+                 (unless (<= number +scmp-error+)
+                   (cffi:foreign-funcall "seccomp_rule_add" :pointer context
+                                         :uint32 refuse :int number
+                                         :unsigned-int 0 :int)))))
            (unless unix-sockets (deny-unix-domain-sockets context))
            (unless ipv6 (deny-ipv6-sockets context))
-           (deny-nested-user-namespaces context)
+           (deny-nested-user-namespaces context +scmp-act-notify+)
+           (deny-terminal-injection context)
+           (let ((number (cffi:foreign-funcall "seccomp_syscall_resolve_name"
+                                               :string "clone" :int)))
+             (unless (<= number +scmp-error+)
+               (push (cons number (make-watched-syscall "clone" nil
+                                                        :access :nested-sandbox))
+                     watched)))
            (dolist (syscall +watched-syscalls+)
              (let ((number (cffi:foreign-funcall "seccomp_syscall_resolve_name"
                                                  :string (watched-syscall-name syscall)
@@ -137,6 +154,7 @@ about to be created counts: its directory is what governs it."
 (defstruct (observations (:constructor make-observations (watched)))
   "What a learning run saw: paths, and the access each was reached for with."
   (watched nil :read-only t)          ; syscall number -> watched-syscall
+  (nested-sandbox nil)                ; it tried to sandbox itself inside this one
   (paths (make-hash-table :test #'equal) :read-only t)
   (unix-sockets nil)                  ; the command asked for one
   (connections (make-hash-table :test #'equal) :read-only t)
@@ -337,7 +355,9 @@ blocked on a notification nobody will answer would otherwise hang for ever."
                         (record-connection
                          observations
                          (read-target-connection
-                          from (cffi:mem-ref request :uint64 40) scratch))))))
+                          from (cffi:mem-ref request :uint64 40) scratch))))
+                     (:nested-sandbox
+                      (setf (observations-nested-sandbox observations) t))))
                   (error () (incf (observations-skipped observations))))
                  ;; Recording is best-effort, and failing at it must not fail the
                  ;; syscall.  An error here used to unwind out of this loop, which
@@ -372,10 +392,17 @@ blocked on a notification nobody will answer would otherwise hang for ever."
                                   :read)))
                         (lambda () (notification-valid-p listener request))))
                    (error () (incf (observations-skipped observations))))
+                 ;; Answering: let it through, unless this is one of the calls
+                 ;; that is only notified so that it can be refused here.  A
+                 ;; response carries either a continuation or an error, never
+                 ;; both, and the error is the one the filter would have given
+                 ;; had it refused the call itself.
                  (dotimes (index response-size)
                    (setf (cffi:mem-aref response :uint8 index) 0))
-                 (setf (cffi:mem-ref response :uint64 0) (cffi:mem-ref request :uint64 0)
-                       (cffi:mem-ref response :uint32 20) +user-notif-flag-continue+)
+                 (setf (cffi:mem-ref response :uint64 0) (cffi:mem-ref request :uint64 0))
+                 (if (and syscall (eq :nested-sandbox (watched-syscall-access syscall)))
+                     (setf (cffi:mem-ref response :int32 16) (- +eperm+))
+                     (setf (cffi:mem-ref response :uint32 20) +user-notif-flag-continue+))
                  (cffi:foreign-funcall "seccomp_notify_respond"
                                        :int listener :pointer response :int)))
           (cffi:foreign-free scratch)
@@ -598,6 +625,29 @@ Answers an alist of path to the accesses that were not permitted."
           do (dolist (access accesses)
                (record-observation observations nil path access)))
     (learned-rules observations directory)))
+
+(defun report-nested-sandbox (stream)
+  "Say that the command was refused a sandbox of its own, and what to do.
+
+Worth saying because the command's own account of it is wrong.  A tool that
+wraps what it runs in bubblewrap -- codex does, for every command the model
+produces -- reports the refusal as \"the kernel does not allow non-privileged
+user namespaces\" and names a sysctl to set.  Unprivileged user namespaces are
+enabled: Scute made several on the way to starting this command.  What refused
+the inner sandbox was Scute's own seccomp filter, and that is deliberate, since
+a command able to build namespaces is a command able to rearrange the mounts it
+was confined with."
+  (format stream
+          "~&scute: the command tried to build a sandbox of its own and was refused.~%~
+           ~&       Scute's filter did that, not your kernel -- so any advice the~%~
+           ~&       command gave about kernel.unprivileged_userns_clone is a wrong~%~
+           ~&       guess at why it failed.  Scute is the containment; turn the~%~
+           ~&       inner one off:~%~
+           ~&~%~
+           ~&         codex --dangerously-bypass-approvals-and-sandbox~%~
+           ~&~%~
+           ~&       Anything else that wraps its commands in bubblewrap needs the~%~
+           ~&       same, by whatever name that tool gives the flag.~%"))
 
 (defun report-refusals (refused directory stream)
   "Say what was refused, and what would allow it."

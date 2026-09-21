@@ -72,6 +72,45 @@ notice them failing to assemble."
           (ignore-errors (delete-file (format nil "~A/~A" workspace name))))
         (ignore-errors (sb-posix:rmdir workspace))))))
 
+(deftest test-no-descriptor-reaches-the-command
+  "A descriptor is authority no policy governs.  Landlock decides what may be
+opened; a file that is already open was decided about somewhere else, possibly
+in the shell that ran scute -- \"exec 9</etc/shadow; scute ...\" hands the
+sandbox a readable file that no rule in the policy names and that no rule could
+take away.  So the child closes everything above the standard three before it
+becomes the command.
+
+The leak here is made on purpose, without O_CLOEXEC, because that is the case a
+flag cannot catch: it was opened by somebody else."
+  (let* ((leaked (sb-posix:open "/etc/hostname" sb-posix:o-rdonly))
+         (directory (scratch-pathname "fds"))
+         (listing (format nil "~A/fds" directory)))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist (format nil "~A/" directory))
+           (let ((result (call-scute
+                          'run-namespaced-command
+                          (list "/bin/sh" "-c"
+                                (format nil "ls /proc/self/fd > ~A" listing))
+                          :filesystem +unrestricted+)))
+             (check (eql 0 (call-scute 'sandbox-result-exit-code result))
+                    "the command could not list its own descriptors: ~S" result))
+           (let ((open (with-open-file (stream listing :direction :input)
+                         (loop for line = (read-line stream nil)
+                               while line collect line))))
+             ;; ls holds one descriptor of its own on the directory it is
+             ;; reading, so what is checked is the leak rather than the count.
+             (check (not (member (princ-to-string leaked) open :test #'string=))
+                    "descriptor ~D reached the command, which the policy never ~
+                     named: ~S" leaked open)
+             (dolist (standard '("0" "1" "2"))
+               (check (member standard open :test #'string=)
+                      "the command lost its standard descriptor ~A: ~S"
+                      standard open))))
+      (ignore-errors (sb-posix:close leaked))
+      (ignore-errors (delete-file listing))
+      (ignore-errors (sb-posix:rmdir directory)))))
+
 (deftest test-nothing-is-left-behind-when-a-launch-fails
   "Every way a launch can fail leaves the supervisor as it was: no descriptors,
 no unreaped children, and no cgroup."

@@ -6,6 +6,32 @@
 
 (in-package #:scute/tests)
 
+(deftest test-ssh-is-redirected-to-the-bastion-only-when-asked
+  "Port 22 is refused by a proxied sandbox -- an HTTP proxy cannot speak ssh, and
+delivering it there would leave somebody debugging a timeout.  With a bastion to
+send it to, the same port is rewritten instead, which is what lets an agent keep
+the remote it already has: git@github.com, arriving where the key is.
+
+The program is read here rather than loaded: building it needs no privileges,
+and what is being checked is the decision, not the kernel's opinion of it."
+  (let* ((proxy (call-scute 'parse-endpoint "127.0.0.1:10210" nil))
+         (bastion (call-scute 'parse-endpoint "127.0.0.1:10211" nil))
+         (without (format nil "~S" (call-scute 'egress-redirect-forms proxy)))
+         (with (format nil "~S" (call-scute 'egress-redirect-forms proxy bastion)))
+         ;; 22 and 10211 as connect4 presents them: sixteen bits, byte-swapped.
+         (ssh-port (call-scute 'network-port-word 22))
+         (bastion-port (call-scute 'network-port-word 10211)))
+    (check (not (search (princ-to-string ssh-port) without))
+           "a policy with no ssh credential still says something about port 22")
+    (check (search (princ-to-string ssh-port) with)
+           "the redirect does not mention port 22 even with a bastion to send it to")
+    (check (search (princ-to-string bastion-port) with)
+           "the redirect never names the bastion's port")
+    ;; And it still compiles to a program: forms that read well and will not
+    ;; verify are worse than no feature.
+    (check (nth-value 1 (call-scute 'compile-egress-redirect proxy bastion))
+           "the redirect with a bastion compiled to nothing")))
+
 (deftest test-the-guard-compiles
   "The BPF program is compiled from Lisp by Whistler, with no kernel involved,
 so whether it compiles is answerable on any machine."

@@ -1,0 +1,48 @@
+# What is true of any real program on a Linux host, and nothing more.
+#
+# Not a policy to run. It names no command and grants nothing about your work:
+# it is the floor the other policies stand on, and they reach it by name.
+#
+#     include = ["base"]
+#
+# Why it exists: every policy for a real program needs /usr, /etc, /proc, a few
+# device nodes and a place to put a temporary file, and every one of those was
+# found the same way -- a command failing deep inside a library, one path at a
+# time. Repeating the list in each policy means a gap found in one is fixed in
+# one. Naming it here means it is fixed everywhere, and that what a policy
+# itself says is only what is true of its own program.
+#
+# Nothing here is hidden. An included file is named by --dry-run beside the
+# policy that asked for it, and "scute check --policy NAME PATH" answers for the
+# whole of what a policy ended up granting, however it got there.
+#
+# What is deliberately absent: the working directory. "." is the most
+# consequential line a policy has -- it is the difference between a sandbox that
+# can change your work and one that cannot -- so it is written out by each policy
+# that wants it rather than arriving from somewhere else. Network, limits and
+# credentials are absent for the same reason.
+#
+# A "?" before a path means "if this host has it".
+
+[filesystem]
+read-execute = [
+  "/usr",
+  "?/opt",                               # where a distribution or a vendor puts tools
+  "?/home/linuxbrew/.linuxbrew",         # homebrew on Linux
+  "?~/.local/bin",                       # pip, pipx, cargo install --root
+  "?~/bin",                              # where a hand-installed tool usually goes
+]
+read = [
+  "/etc",
+  "/proc",
+  "/dev/urandom",
+  "?/sys/devices/system/cpu/online",     # how many processors, for build parallelism
+  "?/sys/fs/cgroup",                     # how much memory, for the same reason
+  "?/sys/kernel/mm/transparent_hugepage/enabled",      # read by several language
+  "?/sys/kernel/mm/transparent_hugepage/hpage_pmd_size",  # runtimes as they start
+]
+read-write = [
+  "/dev/null",
+  "/dev/tty",                            # the terminal, for an interactive session
+  "/tmp",
+]

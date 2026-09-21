@@ -19,6 +19,34 @@
            exit 37~%"
           report +namespaces+))
 
+(deftest test-a-file-with-capabilities-cannot-be-exec-ed-and-says-so
+  "A process may not exec a file whose permitted capabilities lie outside its own
+bounding set, and a sandboxed child's bounding set is empty by design.  The
+kernel answers EPERM, which reads as a filesystem permission and is not one: the
+policy may grant the path every right there is and the exec still fails.
+
+The packaged Scute is such a file, which is how anyone meets this -- so is ping
+on most hosts, and newgidmap.  Where this host has none, the check says so rather
+than passing quietly."
+  (let ((carrier (find-if (lambda (path)
+                            (and (probe-file path)
+                                 (ignore-errors
+                                  (call-scute 'file-capabilities-p path))))
+                          '("/usr/bin/newgidmap" "/usr/bin/newuidmap"
+                            "/usr/bin/ping" "/usr/sbin/ping"))))
+    (if (null carrier)
+        (format *error-output*
+                "~&note: no file with capabilities on this host, so the exec ~
+                 refusal was not exercised~%")
+        (let ((refusal (nth-value 1 (ignore-errors
+                                     (call-scute 'run-namespaced-command
+                                                 (list carrier)
+                                                 :filesystem +unrestricted+)))))
+          (check refusal "~A was exec'd by a sandbox, which cannot be" carrier)
+          (check (and refusal (search "carries file capabilities"
+                                      (princ-to-string refusal)))
+                 "the refusal blames something else: ~A" refusal)))))
+
 (deftest test-namespace-boundary
   "The child is PID 1 of fresh namespaces, single-tasked, unrouted, and
 stripped of every capability, and its exit status arrives intact."

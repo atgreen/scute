@@ -171,7 +171,17 @@ a policy that does not name one -- which is most of them."
 (defun run-command (cmd)
   (let ((command (clingon:command-arguments cmd)))
     (when (and (null command) (not (policy-names-a-command-p cmd)))
-      (usage-error "no command given; see scute run --help"))
+      ;; A policy that names no command is usually one meant to be included by
+      ;; another -- the shipped base is exactly that -- and "no command given"
+      ;; sends whoever ran it looking for a mistake on their own command line.
+      (usage-error
+       (if (clingon:getopt cmd :policy)
+           (format nil "~A names no command of its own, so one has to be given: ~
+                        scute run --policy ~:*~A -- COMMAND ...~@
+                        A policy without a [command] is usually one for another ~
+                        policy to include."
+                   (clingon:getopt cmd :policy))
+           "no command given; see scute run --help")))
     ;; Before anything is built: a plan needing a cgroup of Scute's own is
     ;; better re-executed in one than refused with instructions.  This happens
     ;; first so that the plan is compiled by the process that will enact it --
@@ -238,8 +248,15 @@ a policy that does not name one -- which is most of them."
                      (report-refusals refused (launch-plan-directory plan)
                                       *error-output*)
                      (format *error-output*
-                             "~&scute: the policy allowed everything the command ~
+                             "~&scute: the policy allowed every path the command ~
                               reached for~%"))
+                 ;; Not a path, and not something a policy could grant, so it
+                 ;; is said after the refusals rather than among them: the
+                 ;; command asked for a sandbox of its own and was refused by
+                 ;; the filter, which is the one failure whose own error
+                 ;; message sends people to change a sysctl for no reason.
+                 (when (observations-nested-sandbox observations)
+                   (report-nested-sandbox *error-output*))
                  ;; A report that saw less than it claims is the other way to be
                  ;; wrong, so what was dropped is said out loud.
                  (let ((skipped (observations-skipped observations)))
@@ -254,6 +271,17 @@ a policy that does not name one -- which is most of them."
                (when (sandbox-result-oom-killed-p result)
                  (format *error-output*
                          "~&scute: the command was killed by its memory limit~%"))
+               (when (sandbox-result-wrong-architecture-p result)
+                 (format *error-output*
+                         "~&scute: the command was killed for making a system call from ~
+                          an architecture~%~
+                          ~&       the sandbox does not cover -- a 32-bit or x32 binary, ~
+                          most likely.~%~
+                          ~&       The filter is built for this machine's own ~
+                          architecture and refuses~%~
+                          ~&       every other one outright, rather than letting calls ~
+                          it cannot read~%~
+                          ~&       go past unexamined.~%"))
                (when (sandbox-result-timed-out result)
                  (format *error-output*
                          "~&scute: the command ran past its time limit and was stopped~%"))

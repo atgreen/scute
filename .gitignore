@@ -22,3 +22,6 @@ systems/
 *.db
 .beads-credential-key
 .beads/proxieddb/
+
+# The product document, kept local rather than published with the tree
+/docs/prd.md
