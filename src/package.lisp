@@ -131,6 +131,9 @@
            ;; Resource limits
            #:discover-cgroup2
            #:delegated-root
+           #:*sandbox-cgroup*
+           #:cgroup-id
+           #:plan-needs-sandbox-cgroup-p
            #:create-sandbox-cgroup
            #:move-process-to-cgroup
            #:read-cgroup-events
@@ -193,14 +196,13 @@
            #:optional-path-p
            #:declared-path
            #:call-with-broker
-           #:start-broker
+           #:attach-broker
            #:stop-broker
            #:mint-token
            #:revoke-tokens
            #:broker-certificate
            #:broker-certificate-path
            #:broker-answering-p
-           #:broker-helper
            #:broker-environment
            #:broker-tokens
            #:broker-error

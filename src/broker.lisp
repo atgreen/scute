@@ -57,30 +57,10 @@ and the broker cannot know they belong together unless it is told -- so every
 token minted for a run carries the same task id, and every event about those
 tokens carries it back.")
 
-(defstruct (broker (:constructor %make-broker
-                       (settings helper certificate &optional directory)))
+(defstruct (broker (:constructor %make-broker (settings certificate)))
   (settings nil :read-only t)
-  (helper nil :read-only t)        ; NIL when we attached to one already running
-  (directory nil :read-only t)     ; private runtime directory owned by this run
   (certificate nil :read-only t)   ; the CA the sandbox has to trust
   (tokens nil))                    ; minted here, revoked when the run ends
-
-(defparameter +broker-programs+ '((:keyfence . "keyfence"))
-  "The brokers Scute knows how to drive, and the program each one is.
-
-A closed set on purpose.  A policy selects a broker by name; it cannot give a
-command line.  A policy travels with the code being sandboxed, and one that
-could name an arbitrary program to run on the host would be a way to run
-anything at all -- so what a policy can do is ask for the broker Scute already
-knows, started with arguments Scute writes.")
-
-(defun broker-program (settings)
-  (or (cdr (assoc (broker-settings-name settings) +broker-programs+))
-      (setup-error :start-broker
-                   :detail (format nil "no broker named ~A"
-                                   (broker-settings-name settings)))))
-
-;;── Secrets, on the supervisor's side of the boundary ──────────────────────────
 
 (defun random-hex (bytes)
   "BYTES of randomness from the kernel, in hex."
@@ -179,154 +159,43 @@ the caller falls back to looking where brokers usually put it."
             path)))
     (error () nil)))
 
-(defparameter +broker-remedy+
-  "KeyFence is how a sandbox uses a credential without holding it, and Scute's
-default network goes through it.  Install it -- https://github.com/atgreen/keyfence
--- and run it as a service, which is where credentials belong:
-
-    systemctl --user enable --now keyfence.socket keyfence-control.socket
-
-A sandbox that needs no network at all needs no broker either, and says so:
-
-    [network]
-    mode = \"none\""
-  "What to do about a missing broker.  Said in one place, so every refusal carries
-the same instructions.")
-
-(defun broker-executable (program)
-  "PROGRAM, resolved, or a refusal that says what to install.
-
-\"command not found: keyfence\" is true and useless: it names something the reader
-has never heard of, at a moment when they were running a sandbox and not a broker."
-  (handler-case (resolve-executable program)
-    (scute-error ()
-      (setup-error :start-broker
-                   :detail (format nil "~A is not installed.~%~%~A"
-                                   program +broker-remedy+)))))
-
-(defun broker-last-words (log)
-  "The last thing the broker said before it failed to answer, or NIL.
-
-A broker that will not start has almost always written the reason down -- a port
-already in use, a certificate it cannot read -- and that line is the answer.
-Scute used to guess instead, and its guess named the one cause it knew about,
-which sent people to upgrade a KeyFence that was already new enough."
-  (handler-case
-      (with-open-file (stream log :direction :input :if-does-not-exist nil)
-        (when stream
-          (let ((last nil))
-            (loop for line = (read-line stream nil)
-                  while line
-                  do (let ((line (string-trim '(#\Space #\Tab #\Return) line)))
-                       (when (plusp (length line))
-                         ;; Without the syslog-style timestamp the line leads
-                         ;; with, which says nothing here and crowds out what does.
-                         (setf last (if (and (> (length line) 20)
-                                             (digit-char-p (char line 0))
-                                             (char= #\Space (char line 19)))
-                                        (subseq line 20)
-                                        line)))))
-            last)))
-    (error () nil)))
-
 (defparameter +no-broker-remedy+
   "A broker is a service, not something a run brings with it: enable it once and
        every sandbox after that attaches to the same one.
 
          systemctl --user enable --now keyfence.socket keyfence-control.socket
 
-       \"scute doctor\" says whether this host has one. For a run that must bring
-       its own -- a container, a test host with no systemd -- name the program
-       with --broker-path and Scute will start it."
+       \"scute doctor\" says whether this host has one. Where there is no service
+       to attach to -- a container, a host without systemd -- start one beside
+       the sandbox with --with, which takes the command line the broker needs."
   "Said when no broker is answering and a policy needs one.")
 
-(defun start-broker (settings &key program
-                                  (certificate (broker-certificate-path)))
-  "Attach to the broker this host runs, or start the one a caller named.
+(defun attach-broker (settings &key (certificate (broker-certificate-path)))
+  "The broker this host runs, or a refusal naming the way to have one.
 
-Attaching is the ordinary case and the better one.  A broker holds credentials,
-so it is a service with a lifetime of its own: one already running has the CA the
-agent's runtimes already trust, and the tokens it mints outlive nothing.  Scute
-starting one per run gave every sandbox a fresh CA, put a second listener on
-ports the service already held, and left the broker inside the cgroup Scute needs
-to delegate.  So a run attaches, and says so plainly when there is nothing to
-attach to."
+Scute never starts a broker.  A process holding credentials is a service with a
+lifetime of its own: one already running has the certificate authority the
+agent's runtimes already trust, its tokens outlive nothing, it is not a second
+listener on ports a service already holds, and it is not a stranger in the
+cgroup Scute has to delegate to its child.  Every one of those was a bug while
+Scute started one per run.
+
+A host with no service starts one beside the sandbox instead -- --with is for
+exactly that, and takes the command line the broker needs."
   (let ((control (broker-settings-control-socket settings)))
-    (when (probe-file control)
-      (identify-broker control)
-      (return-from start-broker
-        (%make-broker settings nil (or (fetch-broker-certificate control) certificate))))
-    (unless program
+    (unless (probe-file control)
       (setup-error :no-broker
                    :detail (format nil "no broker is answering at ~A, and this ~
                                         policy needs one.~%       ~A"
                                    control +no-broker-remedy+)))
-    (let* ((executable (broker-executable (or program (broker-program settings))))
-           (directory (create-broker-runtime-directory))
-           (control (concatenate 'string directory "control.sock"))
-           (settings (make-broker-settings (broker-settings-name settings)
-                                          (broker-settings-proxy-port settings) control))
-           (log (concatenate 'string directory "broker.log"))
-           (helper nil)
-           (completed nil))
-      (unwind-protect
-           (progn
-             (setf helper (start-helper-arguments
-                            (list executable
-                                  "-proxy" (format nil "127.0.0.1:~D" (broker-settings-proxy-port settings))
-                                  "-api" (concatenate 'string "unix:" control)
-                                  "-api-allow-uid" (write-to-string (sb-posix:geteuid)))
-                            nil log))
-             (unless (loop repeat 150
-                           thereis (and (probe-file control) (broker-answering-p control))
-                           do (sleep 1/10))
-               (let ((complaint (broker-last-words log)))
-                 (setup-error
-                  :start-broker
-                  :detail
-                  (if complaint
-                      (format nil "broker did not answer at ~A. Its last words were ~
-                                   \"~A\". The whole of it is in ~A~@[~%~A~]"
-                              control complaint log
-                              ;; The common case by far, and the remedy is not
-                              ;; the one the message suggests on its own: a
-                              ;; broker is already running, and Scute would
-                              ;; rather attach to it than start a second.
-                              (when (search "address already in use" complaint)
-                                (format nil "       A broker is already listening ~
-                                             there. Scute attaches to one that ~
-                                             offers a Unix control socket rather ~
-                                             than starting another, so give it ~
-                                             one -- for the packaged KeyFence, ~
-                                             enable keyfence-control.socket and ~
-                                             restart the service after the socket ~
-                                             is up.")))
-                      (format nil "broker did not answer at ~A and wrote nothing ~
-                                   to ~A; a KeyFence too old for Unix control ~
-                                   would do that"
-                              control log)))))
-             (identify-broker control)
-             (let ((broker (%make-broker settings helper
-                                         (or (fetch-broker-certificate control) certificate)
-                                         directory)))
-               (setf completed t)
-               broker))
-        (unless completed
-          (when helper (stop-helper helper))
-          ;; Keep the log for the startup error, but never a stale control socket.
-          (ignore-errors (delete-file control)))))))
+    (identify-broker control)
+    (%make-broker settings (or (fetch-broker-certificate control) certificate))))
 
 (defun stop-broker (broker)
-  "Revoke what this run minted, and stop the broker if this run started it.
-A broker we attached to is somebody else's process and outlives the sandbox;
-its tokens are still ours to revoke."
+  "Revoke what this run minted.  The broker is somebody else's process: it was
+running before this sandbox and goes on after it, and the tokens are the only
+part of it that belonged to the run."
   (revoke-tokens broker)
-  (when (broker-helper broker)
-    (stop-helper (broker-helper broker)))
-  (when (broker-directory broker)
-    (dolist (name '("control.sock" "broker.log"))
-      (ignore-errors (delete-file (concatenate 'string (broker-directory broker) name))))
-    (ignore-errors (sb-posix:rmdir (broker-directory broker))))
   ;; A certificate fetched for this run goes with it. One found where the broker
   ;; keeps it belongs to the broker, and is left alone.
   (let ((certificate (namestring (broker-certificate broker))))
@@ -372,6 +241,12 @@ A request naming a ref never reads a secret at all: the broker already holds it,
 Scute says which one, and the plaintext is in one process rather than two."
   (let* ((reference (credential-request-reference request))
          (ssh-user (credential-request-ssh-user request))
+         ;; Built as a string rather than conditionalised inside the format
+         ;; string, for the reason the ssh field below gives.
+         (cgroup-field (let ((id (and *sandbox-cgroup* (cgroup-id *sandbox-cgroup*))))
+                         (if id
+                             (format nil ",~A:~D" (json-escape "cgroup_id") id)
+                             "")))
          (secret (unless reference
                    (read-secret (credential-request-secret-file request)
                                 (credential-request-name request))))
@@ -387,7 +262,7 @@ Scute says which one, and the plaintext is in one process rather than two."
                         (format nil "~A:~A," (json-escape "ssh_username")
                                 (json-escape ssh-user))
                         ""))
-         (body (format nil "{~A:~A,~A~A:[~{~A~^,~}],~A:~D,~A:~A~@[,~A:~A~]}"
+         (body (format nil "{~A:~A,~A~A:[~{~A~^,~}],~A:~D,~A:~A~@[,~A:~A~]~A}"
                        (json-escape (cond (reference "credential_ref")
                                           (ssh-user "ssh_private_key")
                                           (t "credential")))
@@ -400,7 +275,8 @@ Scute says which one, and the plaintext is in one process rather than two."
                        (json-escape (format nil "scute ~A"
                                             (credential-request-name request)))
                        (and *run-identity* (json-escape "task_id"))
-                       (and *run-identity* (json-escape *run-identity*))))
+                       (and *run-identity* (json-escape *run-identity*))
+                       cgroup-field))
          (response (control-request broker "POST" "/tokens" :body body)))
     (unless (member (http-response-status response) '(200 201))
       (broker-error "the broker refused to issue a token for ~A: ~D ~A"
@@ -526,7 +402,7 @@ look identical from here and call for different fixes."
         (values nil (format nil "no broker is answering at ~A" control))
         (handler-case
             (let ((response (control-request
-                             (%make-broker settings nil nil)
+                             (%make-broker settings nil)
                              "GET" "/credentials" :seconds 5)))
               (case (http-response-status response)
                 ((200) (values (json-string-list (http-response-body response)
@@ -588,7 +464,7 @@ it, and a sandbox that could read that could sign for anything."
    :filesystem (append (launch-plan-filesystem plan)
                        (let ((certificate (probe-file (broker-certificate broker))))
                          (unless certificate
-                           (setup-error :start-broker
+                           (setup-error :broker-certificate
                                         :detail (format nil "the broker's CA ~
                                                              certificate is not at ~A"
                                                         (broker-certificate broker))))
@@ -819,7 +695,7 @@ Answers the directory holding it, which the caller grants and later removes."
                          (format nil "PATH=~A:~A" directory (subseq entry 5))
                          entry)))))
 
-(defun call-with-broker (plan function &key program)
+(defun call-with-broker (plan function)
   "Run FUNCTION on PLAN, with the broker its policy asked for reachable.
 
 Everything happens before the sandbox exists: the broker is found or started,
@@ -839,7 +715,16 @@ tokens are revoked."
         (shim-directory nil))
     (if (and (null credentials) (null brokered))
         (funcall function plan)
-        (let* ((broker (start-broker (launch-plan-broker plan) :program program))
+        (let* ((sandbox-cgroup
+                 ;; Made here rather than in run-launch-plan, because a token
+                 ;; can only be bound to a cgroup that already exists and
+                 ;; minting happens before the child does. run-launch-plan
+                 ;; takes this one instead of making a second.
+                 (when (plan-needs-sandbox-cgroup-p plan)
+                   (create-sandbox-cgroup (or (launch-plan-limits plan)
+                                              (make-resource-limits)))))
+               (*sandbox-cgroup* sandbox-cgroup)
+               (broker (attach-broker (launch-plan-broker plan)))
                (*broker* broker)
                (*run-identity* (new-run-identity))
                (*run-started* (rfc3339-now)))
@@ -877,4 +762,5 @@ tokens are revoked."
                            shim)))
             (remove-ssh-shim shim-directory)
             (remove-credential-files written)
-            (stop-broker broker))))))
+            (stop-broker broker)
+            (when sandbox-cgroup (delete-sandbox-cgroup sandbox-cgroup)))))))

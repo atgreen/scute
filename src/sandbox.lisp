@@ -516,6 +516,17 @@ copy of it and would write it a second time."
       (run-child resources))                ; never returns
     pid))
 
+(defun plan-needs-sandbox-cgroup-p (plan)
+  "Whether this plan is enacted in a cgroup of the sandbox's own.
+
+An address allowlist and a proxied network both need one to attach a guard to,
+whether or not the policy asked for any limits, and limits need one to be
+installed in at all."
+  (or (cgroup-limits-p (launch-plan-limits plan))
+      (launch-plan-allow plan)
+      (eq :proxied (launch-plan-network plan))
+      nil))
+
 (defun run-launch-plan (plan &key observe)
   "Enact PLAN: launch its command in the sandbox it describes and supervise it.
 
@@ -529,12 +540,11 @@ rules to enforce, while an explaining run has the caller's."
   (preflight plan)
   ;; Acquisition order follows the design's startup sequence, and every step is
   ;; unwound in reverse by the unwind-protects below.
-  (let ((cgroup (let ((limits (launch-plan-limits plan)))
-                  ;; An address allowlist needs a cgroup to attach its guard to,
-                  ;; whether or not the policy asked for any limits.
-                  (when (or (cgroup-limits-p limits) (launch-plan-allow plan)
-                            (eq :proxied (launch-plan-network plan)))
-                    (create-sandbox-cgroup (or limits (make-resource-limits))))))
+  (let* ((inherited *sandbox-cgroup*)
+         (cgroup (or inherited
+                     (when (plan-needs-sandbox-cgroup-p plan)
+                       (create-sandbox-cgroup (or (launch-plan-limits plan)
+                                                  (make-resource-limits))))))
         (guard nil)
         (udp-guard nil)
         (resources nil)
@@ -609,7 +619,9 @@ rules to enforce, while an explaining run has the caller's."
       (when resources (release-launch-resources resources))
       (when guard (detach-egress-guard guard))
       (when udp-guard (detach-egress-guard udp-guard))
-      (when cgroup (delete-sandbox-cgroup cgroup)))))
+      ;; Only what was made here is removed here.  A cgroup handed down was
+      ;; made by a caller that is still holding it, and is theirs to unwind.
+      (when (and cgroup (not inherited)) (delete-sandbox-cgroup cgroup)))))
 
 (defun run-namespaced-command (command &key filesystem directory)
   "Run COMMAND in the sandbox that FILESYSTEM describes.

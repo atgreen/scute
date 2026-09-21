@@ -12,6 +12,20 @@ entry is part of releasing rather than a courtesy afterwards.
 
 ### Security
 
+- Bind every token this run mints to the sandbox's own cgroup, so a token that
+  escapes the sandbox authenticates nothing. A `kf_` value is a bearer
+  credential on a loopback port: until now, a token written to a file the
+  policy let the agent write, echoed into output, or carried to another
+  terminal worked from anywhere on the host until its time to live ran out.
+  Scute makes the cgroup, so it can name it — the id KeyFence compares against
+  is the inode of the cgroup directory, which is what the kernel reports for
+  the socket a request arrives on. Requires a KeyFence that understands
+  `cgroup_id`; an older one ignores it and the token is unbound as before.
+
+  The run's cgroup is now made before its tokens are minted rather than when
+  the sandbox is launched, because a token can only be bound to a cgroup that
+  already exists. Whoever creates it removes it.
+
 - Refuse filesystem policies whose optional grants all disappear.
 - Deny IPv6 sockets in proxy and address-guarded runs, including observation.
 - Preserve Unix socket denials during audit and explanation.

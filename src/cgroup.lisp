@@ -50,6 +50,25 @@ in one place, so that every refusal carries it.")
 (defun cgroup-file (directory name)
   (format nil "~A/~A" directory name))
 
+(defvar *sandbox-cgroup* nil
+  "The cgroup made for this sandbox before the sandbox existed, or NIL.
+
+A token bound to a cgroup has to name one that already exists, and tokens are
+minted in the supervisor before the child is anywhere.  So the run's cgroup is
+made early, by whoever needs to name it, and RUN-LAUNCH-PLAN uses that one
+rather than making a second.  Whoever created it is the one that removes it.")
+
+(defun cgroup-id (directory)
+  "The kernel's own name for the cgroup at DIRECTORY: the inode of its directory.
+
+This is the number a socket carries.  The kernel records, on every socket, the
+cgroup of the process that created it, and hands it back through sock_diag as
+INET_DIAG_CGROUP_ID -- which is exactly this inode.  So a token KeyFence issued
+against this id can be presented by a process in this cgroup and by nothing
+else, and the sandbox is the only thing that will ever be in it."
+  (handler-case (sb-posix:stat-ino (sb-posix:stat directory))
+    (sb-posix:syscall-error () nil)))
+
 (defun cgroup-processes (directory)
   "The pids in DIRECTORY's cgroup."
   (with-open-file (stream (cgroup-file directory "cgroup.procs")
